@@ -146,7 +146,10 @@ const getPluginPrice = async function (selectedCode) {
 const completePayPalPayment = function () {
     jQuery("#ocm-paypal-div").hide().addClass('payment-completed');
     jQuery(".reset-payment-container").hide();
-    jQuery.post(ajaxurl, { 'action': 'ocm_make_payment' });
+    jQuery.post(ajaxurl, { 
+        'action': 'ocm_make_payment',
+        '_wpnonce': siteData.paymentNonce
+    });
 }
 
 var timerInitiated = 0;
@@ -168,9 +171,20 @@ const displayProgressBar = function () {
     timeoutId = setTimeout(function () {
         intervalId = setInterval(function () {
             const apiURL = siteData.progressUrl;
-            jQuery.get(apiURL, function (response) {
+            jQuery.ajax({
+                url: apiURL,
+                method: 'GET',
+                beforeSend: function(xhr) {
+                    xhr.setRequestHeader('X-WP-Nonce', siteData.restNonce);
+                },
+                success: function(response) {
 
-
+                // Display maintenance mode status
+                if (response.maintenanceMode) {
+                    jQuery('.maintenance-mode-indicator').show();
+                } else {
+                    jQuery('.maintenance-mode-indicator').hide();
+                }
 
                 renderMessage(response.text);
                 if (response.customNotice) {
@@ -321,8 +335,8 @@ const displayProgressBar = function () {
 
                 }
 
-
-            })
+                }
+            });
         }, 1000);
     }, 2000);
 };
@@ -457,8 +471,7 @@ jQuery(document).ready(function () {
           selected = selectedFolders.join(',');
 
         }
-        const backup_url = e.target.href + '&username=' + user_name + '&password=' + password + '&selected=' + selected;
-
+        
         jQuery('form .error.notice').remove();
 
         if (password.length < 4) {
@@ -472,7 +485,12 @@ jQuery(document).ready(function () {
             enableButtons();
             return false;
         }
-
+        
+        // Use AJAX to call the backup URL with proper parameters and nonce
+        const backup_url = e.target.href + '&username=' + encodeURIComponent(user_name) + '&password=' + encodeURIComponent(password) + '&selected=' + encodeURIComponent(selected);
+        const nonce = clickButton.hasClass('backup-button') ? siteData.backupNonce : siteData.restoreNonce;
+        const secure_backup_url = backup_url + '&_wpnonce=' + nonce;
+        
         if (clickButton.hasClass('restore-button')) {
             const bucketExistsUrl = siteData.bucketExistsUrl,
                 bucket_check_url = bucketExistsUrl.match(/\?/)
@@ -480,7 +498,13 @@ jQuery(document).ready(function () {
                     : bucketExistsUrl + '?username=' + user_name + '&password=' + password
                 ;
 
-            jQuery.get(bucket_check_url, function (data) {
+            jQuery.ajax({
+                url: bucket_check_url,
+                method: 'GET',
+                beforeSend: function(xhr) {
+                    xhr.setRequestHeader('X-WP-Nonce', siteData.restNonce);
+                },
+                success: function(data) {
                 if ('false' === data) {
                     jQuery('.form-table').append("<div class=\"error notice\"><p>We could not find a backup for this email and password combination. Please try again or if your backup was created more than 24 hours ago, you need to re-create it as it's been deleted.</p></div>");
                     enableButtons();
@@ -505,11 +529,17 @@ jQuery(document).ready(function () {
                     displayProgressBar();
                     displayDecreasingTimer();
 
-                    jQuery.get(backup_url, function () { });
+                    jQuery.get(secure_backup_url, function (data) {
+                        // Success - the restore process has started
+                    }).fail(function(xhr, status, error) {
+                        // Handle errors
+                        enableButtons();
+                    });
 
 
                 }
-            })
+                }
+            });
         } else {
             // Set progress bar to 1%
             setProgressBarToStart('Backup started');
@@ -520,7 +550,12 @@ jQuery(document).ready(function () {
                 jQuery('.restart-button').attr('data-action', 'backup');
             }
 
-            jQuery.get(backup_url, function () { });
+            jQuery.get(secure_backup_url, function (data) {
+                // Success - the backup process has started
+            }).fail(function(xhr, status, error) {
+                // Handle errors
+                enableButtons();
+            });
         }
 
     });
@@ -655,7 +690,8 @@ jQuery(document).ready(function () {
           url: ajaxurl,
           data : {
             action: 'ocm_restart_failed_process',
-            process: process
+            process: process,
+            _wpnonce: siteData.restartNonce
           },
 
           success: function (result) {

@@ -4,7 +4,7 @@
  * Plugin Name: 1 Click Migration
  * Plugin URI: https://wordpress.org/plugins/1-click-migration/
  * Description: Migrate, copy, or clone your entire site with 1 click. <strong>Any host, no size limitation, no premium versions.</strong>
- * Version: 2.2
+ * Version: 2.3
  * Author: 1ClickMigration
  * Author URI: https://1clickmigration.com/
  * Text Domain: 1-click-migration
@@ -94,6 +94,9 @@ class One_Click_Migration
             register_rest_route('ocm/v1', '/progress/', array(
                 'methods' => 'GET',
                 'callback' => array(One_Click_Migration::class, 'progress_endpoint'),
+                'permission_callback' => function() {
+                    return is_user_logged_in() && current_user_can('manage_options');
+                },
             ));
         });
 
@@ -101,6 +104,9 @@ class One_Click_Migration
             register_rest_route('ocm/v1', '/bucket_exists/', array(
                 'methods' => 'GET',
                 'callback' => array(OCM_S3::class, 'bucket_exists'),
+                'permission_callback' => function() {
+                    return is_user_logged_in() && current_user_can('manage_options');
+                },
             ));
         });
 
@@ -216,7 +222,12 @@ class One_Click_Migration
             'userEmail' => $user_email,
             'domain' => $domain,
             'timeout' => $timeout,
-            'ajaxurl' => admin_url('admin-ajax.php')
+            'ajaxurl' => admin_url('admin-ajax.php'),
+            'restartNonce' => wp_create_nonce('ocm_restart_failed_process'),
+            'paymentNonce' => wp_create_nonce('ocm_make_payment'),
+            'restNonce' => wp_create_nonce('wp_rest'),
+            'backupNonce' => wp_create_nonce('one_click_migration_start_backup'),
+            'restoreNonce' => wp_create_nonce('one_click_migration_start_restore')
         ));
         wp_enqueue_script('multiselect-js', plugins_url('js/multiselect.min.js', __FILE__), ['jquery','custom_ocm_admin_js']);
 
@@ -363,6 +374,28 @@ class One_Click_Migration
           self::reset_actions_start_mark();
       }
 
+      // Log essential messages to WordPress debug.log
+      if (defined('WP_DEBUG_LOG') && WP_DEBUG_LOG) {
+          $essential_patterns = [
+              'Backup started',
+              'Restore started', 
+              'Restore completed',
+              'Backup completed',
+              'Error:',
+              'Uploads have been restored',
+              'Themes have been restored',
+              'Database backup started',
+              'Database has been restored'
+          ];
+          
+          foreach ($essential_patterns as $pattern) {
+              if (strpos($string, $pattern) !== false) {
+                  error_log('[1-Click Migration] ' . $string);
+                  break;
+              }
+          }
+      }
+
       if($urls){
 
         // If ocm_debug doesn't exist, make sure to grab the latest from S3 so we can append
@@ -470,6 +503,9 @@ class One_Click_Migration
     {
         One_Click_Migration::write_to_log("stop and reset started");
 
+        // Disable maintenance mode when stopping the process
+        self::disable_maintenance_mode();
+
         self::delete_options();
 
         // Delete ocm_restore folder
@@ -512,6 +548,98 @@ class One_Click_Migration
         if (file_exists($file)) {
             unlink($file);
         }
+    }
+
+    /**
+     * Enable WordPress maintenance mode (custom implementation)
+     */
+    public static function enable_maintenance_mode()
+    {
+        // Set option to indicate maintenance mode is active
+        update_option('ocm_maintenance_mode', true);
+        
+        // Add hook to show maintenance page for non-admin users
+        add_action('template_redirect', array(__CLASS__, 'handle_maintenance_mode'));
+        
+        One_Click_Migration::write_to_log('Maintenance mode enabled (custom)');
+        return true;
+    }
+
+    /**
+     * Handle maintenance mode with admin bypass
+     */
+    public static function handle_maintenance_mode()
+    {
+        // Check if maintenance mode is active
+        if (!get_option('ocm_maintenance_mode', false)) {
+            return;
+        }
+        
+        // Allow admin users to bypass maintenance mode
+        if (is_admin() || (is_user_logged_in() && current_user_can('manage_options'))) {
+            return;
+        }
+        
+        // Show maintenance page for frontend visitors
+        status_header(503);
+        nocache_headers();
+        
+        $maintenance_message = 'Site is currently being restored. Please check back in a few minutes.';
+        
+        echo '<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Site Maintenance</title>
+    <style>
+        body { 
+            font-family: Arial, sans-serif; 
+            text-align: center; 
+            padding: 50px; 
+            background: #f1f1f1; 
+        }
+        .maintenance-container { 
+            max-width: 600px; 
+            margin: 0 auto; 
+            background: white; 
+            padding: 40px; 
+            border-radius: 8px; 
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1); 
+        }
+        h1 { color: #333; margin-bottom: 20px; }
+        p { color: #666; font-size: 16px; line-height: 1.5; }
+        .icon { font-size: 48px; margin-bottom: 20px; }
+    </style>
+</head>
+<body>
+    <div class="maintenance-container">
+        <div class="icon">🛠️</div>
+        <h1>Site Under Maintenance</h1>
+        <p>' . esc_html($maintenance_message) . '</p>
+        <p>We apologize for any inconvenience. Please check back shortly.</p>
+    </div>
+</body>
+</html>';
+        exit;
+    }
+
+    /**
+     * Disable WordPress maintenance mode
+     */
+    public static function disable_maintenance_mode()
+    {
+        // Remove our custom maintenance mode option
+        delete_option('ocm_maintenance_mode');
+        
+        // Also remove any .maintenance file that might exist
+        $maintenance_file = ABSPATH . '.maintenance';
+        if (file_exists($maintenance_file)) {
+            unlink($maintenance_file);
+        }
+        
+        One_Click_Migration::write_to_log('Maintenance mode disabled');
+        return true;
     }
 }
 

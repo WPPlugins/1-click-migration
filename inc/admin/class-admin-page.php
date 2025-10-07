@@ -32,14 +32,17 @@ class OCM_Admin_Page
             <?php
             $messages = [
                 'endpoint_failure' => 'We could not reach the backup/restore endpoints. Make sure you have the latest version of the plugin and try again.',
-                'no_bucket' => 'We could not find a backup for this email and password combination. Please try again or if your backup was created more than 24 hours ago, you need to re-create it as it\'s been deleted.'
+                'no_bucket' => 'We could not find a backup for this email and password combination. Please try again or if your backup was created more than 24 hours ago, you need to re-create it as it\'s been deleted.',
+                'missing_username' => 'Username parameter is missing. Please try again.',
+                'missing_password' => 'Password parameter is missing. Please try again.',
+                'invalid_password' => 'Password is too short. Please use at least 4 characters.'
             ];
 
-
+            $message_key = sanitize_text_field($_GET['message']);
             ?>
 
             <div class="notice error my-acf-notice is-dismissible">
-                <p><?php echo esc_html($messages[$_GET['message']])?></p>
+                <p><?php echo esc_html($messages[$message_key] ?? '')?></p>
             </div>
         <?php }
         ?>
@@ -108,6 +111,12 @@ class OCM_Admin_Page
                         </span>
                       </h2>
 
+                      <!-- Maintenance Mode Indicator -->
+                      <div class="maintenance-mode-indicator" style="display: none; background: #ff9800; color: white; padding: 10px; margin: 10px 0; border-radius: 4px; text-align: center;">
+                        <strong>🛠️ Site in Maintenance Mode</strong><br>
+                        Your website is currently being restored and is not accessible to visitors.
+                      </div>
+
 
                       <p class="ocm-info notice <?php if ($hasNotice) { echo esc_attr( 'show' ); } ?>">
 
@@ -158,8 +167,19 @@ class OCM_Admin_Page
                     for progress.
                   </span>
                 </h2>
+
+                <!-- Maintenance Mode Indicator -->
+                <div class="maintenance-mode-indicator" style="display: none; background: #ff9800; color: white; padding: 10px; margin: 10px 0; border-radius: 4px; text-align: center;">
+                  <strong>🛠️ Site in Maintenance Mode</strong><br>
+                  Your website is currently being restored and is not accessible to visitors.
+                </div>
                 <h2 class="ocm-info notice"><p></p></h2>
                 <h2 class="ocm-info error"><p></p></h2>
+                
+                <!-- Always show Stop & Reset button -->
+                <div style="margin-top: 20px; text-align: center;">
+                    <a href="<?php echo wp_nonce_url(admin_url('admin-post.php?action=cancel_actions'), 'one_click_migration_cancel_action'); ?>" class="button button-secondary">Stop & Reset</a>
+                </div>
             <?php endif; ?>
             <div class="ocm-settings-log-section">
               <span class="ocm-settings-log-icon"></span>
@@ -175,6 +195,16 @@ class OCM_Admin_Page
 	 * Handle PayPal payment callback  to resume the restoration process
 	 */
 	public static function submit_paypal_payment(){
+        // Check user capabilities
+        if (!current_user_can('manage_options')) {
+            wp_die('You do not have sufficient permissions to perform this action.');
+        }
+        
+        // Verify nonce
+        if (!wp_verify_nonce($_POST['_wpnonce'] ?? '', 'ocm_make_payment')) {
+            wp_die('Security check failed. Please try again.');
+        }
+
 		$option_name = 'ocm_payment_status';
         update_option($option_name, 'payment_completed');
 		OCM_Backup::complete_restore_after_payment();
