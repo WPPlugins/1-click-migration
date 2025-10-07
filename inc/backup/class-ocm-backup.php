@@ -80,6 +80,14 @@ class OCM_Backup
         ['URL generated: log', '23%'],
         ['URL generated: log_download', '27%'],
 
+
+        ['URL generated: db', '5%'],
+        ['URL generated: uploads', '9%'],
+        ['URL generated: themes', '14%'],
+        ['URL generated: plugins', '18%'],
+        ['URL generated: log', '23%'],
+        ['URL generated: log_download', '27%'],
+
         ['db added to queue', '28%'],
         ['themes added to queue', '29%'],
         ['plugins added to queue', '30%'],
@@ -234,16 +242,16 @@ class OCM_Backup
         ['Notice: file plugins.zip.crypt not found', '60%'],
         ['Notice: file db.zip.crypt not found', '60%'],
 
-        ['Themes have been restored', '92%'],
-        ['Uploads have been restored', '94%'],
-        ['Plugins have been restored', '96%'],
+        ['Themes have been restored', '64%'],
+        ['Uploads have been restored', '64%'],
+        ['Plugins have been restored', '64%'],
 
         ['Restore plugins', '75%'],
         ['Please make payment before the restore can complete', '77%'],
         ['Notice: Database restore in progress. Please don\'t leave the plugin page.', '80%'],
-        ['Database has been restored', '98%'],
-        ['Starting to update URLs in database', '99%'],
-        ['Cleaning up.', '99%'],
+        ['Database has been restored', '83%'],
+        ['Starting to update URLs in database', '84%'],
+        ['Cleaning up.', '92%'],
         ['Restore completed.', '100%'],
         ['Error:', '0%'],
         ['Allowed memory size', '0%'],
@@ -328,7 +336,22 @@ class OCM_Backup
 
         $bucket_key = self::get_bucket_key($username, $password);
         $excluded_folders = self::get_excluded_folders();
+        
+        // Try to create bucket and get presigned URLs with retry logic
         $presigned_urls = OCM_S3::s3_create_bucket_ifnot_exists($bucket_key);
+        
+        // If bucket was just created, the URLs might not be immediately available
+        // Retry up to 3 times with a 2-second delay between attempts
+        $retry_count = 0;
+        $max_retries = 3;
+        
+        while (!$presigned_urls && $retry_count < $max_retries) {
+            $retry_count++;
+            One_Click_Migration::write_to_log("Bucket created, waiting for presigned URLs (attempt $retry_count/$max_retries)...");
+            sleep(2); // Wait 2 seconds for bucket to be fully initialized
+            $presigned_urls = OCM_S3::s3_create_bucket_ifnot_exists($bucket_key);
+        }
+        
         $prev_bucket_key = get_option('ocm_bucket_key');
 
         if(!$prev_bucket_key){
@@ -345,7 +368,7 @@ class OCM_Backup
 
 
         if (!$presigned_urls) {
-            One_Click_Migration::write_to_log('Error: Backup does not exist');
+            One_Click_Migration::write_to_log('Error: Could not get presigned URLs after ' . ($retry_count + 1) . ' attempts');
             wp_safe_redirect(admin_url('tools.php?page=one-click-migration&message=endpoint_failure'));
             exit;
         }
@@ -471,8 +494,7 @@ class OCM_Backup
         update_option('ocm_action_start_restore', true, true);
         update_option('ocm_is_stopped', false, true);
 
-        // Enable maintenance mode for the restore process
-        One_Click_Migration::enable_maintenance_mode();
+
 
         $content_dir = WP_CONTENT_DIR . '/ocm_restore';
         $excluded_restore_files = get_option('ocm_excluded_folders', []);
@@ -515,8 +537,6 @@ class OCM_Backup
                 One_Click_Migration::write_to_log("URL generated: $key");
               }
 
-              // Debug: Log all generated URLs to see the mapping
-              One_Click_Migration::write_to_log("DEBUG: Generated URL for '$key': " . $generated_url);
             }
 
             if (!is_dir($content_dir)) {
@@ -535,42 +555,8 @@ class OCM_Backup
             self::set_complete_restore_step('init', self::STEP_RESTORE_CHILD_PRESIGNED_URLS, $presigned_urls);
         }
 
-        // Try to get presigned URLs from restore steps first, fallback to option
         $presigned_urls = self::get_restore_step_value('init', self::STEP_RESTORE_CHILD_PRESIGNED_URLS);
-        
-        // If restore steps method fails, try getting from option directly
-        if (!$presigned_urls) {
-            One_Click_Migration::write_to_log('DEBUG: Restore steps method failed, trying option method');
-            $presigned_urls = get_option('ocm_presigned_urls');
-        }
-        
-        // Convert stdClass object to array if needed (WordPress sometimes converts arrays to objects)
-        if (is_object($presigned_urls)) {
-            One_Click_Migration::write_to_log('DEBUG: Converting stdClass object to array');
-            $presigned_urls = (array) $presigned_urls;
-        }
-        
         $excluded_folders = self::get_excluded_folders();
-
-        // Debug: Log presigned URLs status
-        One_Click_Migration::write_to_log('DEBUG: Retrieved presigned URLs: ' . (is_null($presigned_urls) ? 'NULL' : 'NOT NULL'));
-        if (!is_null($presigned_urls)) {
-            One_Click_Migration::write_to_log('DEBUG: Presigned URLs count: ' . (is_array($presigned_urls) ? count($presigned_urls) : 'NOT ARRAY'));
-        }
-
-        // Check if presigned URLs are available
-        if (!$presigned_urls || !is_array($presigned_urls)) {
-            One_Click_Migration::write_to_log('Error: No presigned URLs available for download');
-            One_Click_Migration::write_to_log('DEBUG: Available restore steps: ' . print_r(self::get_current_restore_steps(), true));
-            update_option('ocm_is_stopped', true, true);
-            exit;
-        }
-
-        // Clear excluded files list before starting downloads (but after URLs are retrieved)
-        delete_option('ocm_excluded_folders');
-        delete_option('ocm_skipped_folders');
-        delete_option('ocm_eexcluded_folders');
-        One_Click_Migration::write_to_log('DEBUG: Cleared excluded files list for fresh restore attempt');
 
         // Download each of the zip files
         foreach ($presigned_urls as $key => $download_url) {
@@ -628,23 +614,10 @@ class OCM_Backup
                     One_Click_Migration::write_to_log(sprintf('Downloading file: "%s.zip.crypt"', $key));
 
 
-
-                    // Debug: Log the download URL for database files
-                    if ($key === 'db') {
-                        One_Click_Migration::write_to_log("DEBUG: Attempting to download database from URL: " . $download_url);
-                    }
-
                     $downloadTmpPathFile = download_url($download_url, One_Click_Migration::$process_restore_single->remaining_time());
 
                     if(is_wp_error($downloadTmpPathFile)){
                       $error_message = $downloadTmpPathFile->get_error_message();
-                      
-                      // Debug: Log detailed error for database files
-                      if ($key === 'db') {
-                          One_Click_Migration::write_to_log("DEBUG: Database download failed with error: " . $error_message);
-                          One_Click_Migration::write_to_log("DEBUG: Full WP_Error object: " . print_r($downloadTmpPathFile, true));
-                      }
-                      
                       if($error_message === 'Not Found'){
 
                         array_push($excluded_restore_files, $key);
@@ -655,11 +628,6 @@ class OCM_Backup
                         One_Click_Migration::write_to_log("Notice: file $keyZipCrypt not found");
 
                         continue;
-                      } else {
-                        // Handle other download errors
-                        One_Click_Migration::write_to_log("Download failed for $key: $error_message");
-                        update_option('ocm_is_stopped', true, true);
-                        exit;
                       }
                     }
 
@@ -871,10 +839,13 @@ class OCM_Backup
                         if (!@rename($extract_path, $directory)) {
                             // Fallback: Try copying files instead of moving
                             if (!self::copyDirectory($extract_path, $directory)) {
-                                self::handle_restore_error(sprintf(
+                                One_Click_Migration::write_to_log(sprintf(
                                     'Downloading restore files. Error: "%s" directory could not be moved or copied to "%s" directory. Please check the write permission for these directories.',
                                     $extract_path, $directory
                                 ));
+
+                                update_option('ocm_is_stopped', true, true);
+                                die();
                             }
                         }
 
@@ -929,13 +900,10 @@ class OCM_Backup
           }
 
         }
-        if(!in_array('db', $excluded_restore_files)){
-          // Database is not excluded, so we need to restore it
-          // This requires payment for database restore
-          One_Click_Migration::write_to_log('Please make payment before the restore can complete');
-        }else{
-          // Database is excluded, so we can complete the restore without it
+        if(in_array('db', $excluded_restore_files)){
           self::complete_restore();
+        }else{
+          One_Click_Migration::write_to_log('Please make payment before the restore can complete');
         }
 
         exit;
@@ -962,18 +930,18 @@ class OCM_Backup
             self::deleteDir($ocmRestoreDir, 'Cleaning up "ocm_restore" directory', $presigned_urls);
             // Delete ocm_restore folder
               if (file_exists($ocmRestoreDir) && !rmdir($ocmRestoreDir)) {
-                self::handle_restore_error(sprintf(
+                One_Click_Migration::write_to_log(sprintf(
                     'Cleaning up "ocm_restore" directory. Error: "%s" directory could not be deleted. Please check the write permission for this directory or the parent directory.',
                     $ocmRestoreDir
                 ));
+
+                update_option('ocm_is_stopped', true, true);
+                exit;
             }
           }
         }
         self::print_folders_skipped();
         self::print_folders_not_found();
-
-        // Disable maintenance mode before completion message
-        One_Click_Migration::disable_maintenance_mode();
 
         One_Click_Migration::write_to_log('Restore completed.');
         One_Click_Migration::reset_actions_start_mark();
@@ -1209,6 +1177,10 @@ class OCM_Backup
 
     public static function createZipFile($filepath, $password, $presigned_urls)
     {
+        // Suppress PHP 8+ compatibility warnings from vendor library
+        $old_error_reporting = error_reporting();
+        error_reporting($old_error_reporting & ~E_DEPRECATED & ~E_NOTICE);
+        
         $zip = new ZipFile();
         $filename = OCM_PLUGIN_WRITABLE_PATH . 'db.zip';
         $skipped_restore_files = get_option('ocm_skipped_folders', []);
@@ -1283,11 +1255,17 @@ class OCM_Backup
           One_Click_Migration::write_to_log('DB Zip file has been encrypted.');
           return $return;
         }
-
+        
+        // Restore original error reporting
+        error_reporting($old_error_reporting);
     }
 
     public static function initiate_folder_backup($folder_name, $presigned_urls, $password)
     {
+        // Suppress PHP 8+ compatibility warnings from vendor library
+        $old_error_reporting = error_reporting();
+        error_reporting($old_error_reporting & ~E_DEPRECATED & ~E_NOTICE);
+        
         // Initialize archive object
         $zip = new ZipFile();
         $filename = sprintf('%s%s.zip', OCM_PLUGIN_WRITABLE_PATH, $folder_name);
@@ -1538,6 +1516,9 @@ class OCM_Backup
 
             }
         }
+        
+        // Restore original error reporting
+        error_reporting($old_error_reporting);
     }
 
     public static function deleteDir($dir, $action_log, $presigned_urls)
@@ -1618,17 +1599,6 @@ class OCM_Backup
         }
 
         return true;
-    }
-
-    /**
-     * Handle restore errors and disable maintenance mode
-     */
-    private static function handle_restore_error($message)
-    {
-        One_Click_Migration::write_to_log($message);
-        update_option('ocm_is_stopped', true, true);
-        One_Click_Migration::disable_maintenance_mode();
-        die();
     }
 
 
@@ -1805,7 +1775,6 @@ class OCM_Backup
 
         $uploadFileData = get_option('ocm_upload_file');
         $isStopped = get_option('ocm_is_stopped');
-        $isMaintenanceMode = get_option('ocm_maintenance_mode', false);
 
         if ($isStopped) { // cancel all bg process
             One_Click_Migration::cancel_all_process();
@@ -1816,8 +1785,7 @@ class OCM_Backup
             return [
                 'text' => $lastLog,
                 'value' => self::get_previous_log_percentage(),
-                'customNotice' => self::LOG_MESSAGE_BG_PROCESS_RESTARTING_LOG,
-                'maintenanceMode' => $isMaintenanceMode
+                'customNotice' => self::LOG_MESSAGE_BG_PROCESS_RESTARTING_LOG
             ];
         }
 
@@ -1826,7 +1794,7 @@ class OCM_Backup
             return [
                 'text' => $lastLog,
                 'value' => self::get_previous_log_percentage(),
-                'maintenanceMode' => $isMaintenanceMode
+
             ];
         }
 
@@ -1835,7 +1803,7 @@ class OCM_Backup
             return [
                 'text' => 'Process is Restarting',
                 'value' => self::get_previous_log_percentage(),
-                'maintenanceMode' => $isMaintenanceMode
+
             ];
         }
 
@@ -1845,15 +1813,14 @@ class OCM_Backup
             return [
                 'text' => $lastLog,
                 'value' => self::get_previous_log_percentage(),
-                'maintenanceMode' => $isMaintenanceMode
+
             ];
         }
 
 
         $default_text = array(
             'text' => 'Start a backup or a restore to see current progress here.</br></br>Entire process runs in the background, independent of your browser activity.</br> </br>If you get logged out during restore, log back in using your backup old WordPress credentials and refresh this page for progress.',
-            'value' => '0%',
-            'maintenanceMode' => $isMaintenanceMode
+            'value' => '0%'
         );
 
 
@@ -1866,24 +1833,21 @@ class OCM_Backup
                     $progress_item_text = array(
                         'uploadFileData' => $uploadFileData,
                         'text' => $lastLog,
-                        'value' => $progress_item[1],
-                        'maintenanceMode' => $isMaintenanceMode
+                        'value' => $progress_item[1]
                     );
                 } else {
                     $progress_item_text = array(
                         'uploadFileData' => $uploadFileData,
                         'text' => $lastLog,
-                        'value' => $progress_item[1],
-                        'maintenanceMode' => $isMaintenanceMode
+                        'value' => $progress_item[1]
                     );
                 }
 
                 if ($isStopped && $lastLog !== 'Restore completed.') {
-$progress_item_text = array(
+                    $progress_item_text = array(
                         'isStopped' => true,
                         'text' => $lastLog,
-                        'value' => $progress_item[1],
-                        'maintenanceMode' => $isMaintenanceMode
+                        'value' => $progress_item[1]
                     );
                 }
 

@@ -4,7 +4,7 @@ Tags:migration,clone,copy,move,transfer
 Requires at least: 4.0
 Tested up to: 6.9
 Requires PHP: 7.4
-Stable tag: 2.3
+Stable tag: 2.3.1
 Author URI: https://1clickmigration.com
 License: GPLv3 or later
 License URI: http://www.gnu.org/licenses/gpl-3.0.html
@@ -89,6 +89,15 @@ Yes, as of version we automatically perform a search and replace in all database
  
  
 == Changelog ==
+= 2.3.1 =
+* Fixed blank white screen issue when deactivating plugin
+* Fixed endpoint_failure error on first backup attempt - added retry logic for presigned URL generation
+* Improved deactivation cleanup process to prevent database errors
+* Enhanced error handling during plugin deactivation
+
+= 2.3 =
+* Stability improvements
+
 = 2.2 =
 * CSRF fix & Updates 
 

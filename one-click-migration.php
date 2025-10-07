@@ -4,7 +4,7 @@
  * Plugin Name: 1 Click Migration
  * Plugin URI: https://wordpress.org/plugins/1-click-migration/
  * Description: Migrate, copy, or clone your entire site with 1 click. <strong>Any host, no size limitation, no premium versions.</strong>
- * Version: 2.3
+ * Version: 2.3.1
  * Author: 1ClickMigration
  * Author URI: https://1clickmigration.com/
  * Text Domain: 1-click-migration
@@ -347,20 +347,68 @@ class One_Click_Migration
     public static function uninstall()
     {
 	    self::delete_options();
-        // Delete ocm_restore folder
-        if (is_dir(WP_CONTENT_DIR . '/ocm_restore/')) {
-            OCM_Backup::deleteDir(WP_CONTENT_DIR . '/ocm_restore/', 'Deleting ocm_restore', null);
+        
+        // Delete ocm_restore folder (silently - don't log errors during deactivation)
+        try {
+            if (is_dir(WP_CONTENT_DIR . '/ocm_restore/')) {
+                self::delete_directory_recursive(WP_CONTENT_DIR . '/ocm_restore/');
+            }
+        } catch (\Exception $e) {
+            // Silently fail during deactivation
         }
 
-        // Clear tmp folder
-        if (is_dir(OCM_PLUGIN_WRITABLE_PATH)) {
-            OCM_Backup::deleteDir(OCM_PLUGIN_WRITABLE_PATH, 'Deleting TMP Folder', null);
+        // Clear tmp folder (silently - don't log errors during deactivation)
+        try {
+            if (is_dir(OCM_PLUGIN_WRITABLE_PATH)) {
+                self::delete_directory_recursive(OCM_PLUGIN_WRITABLE_PATH);
+            }
+        } catch (\Exception $e) {
+            // Silently fail during deactivation
+        }
+        
+        // Load the background helper class before using it
+        if (!class_exists('OCM\OCM_BackgroundHelper')) {
+            require_once __DIR__ . '/inc/background/class-background-helper.php';
         }
         OCM_BackgroundHelper::delete_all_batch_process();
 
         // Make sure we don't leave un-necessary routes laying around
         flush_rewrite_rules();
 
+    }
+    
+    /**
+     * Recursively delete a directory without logging (for safe deactivation)
+     * 
+     * @param string $dir Directory path to delete
+     * @return bool True on success, false on failure
+     */
+    private static function delete_directory_recursive($dir)
+    {
+        if (!is_dir($dir)) {
+            return false;
+        }
+        
+        $items = @scandir($dir);
+        if ($items === false) {
+            return false;
+        }
+        
+        foreach ($items as $item) {
+            if ($item === '.' || $item === '..') {
+                continue;
+            }
+            
+            $path = $dir . '/' . $item;
+            
+            if (is_dir($path)) {
+                self::delete_directory_recursive($path);
+            } else {
+                @unlink($path);
+            }
+        }
+        
+        return @rmdir($dir);
     }
 
 
@@ -493,9 +541,19 @@ class One_Click_Migration
 
     public static function cancel_all_process()
     {
+        // Load the background helper class before using it
+        if (!class_exists('OCM\OCM_BackgroundHelper')) {
+            require_once __DIR__ . '/inc/background/class-background-helper.php';
+        }
         OCM_BackgroundHelper::delete_all_batch_process();
-        self::$process_backup_single->cancel_all_process();
-        self::$process_restore_single->cancel_all_process();
+        
+        // Only call cancel methods if the process objects exist
+        if (self::$process_backup_single) {
+            self::$process_backup_single->cancel_all_process();
+        }
+        if (self::$process_restore_single) {
+            self::$process_restore_single->cancel_all_process();
+        }
 
     }
 
@@ -519,6 +577,11 @@ class One_Click_Migration
         // Clear tmp folder
         if (is_dir(OCM_PLUGIN_WRITABLE_PATH)) {
             OCM_Backup::deleteDir(OCM_PLUGIN_WRITABLE_PATH, 'Deleting TMP Folder', null);
+        }
+        
+        // Load the background helper class before using it
+        if (!class_exists('OCM\OCM_BackgroundHelper')) {
+            require_once __DIR__ . '/inc/background/class-background-helper.php';
         }
         OCM_BackgroundHelper::delete_all_batch_process();
 
@@ -629,17 +692,19 @@ class One_Click_Migration
      */
     public static function disable_maintenance_mode()
     {
-        // Remove our custom maintenance mode option
-        delete_option('ocm_maintenance_mode');
-        
-        // Also remove any .maintenance file that might exist
         $maintenance_file = ABSPATH . '.maintenance';
+        
         if (file_exists($maintenance_file)) {
-            unlink($maintenance_file);
+            if (unlink($maintenance_file)) {
+                One_Click_Migration::write_to_log('Maintenance mode disabled');
+                return true;
+            } else {
+                One_Click_Migration::write_to_log('Error: Failed to disable maintenance mode');
+                return false;
+            }
         }
         
-        One_Click_Migration::write_to_log('Maintenance mode disabled');
-        return true;
+        return true; // Already disabled
     }
 }
 
