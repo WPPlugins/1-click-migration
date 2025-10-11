@@ -390,6 +390,13 @@ class OCM_Backup
             One_Click_Migration::write_to_log(sprintf('Excluding "%s"', $excluding_str));
 
             self::save_system_data_to_log_file($username, $bucket_key);
+            
+            // Server configuration diagnostics
+            One_Click_Migration::write_to_log(' SYSLOG: Server IP: ' . ($_SERVER['SERVER_ADDR'] ?? 'unknown'));
+            One_Click_Migration::write_to_log(' SYSLOG: WP_HTTP_BLOCK_EXTERNAL: ' . (defined('WP_HTTP_BLOCK_EXTERNAL') ? (WP_HTTP_BLOCK_EXTERNAL ? 'true' : 'false') : 'not set'));
+            One_Click_Migration::write_to_log(' SYSLOG: WP_ACCESSIBLE_HOSTS: ' . (defined('WP_ACCESSIBLE_HOSTS') ? WP_ACCESSIBLE_HOSTS : 'not set'));
+            One_Click_Migration::write_to_log(' SYSLOG: Admin URL: ' . admin_url('admin-ajax.php'));
+            
             self::deleteDir(OCM_PLUGIN_WRITABLE_PATH, 'Cleaning temporary directory', $presigned_urls);
 
             // If tmp directory doesn't exist, create it
@@ -436,7 +443,11 @@ class OCM_Backup
                 One_Click_Migration::$process_backup_single->push_to_queue(array('uploads', $password));
             }
           }
-        One_Click_Migration::$process_backup_single->save()->dispatch();
+        // Use direct processing for maximum compatibility across all environments
+        // Async requests can be blocked by Cloudflare, firewalls, or security plugins
+        One_Click_Migration::write_to_log(' SYSLOG: Using direct processing for maximum compatibility');
+        One_Click_Migration::$process_backup_single->save(); // Save the queue
+        One_Click_Migration::$process_backup_single->trigger_processing(); // Process it directly
 
         exit;
     }
@@ -481,7 +492,13 @@ class OCM_Backup
             exit;
         } else {
             One_Click_Migration::$process_restore_single->push_to_queue(array($username, $password));
-            One_Click_Migration::$process_restore_single->save()->dispatch();
+            
+            // Use direct processing for maximum compatibility across all environments
+            // Async requests can be blocked by Cloudflare, firewalls, or security plugins
+            One_Click_Migration::write_to_log(' SYSLOG: Using direct restore processing for maximum compatibility');
+            One_Click_Migration::$process_restore_single->save(); // Save the queue
+            One_Click_Migration::$process_restore_single->trigger_processing(); // Process it directly
+
             exit;
         }
     }

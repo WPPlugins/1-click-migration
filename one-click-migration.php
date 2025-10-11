@@ -4,7 +4,7 @@
  * Plugin Name: 1 Click Migration
  * Plugin URI: https://wordpress.org/plugins/1-click-migration/
  * Description: Migrate, copy, or clone your entire site with 1 click. <strong>Any host, no size limitation, no premium versions.</strong>
- * Version: 2.3.1
+ * Version: 2.3.2
  * Author: 1ClickMigration
  * Author URI: https://1clickmigration.com/
  * Text Domain: 1-click-migration
@@ -279,6 +279,9 @@ class One_Click_Migration
 
     public static function install()
     {
+        // Ensure clean state on activation
+        self::stop_and_reset();
+        
         // Make sure our API route is added
         flush_rewrite_rules();
     }
@@ -341,40 +344,24 @@ class One_Click_Migration
       delete_option('ocm_restore_child_delete_retry_plugins');
       delete_option('ocm_restore_child_delete_retry_uploads');
 
+      // Clear additional options that might cause redirect loops
+      delete_option('ocm_s3_bucket');
+      delete_option('ocm_s3_region');
+      delete_option('ocm_s3_access_key');
+      delete_option('ocm_s3_secret_key');
+      delete_option('ocm_backup_id');
+      delete_option('ocm_backup_password');
+      delete_option('ocm_backup_completed_steps');
+      delete_option('ocm_restore_completed_steps');
+      delete_option('ocm_maintenance_mode');
+
     }
 
 
     public static function uninstall()
     {
-	    self::delete_options();
-        
-        // Delete ocm_restore folder (silently - don't log errors during deactivation)
-        try {
-            if (is_dir(WP_CONTENT_DIR . '/ocm_restore/')) {
-                self::delete_directory_recursive(WP_CONTENT_DIR . '/ocm_restore/');
-            }
-        } catch (\Exception $e) {
-            // Silently fail during deactivation
-        }
-
-        // Clear tmp folder (silently - don't log errors during deactivation)
-        try {
-            if (is_dir(OCM_PLUGIN_WRITABLE_PATH)) {
-                self::delete_directory_recursive(OCM_PLUGIN_WRITABLE_PATH);
-            }
-        } catch (\Exception $e) {
-            // Silently fail during deactivation
-        }
-        
-        // Load the background helper class before using it
-        if (!class_exists('OCM\OCM_BackgroundHelper')) {
-            require_once __DIR__ . '/inc/background/class-background-helper.php';
-        }
-        OCM_BackgroundHelper::delete_all_batch_process();
-
-        // Make sure we don't leave un-necessary routes laying around
-        flush_rewrite_rules();
-
+        // Use stop_and_reset for complete cleanup on deactivation
+        self::stop_and_reset();
     }
     
     /**
@@ -564,11 +551,41 @@ class One_Click_Migration
         // Disable maintenance mode when stopping the process
         self::disable_maintenance_mode();
 
+        // Unlock any locked processes before cleanup
+        if (self::$process_backup_single) {
+            self::$process_backup_single->unlock_process();
+        }
+        if (self::$process_restore_single) {
+            self::$process_restore_single->unlock_process();
+        }
+
+        // Clear all queues and batches
+        if (self::$process_backup_single) {
+            self::$process_backup_single->cancel_all_process();
+            self::$process_backup_single->cancel_scheduled_event();
+        }
+        if (self::$process_restore_single) {
+            self::$process_restore_single->cancel_all_process();
+            self::$process_restore_single->cancel_scheduled_event();
+        }
+
+        // Delete all options and batch data
         self::delete_options();
+        
+        // Load the background helper class before using it
+        if (!class_exists('OCM\OCM_BackgroundHelper')) {
+            require_once __DIR__ . '/inc/background/class-background-helper.php';
+        }
+        OCM_BackgroundHelper::delete_all_batch_process();
+
+        // Clear specific process status options that might be stuck
+        delete_option('wp_ocm_background_backup_status');
+        delete_option('wp_ocm_background_restore_status');
+        delete_site_transient('wp_ocm_background_backup_process_lock');
+        delete_site_transient('wp_ocm_background_restore_process_lock');
 
         // Delete ocm_restore folder
         if(!WP_DEBUG){
-
           if (is_dir(WP_CONTENT_DIR . '/ocm_restore/')) {
               OCM_Backup::deleteDir(WP_CONTENT_DIR . '/ocm_restore/', 'Deleting ocm_restore', null);
           }
@@ -578,12 +595,6 @@ class One_Click_Migration
         if (is_dir(OCM_PLUGIN_WRITABLE_PATH)) {
             OCM_Backup::deleteDir(OCM_PLUGIN_WRITABLE_PATH, 'Deleting TMP Folder', null);
         }
-        
-        // Load the background helper class before using it
-        if (!class_exists('OCM\OCM_BackgroundHelper')) {
-            require_once __DIR__ . '/inc/background/class-background-helper.php';
-        }
-        OCM_BackgroundHelper::delete_all_batch_process();
 
         // Make sure we don't leave un-necessary routes laying around
         flush_rewrite_rules();

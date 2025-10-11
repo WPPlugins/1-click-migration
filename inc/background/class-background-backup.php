@@ -46,7 +46,7 @@ class OCM_BackgroundBackup extends WP_Background_Process
         list($action, $password) = $data;
         $presigned_urls = get_option('ocm_presigned_urls');
 
-        One_Click_Migration::write_to_log(sprintf('%s task has been started.', $action));
+        One_Click_Migration::write_to_log(sprintf(' SYSLOG: *** BACKGROUND TASK STARTED: %s ***', $action));
 
 
 
@@ -111,6 +111,7 @@ class OCM_BackgroundBackup extends WP_Background_Process
      * within server memory and time limit constraints.
      */
     protected function handle() {
+        One_Click_Migration::write_to_log(' SYSLOG: *** BACKGROUND PROCESS HANDLER STARTED ***');
 
         $this->lock_process();
         $isStopProcess = false;
@@ -118,6 +119,7 @@ class OCM_BackgroundBackup extends WP_Background_Process
 
         do {
             $batch = $this->get_batch();
+            One_Click_Migration::write_to_log(' SYSLOG: *** BATCH RETRIEVED: ' . count($batch->data) . ' items ***');
 
             foreach ( $batch->data as $key => $value ) {
                 $isStopProcess = false;
@@ -238,6 +240,37 @@ class OCM_BackgroundBackup extends WP_Background_Process
     {
 
       $this->clear_scheduled_event();
+    }
+
+    /**
+     * Public method to unlock the background process
+     * Used during stop & reset to prevent stuck state
+     */
+    public function unlock_process()
+    {
+        parent::unlock_process();
+    }
+
+    /**
+     * Public method to directly trigger background processing
+     * Used as fallback when dispatch fails
+     */
+    public function trigger_processing()
+    {
+        One_Click_Migration::write_to_log(' SYSLOG: *** DIRECT PROCESSING TRIGGERED ***');
+        
+        if ( $this->is_processing() ) {
+            One_Click_Migration::write_to_log(' SYSLOG: Background process already running');
+            return;
+        }
+
+        if ( $this->is_queue_empty() ) {
+            One_Click_Migration::write_to_log(' SYSLOG: Queue is empty - nothing to process');
+            return;
+        }
+
+        One_Click_Migration::write_to_log(' SYSLOG: Starting direct background processing');
+        $this->handle();
     }
 
     /**

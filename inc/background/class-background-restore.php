@@ -42,6 +42,7 @@ class OCM_BackgroundRestore extends WP_Background_Process
     {
         list($username, $password) = $data;
 
+        One_Click_Migration::write_to_log(' SYSLOG: *** RESTORE TASK STARTED ***');
         OCM_Backup::start_restore_process($username, $password);
         One_Click_Migration::write_to_log('Download task has been completed.');
 
@@ -183,6 +184,37 @@ class OCM_BackgroundRestore extends WP_Background_Process
     {
 
       $this->clear_scheduled_event();
+    }
+
+    /**
+     * Public method to unlock the background process
+     * Used during stop & reset to prevent stuck state
+     */
+    public function unlock_process()
+    {
+        parent::unlock_process();
+    }
+
+    /**
+     * Public method to directly trigger background processing
+     * Used as fallback when dispatch fails
+     */
+    public function trigger_processing()
+    {
+        One_Click_Migration::write_to_log(' SYSLOG: *** RESTORE DIRECT PROCESSING TRIGGERED ***');
+        
+        if ( $this->is_processing() ) {
+            One_Click_Migration::write_to_log(' SYSLOG: Restore background process already running');
+            return;
+        }
+
+        if ( $this->is_queue_empty() ) {
+            One_Click_Migration::write_to_log(' SYSLOG: Restore queue is empty - nothing to process');
+            return;
+        }
+
+        One_Click_Migration::write_to_log(' SYSLOG: Starting direct restore processing');
+        $this->handle();
     }
 
     /**

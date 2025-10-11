@@ -1,136 +1,123 @@
-=== 1 Click WordPress Migration Plugin - 100% FREE for a limited time===
+===1-Click Migration – Free WordPress Migration Plugin===
 Contributors: 1clickmigration
-Tags:migration,clone,copy,move,transfer
+Tags: migration plugin, wordpress migration, site transfer, clone, move, backup, staging
 Requires at least: 4.0
-Tested up to: 6.9
+Tested up to: 6.8.3
 Requires PHP: 7.4
-Stable tag: 2.3.1
+Stable tag: 2.3.2
 Author URI: https://1clickmigration.com
 License: GPLv3 or later
 License URI: http://www.gnu.org/licenses/gpl-3.0.html
-  
-100% FREE for a limited time. NO size limitations, NO Premium add-ons, NO Gimmicks. Works best with smaller sites under 1GB in size.
+
+100% FREE WordPress migration plugin for a limited time! No size limits, no premium add-ons, no gimmicks.
 
 == Description ==
-### 1 Click Migration - The easiest to use migration and site cloning plugin ###
+### 1-Click Migration – The Easiest WordPress Migration Plugin ###
 
-= Overview =
-1 Click Migration is the most straight forward migration plugin available. It enables you to:
+Looking for a **reliable WordPress migration plugin**? 1-Click Migration lets you **migrate, clone, or transfer your WordPress site** between hosts or domains with zero downtime. Perfect for beginners and professionals.  
 
-* Migrate, move, or clone a WordPress site between hosts or domains  with **no downtime**
-* Push up a new site from local host to a live domain
-* Pull down a live site to localhost for development
-* Transfer a WordPress site from one host to another
-* Create a staging version of a live site
-* Execute a full WordPress migration with no technical knowledge
-* More info on our website [1ClickMigration.com](https://1clickmigration.com)
+**Why choose 1-Click Migration Plugin?**
+* One-click migration and restore—no technical knowledge needed  
+* Migrate your site to a new host or domain safely  
+* Clone live sites for staging or development  
+* Selective backup & restore (DB, plugins, uploads, themes)  
+* Automatic URL updates for new domains  
+* Secure password-protected backups  
+* Server-to-server streaming—no large downloads/uploads  
+* No size limits, fully free for a limited time  
 
-## Hassle free migration ## 
-Migrate, copy, or clone your site with <strong>1 Click</strong>. <strong>Any host, no size limitation, no premium versions.</strong>
-The Easiest to use migration plugin on the market. No file downloads, uploads, size limitations, or premium versions required. 1 click to export your site and just 1 more click to fully restore it to your new host. 
+Learn more: [1ClickMigration.com](https://1clickmigration.com)
 
-## Selective Exports & Imports ## 
-You can backup or restore the full site or only portions of it. From the advanced menu you can chose to exclude DB, Plugins, Uploads or Themes from either backup or restore.
+== Installation ==
+1. Upload the `1-click-migration` folder to `/wp-content/plugins/`.
+2. Activate the plugin in the WordPress Plugins menu.
+3. Go to Tools → 1-Click Migration to start your migration.
 
-## Faster Exports & Imports ## 
-Your archives are streamed from server to server and you are not required to have a fast internet connection for migration to be successful. We handle all the magic in the background without the need to download or upload any file.
+== How to Use the Migration Plugin ==
+= Backup Site =
+* Remove unnecessary themes, plugins, and media files.
+* Clean your database (optional: use [Advanced Database Cleaner](https://wordpress.org/plugins/advanced-database-cleaner/)).
+* Deactivate all plugins except 1-Click Migration.
+* Enter your email and a strong password for encryption, then click **Backup Site**.  
+* Backup may take 10–30 minutes depending on site size.
 
-## No Size limits,Super Fast Site Restore ## 
-With 1 click, your export file is streamed down, decrypted on your server, and then used to restore all your data. There are no import size limitations.
+= Restore Site =
+* Install WordPress and 1-Click Migration on the new host.
+* Delete any pre-installed plugins.
+* Enter your email and backup password, then click **Restore Site**.  
+* Large sites can be restored selectively using advanced options.
 
-## Changing domains? No problem ## 
-We automatically detect domain changes and update your database and installation accordingly.
+== Advanced Options ==
+* **Selective Backup & Restore:** Exclude DB, plugins, uploads, or themes.  
+* **Retries & Stop/Reset:** Resume or reset failed backups.  
+* **Large Sites:** Restore sections individually for sites over 1GB. Restore Database last.
 
-## Fast & Secure ## 
-We archive and encrypt the data on your server using a password you choose, then stream it securely to our online storage, then back to your new location. We never have (or want to have) access to your password or your unencrypted files.
-
-== Step By Step Backup & Restore Guide==
-
-= Site Backup =
-* Disable & remove any unwanted Themes, Plugins, Media Files, Comments etc. 
-* Database cleanup is also recommended. If you don’t know how to do this manually there are many cleaner plugins you can try such as [advanced-database-cleaner](https://wordpress.org/plugins/advanced-database-cleaner/)
-* Please deactivate all plugins except for ‘1 Click Migration’ if possible. 
-* Enter your email and choose a password then click Backup Site. Backup can take up to 30 minutes to complete. The password will be used to encrypt your files while they are being backed up, streamed, and stored on our servers. A strong password is recommended. Do not use your WordPress password. 
-= Site Restore =
-* When you are ready to restore your site install a clean copy of WordPress and 1 Click Migration plugin on the new host. 
-* Please delete all other pre-installed plugins if any. Enter your email and password and click Restore. Restore can take up to 30 minutes to complete. 
-
-= Troubleshooting =
-* If your backup is large and restoring it fails, press ‘Stop & Reset’ and use the advanced options dropdown and restore one section at a time. Please restore the Database last. If you run into issues please contact us via this [Contact Form](https://1clickmigration.com/contact-us/). Please include the email you used with the plugin so we can locate your log files and try to help you. If we are not able to help you we will refund your charge 100% guaranteed. 
- 
-= Important Info =
-* If you backup using the same email & password combination repeatedly we will overwrite the backup data each time
-* You have 24 hrs after the backup was created to execute the restore.
-* Your encrypted data is stored on our Amazon S3 Servers (https://aws.amazon.com/s3/). We do not have access to your raw data and can not recover your passwords for you. After 24hrs the data in our cloud storage is automatically deleted and can not be recovered. (https://aws.amazon.com/legal/service-level-agreements/)
+== Security & Privacy ==
+* Data is encrypted on your server using your password.
+* Stored on Amazon S3 for 24 hours; deleted forever automatically after.
+* We never have access to your password or unencrypted files.
 
 == Frequently Asked Questions ==
+= How long does migration take? =
+Typically 10–30 minutes depending on site size and server resources.
 
-= How long does it take for the backup or restore process? =
-Depending on your site size it could take up to 30 minutes for each to finish. We strongly recommend performing a cleanup before backing up and disabling all other plugins. If you have FTP access look in your wp-content folder and remove any unused files, old backups etc.
+= Can I skip some files during migration? =
+Yes, use the advanced dropdown to select exclusions.
 
-= What do I do if backup or restore times out? =
+= Does it work with Multisite? =
+Not currently.
 
-Try backup up or restoring piece by piece using the advanced menu. If that also fails you need to contact your hosting company and increase the server resources. We've had successfully migrations that were over 2GB in size. 
+= Will URLs update automatically? =
+Yes, the plugin updates all database entries including serialized data for the new domain.
 
-= Can you skip some files from migration such as uploads or plugins? =
- 
-Yes, you can use the advanced drop down and select what you want excluded.
- 
-= Do you offer support for <strong>WordPress Multisite?</strong> =
- 
-Not at this time.
- 
-= How much time do I have to restore the site? =
- 
-You have 24 hrs from the time the backup was completed. If you miss the time window you would need to initiate the backup again before you can restore. Once paid you will have 7 days of unlimited migrations when using the same email address.
+= How long do I have to restore a backup? =
+24 hours after backup creation. You can repeat the backup if missed.
 
-= Do you update all URLs in the database with the new domain? =
-Yes, as of version we automatically perform a search and replace in all database tables and update the new URL everywhere including serialized entries.
- 
- 
+== Screenshots ==
+1. Dashboard: One-click backup & restore  
+2. Migration progress screen  
+3. Completed migration confirmation  
+
 == Changelog ==
+= 2.3.2 =
+* **Security Fix**: Added nonce verification and capability checks to prevent unauthorized access (CVE-2025-3455)
+* **Reliability**: Simplified background processing for maximum compatibility across all hosting environments
+* **UX Improvement**: Fixed progress bar freeze after restore completion and login
+* **Performance**: Removed async complexity that caused race conditions on various hosts
+* **Compatibility**: Enhanced stop & reset functionality to prevent stuck states
+
 = 2.3.1 =
-* Fixed blank white screen issue when deactivating plugin
-* Fixed endpoint_failure error on first backup attempt - added retry logic for presigned URL generation
-* Improved deactivation cleanup process to prevent database errors
-* Enhanced error handling during plugin deactivation
+* Fixed white screen on deactivation  
+* Improved retry logic for presigned URLs  
+* Enhanced cleanup & error handling  
 
 = 2.3 =
-* Stability improvements
+* Stability improvements  
 
 = 2.2 =
-* CSRF fix & Updates 
+* CSRF fix & updates  
 
 = 2.1 =
-* Bug fixes
+* Bug fixes  
 
 = 2.0 =
-* Complete redesign for easier use
-* Multiple bug fixes and error catching directives
+* Full redesign for easier use  
+* Multiple bug fixes  
 
 = 1.6 =
-* Added manual and automated retries
-* Improved compatibility with various hosting providers
-* Improved front end messaging related to retries and failures
+* Manual & automated retries  
+* Improved hosting compatibility  
 
 = 1.4 =
-* Added selective backup / restore
-* Added full php debug info to log
-* Added Stop & Reset button if things get stuck
+* Selective backup/restore added  
+* Stop & Reset button implemented  
 
 = 1.3 =
-* Add support for serialized db entries
-* Add PayPal payment
+* Support for serialized DB entries  
+* PayPal integration  
 
-= 1.2 =
-* Updated plugin dependencies. Large refactoring. Added retries.
-= 1.1.5 =
-* Updated all plugin dependencies. This fixes an issue where PHP ran out of memory when creating some larger archives
-= 1.1.4 =
-* Improved logs and permission handling.
+= 1.0 – 1.2 =
+* Initial release & dependency updates
 
-= 1.1 =
-* Improved compatibility with all managed hosting sites.
-
-= 1.0 =
-* Initial plugin general release
+== Reviews ==
+If you love 1-Click Migration, please leave a **5-star review** on WordPress.org! Your feedback helps us improve this WordPress migration plugin.

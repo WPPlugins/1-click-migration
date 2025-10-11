@@ -335,6 +335,22 @@ const displayProgressBar = function () {
 
                 }
 
+                },
+                error: function(xhr, status, error) {
+                    // If we get a 403 (authentication failure), reload page to refresh nonce
+                    // This happens after restore when DB is replaced and user logs back in
+                    if (xhr.status === 403) {
+                        console.log('Progress endpoint returned 403 - waiting for restore to complete before reloading');
+                        clearInterval(intervalId);
+                        clearTimeout(timeoutId);
+                        
+                        // Wait 5 seconds for restore to complete before reloading
+                        // This prevents showing empty WordPress install page during DB replacement
+                        setTimeout(function() {
+                            console.log('Reloading page after 403 error to refresh authentication');
+                            window.location.reload();
+                        }, 5000);
+                    }
                 }
             });
         }, 1000);
