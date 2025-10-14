@@ -259,7 +259,8 @@ class OCM_BackgroundBackup extends WP_Background_Process
     {
         One_Click_Migration::write_to_log(' SYSLOG: *** DIRECT PROCESSING TRIGGERED ***');
         
-        if ( $this->is_processing() ) {
+        // Check if process is already running using direct transient check
+        if ( get_site_transient( $this->identifier . '_process_lock' ) ) {
             One_Click_Migration::write_to_log(' SYSLOG: Background process already running');
             return;
         }

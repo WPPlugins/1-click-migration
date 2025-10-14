@@ -682,8 +682,42 @@ jQuery(document).ready(function () {
 
 
       });
+      
+      // Hook into multiselect checkbox clicks to update button states
+      setTimeout(function() {
+        jQuery('#selective-backup_itemList').on('click', '.multiselect-checkbox', function() {
+          // Use setTimeout to let the multiselect library update the underlying select first
+          setTimeout(function() {
+            updateButtonStates();
+          }, 10);
+        });
+      }, 100);
 
     };
+
+  // Function to check if all components are excluded and disable buttons accordingly
+  var updateButtonStates = function() {
+    var selectedFolders = jQuery('#selective-backup').val() || [];
+    var allExcluded = selectedFolders.length === 4; // All 4 options selected means everything excluded
+    
+    if (allExcluded) {
+        jQuery('.backup-button, .restore-button').addClass('disabled').attr('disabled', 'disabled');
+        jQuery('.backup-button, .restore-button').css({
+            'opacity': '0.5',
+            'cursor': 'not-allowed',
+            'pointer-events': 'none'
+        });
+        jQuery('.ocm-exclusion-warning').show();
+    } else {
+        jQuery('.backup-button, .restore-button').removeClass('disabled').removeAttr('disabled');
+        jQuery('.backup-button, .restore-button').css({
+            'opacity': '1',
+            'cursor': 'pointer',
+            'pointer-events': 'auto'
+        });
+        jQuery('.ocm-exclusion-warning').hide();
+    }
+  };
 
   var reloadPaypalButtons = function(){
     jQuery(".reset-payment-actions-button").click(function(){
@@ -774,6 +808,10 @@ jQuery(document).ready(function () {
 
 
     renderMultiselect();
+    
+    // Check button states on page load
+    updateButtonStates();
+    
     reloadPaypalButtons();
     restartFailedProcess();
     markRestoreStarted();

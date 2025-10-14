@@ -326,9 +326,8 @@ class OCM_Backup
         self::delete_backup_options();
 
         if (!One_Click_Migration::$process_backup_single->is_queue_empty()) {
-
-            One_Click_Migration::$process_backup_single->handle_cron_healthcheck();
-            exit;
+            // Queue already exists, just process it directly
+            One_Click_Migration::$process_backup_single->trigger_processing();
         }
 
         $username = self::get_username();
@@ -443,13 +442,10 @@ class OCM_Backup
                 One_Click_Migration::$process_backup_single->push_to_queue(array('uploads', $password));
             }
           }
-        // Use direct processing for maximum compatibility across all environments
-        // Async requests can be blocked by Cloudflare, firewalls, or security plugins
+        // Save the queue and use direct processing for maximum reliability
+        One_Click_Migration::$process_backup_single->save();
         One_Click_Migration::write_to_log(' SYSLOG: Using direct processing for maximum compatibility');
-        One_Click_Migration::$process_backup_single->save(); // Save the queue
-        One_Click_Migration::$process_backup_single->trigger_processing(); // Process it directly
-
-        exit;
+        One_Click_Migration::$process_backup_single->trigger_processing();
     }
 
 
@@ -488,18 +484,15 @@ class OCM_Backup
         $exluded_folders = self::get_excluded_folders();
 
         if (!One_Click_Migration::$process_restore_single->is_queue_empty()) {
-            One_Click_Migration::$process_restore_single->handle_cron_healthcheck();
-            exit;
+            // Queue already exists, just process it directly
+            One_Click_Migration::$process_restore_single->trigger_processing();
         } else {
             One_Click_Migration::$process_restore_single->push_to_queue(array($username, $password));
             
-            // Use direct processing for maximum compatibility across all environments
-            // Async requests can be blocked by Cloudflare, firewalls, or security plugins
+            // Save the queue and use direct processing for maximum reliability
+            One_Click_Migration::$process_restore_single->save();
             One_Click_Migration::write_to_log(' SYSLOG: Using direct restore processing for maximum compatibility');
-            One_Click_Migration::$process_restore_single->save(); // Save the queue
-            One_Click_Migration::$process_restore_single->trigger_processing(); // Process it directly
-
-            exit;
+            One_Click_Migration::$process_restore_single->trigger_processing();
         }
     }
 
@@ -1837,7 +1830,7 @@ class OCM_Backup
 
         $default_text = array(
             'text' => 'Start a backup or a restore to see current progress here.</br></br>Entire process runs in the background, independent of your browser activity.</br> </br>If you get logged out during restore, log back in using your backup old WordPress credentials and refresh this page for progress.',
-            'value' => '0%'
+            'value' => '1%'  // Changed from 0% to 1% to prevent initial progress bar jump from 1% → 0% → 1%
         );
 
 

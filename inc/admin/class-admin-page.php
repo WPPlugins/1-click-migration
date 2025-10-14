@@ -73,6 +73,10 @@ class OCM_Admin_Page
                    <a href="<?php echo esc_url(admin_url('admin-post.php?action=restart'));?>" style= "display:none;"
                                 class="button button-primary button-large ocm-button restart-button">Restart</a>
                 </div>
+                
+                <p class="ocm-exclusion-warning" style="display:none; color: #dc3232; margin-top: 10px; text-align: center;">
+                    <em>Please select at least one component to backup / restore.</em>
+                </p>
 
             </form>
 
