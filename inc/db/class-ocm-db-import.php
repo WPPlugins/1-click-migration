@@ -7,6 +7,9 @@ use wpdb;
 class OCM_SQL_Utils
 {
     protected static $sql_line = '';
+    protected static $mysqldump_support_logged = false;
+    protected static $db_backup_progress_logged = false;
+    protected static $windows_logged = false;
     protected static $descriptors = array(
         array('pipe', 'r'),
         array('pipe', 'w'),
@@ -149,7 +152,10 @@ class OCM_SQL_Utils
     public static function proc_open_compat($cmd, $descriptorspec, &$pipes, $cwd = null, $env = null, $other_options = null)
     {
         if (self::is_windows()) {
-	        One_Click_Migration::write_to_log('OS: Windows');
+	        if (!self::$windows_logged) {
+	            One_Click_Migration::write_to_log('OS: Windows');
+	            self::$windows_logged = true;
+	        }
 	        if(!function_exists("_proc_open_compat_win_env")) return false;
 	        
             // Need to encompass the whole command in double quotes - PHP bug https://bugs.php.net/bug.php?id=49139
@@ -220,9 +226,11 @@ class OCM_SQL_Utils
         $result_file = self::sql_fix($result_file);
 
         if (!self::check_mysql_support()) {
-            self::import_use_wpdb($result_file);
-            self::sql_fix_after($result_file);
-            return true;
+            $result = self::import_use_wpdb($result_file);
+            if ($result) {
+                self::sql_fix_after($result_file);
+            }
+            return $result;
         }
 
         $mysql_args = array(
@@ -239,12 +247,15 @@ class OCM_SQL_Utils
         if ($result == false)
         {
 	        One_Click_Migration::write_to_log('Notice: Database restore in progress. Please don\'t leave the plugin page.');
-            self::import_use_wpdb($result_file);
-            self::sql_fix_after($result_file);
-            return true;
+            $fallback_result = self::import_use_wpdb($result_file);
+            if ($fallback_result) {
+                self::sql_fix_after($result_file);
+            }
+            return $fallback_result;
         }
 
         self::sql_fix_after($result_file);
+        return true;
     }
 
     public static function sql_fix($filepath)
@@ -266,20 +277,156 @@ class OCM_SQL_Utils
         }
     }
 
-    public static function import_use_wpdb($result_file)
+	    public static function import_use_wpdb($result_file)
+	    {
+	        /** @var wpdb $wpdb */
+	        global $wpdb,$EZSQL_ERROR;
+
+	        $sql_code = file_get_contents($result_file);
+	        $queries = self::split_sql_file($sql_code);
+	        $has_check_current_query = property_exists($wpdb, 'check_current_query');
+	        $previous_check_current_query = $has_check_current_query ? $wpdb->check_current_query : null;
+
+	        $error_count = 0;
+	        $statement_index = 0;
+	        foreach ($queries as $query) {
+	            $query = self::prepare_sql_query($query);
+            if (empty($query)) {
+                continue;
+	            }
+	            $statement_index++;
+	            $wpdb->last_error = '';
+	            if ($has_check_current_query) {
+	                $wpdb->check_current_query = false;
+	            }
+	            $wpdb->query($query);
+	            if (!empty($wpdb->last_error)) {
+	                $error_str = !empty($EZSQL_ERROR[0]['error_str']) ? $EZSQL_ERROR[0]['error_str'] : $wpdb->last_error;
+	                One_Click_Migration::write_to_log(sprintf('Error: DB Restore. Table: "%s" error_str: "%s"', $result_file, $error_str));
+	                self::log_sql_restore_failure_context($result_file, $query, $statement_index);
+                $error_count++;
+
+	                // Abort if a CREATE TABLE statement fails — the table won't exist
+	                if (stripos($query, 'CREATE TABLE') !== false) {
+	                    One_Click_Migration::write_to_log(sprintf('Critical: CREATE TABLE failed for "%s". Aborting import of this file.', $result_file));
+	                    if ($has_check_current_query) {
+	                        $wpdb->check_current_query = $previous_check_current_query;
+	                    }
+	                    return false;
+	                }
+	            }
+	        }
+	        if ($has_check_current_query) {
+	            $wpdb->check_current_query = $previous_check_current_query;
+	        }
+
+	        if ($error_count > 0) {
+	            One_Click_Migration::write_to_log(sprintf('Warning: %d error(s) during import of "%s"', $error_count, basename($result_file)));
+	            return false;
+        }
+
+        return true;
+    }
+
+    private static function prepare_sql_query($query)
     {
-        /** @var wpdb $wpdb */
-        global $wpdb,$EZSQL_ERROR;
+        $lines = preg_split('/\R/', $query);
+        $statement_lines = array();
 
-        $sql_code = file_get_contents($result_file);
-        $queries = self::split_sql_file($sql_code);
+        foreach ($lines as $line) {
+            $trimmed = ltrim($line);
 
-        foreach ($queries as $query) {
-            $wpdb->query($query);
-            if (!empty($wpdb->last_error)) {
-                One_Click_Migration::write_to_log(sprintf('Error: DB Restore. Table: "%s" error_str: "%s"',$result_file,$EZSQL_ERROR[0]['error_str'] ));
+            if ($trimmed === '' || strpos($trimmed, '#') === 0 || preg_match('/^--\s/', $trimmed)) {
+                continue;
+            }
+
+            $statement_lines[] = $line;
+        }
+
+        return trim(implode("\n", $statement_lines));
+    }
+
+    private static function log_sql_restore_failure_context($result_file, $query, $statement_index)
+    {
+        global $wpdb;
+
+        One_Click_Migration::write_to_log(sprintf(
+            'SYSLOG: DB restore failure context: file="%s" statement=%d type="%s" table="%s" db_prefix="%s" base_prefix="%s" bytes=%d sample="%s"',
+            basename($result_file),
+            $statement_index,
+            self::get_sql_statement_type($query),
+            self::get_sql_statement_table($query),
+            isset($wpdb->prefix) ? $wpdb->prefix : '',
+            isset($wpdb->base_prefix) ? $wpdb->base_prefix : '',
+            strlen($query),
+            self::redact_sql_for_log($query)
+        ));
+    }
+
+    private static function get_sql_statement_type($query)
+    {
+        if (preg_match('/^\s*([a-z]+)/i', $query, $matches)) {
+            return strtoupper($matches[1]);
+        }
+
+        return 'UNKNOWN';
+    }
+
+    private static function get_sql_statement_table($query)
+    {
+        $patterns = array(
+            '/^\s*CREATE\s+TABLE(?:\s+IF\s+NOT\s+EXISTS)?\s+(`[^`]+`|[^\s(]+)/i',
+            '/^\s*DROP\s+TABLE(?:\s+IF\s+EXISTS)?\s+(`[^`]+`|[^\s(]+)/i',
+            '/^\s*ALTER\s+TABLE\s+(`[^`]+`|[^\s(]+)/i',
+            '/^\s*TRUNCATE\s+TABLE\s+(`[^`]+`|[^\s(]+)/i',
+            '/^\s*(?:INSERT|REPLACE)\s+INTO\s+(`[^`]+`|[^\s(]+)/i',
+            '/^\s*UPDATE\s+(`[^`]+`|[^\s(]+)/i',
+            '/^\s*DELETE\s+FROM\s+(`[^`]+`|[^\s(]+)/i',
+        );
+
+        foreach ($patterns as $pattern) {
+            if (preg_match($pattern, $query, $matches)) {
+                return trim($matches[1], '`');
             }
         }
+
+        return 'unknown';
+    }
+
+    private static function redact_sql_for_log($query)
+    {
+        $sample = self::safe_preg_replace('/\/\*.*?\*\//s', '/* ... */', $query);
+        $sample = self::safe_preg_replace("/'([^'\\\\]|\\\\.)*'/s", "'?'", $sample);
+        $sample = self::safe_preg_replace('/"([^"\\\\]|\\\\.)*"/s', '"?"', $sample);
+        $sample = self::safe_preg_replace('/\s+/', ' ', $sample);
+        $sample = trim($sample);
+
+        if (preg_match('/^\s*(?:INSERT|REPLACE)\s+INTO/i', $sample)) {
+            $sample = self::safe_preg_replace('/\bVALUES\s*\(.*/i', 'VALUES (...)', $sample);
+        } elseif (preg_match('/^\s*UPDATE\s+/i', $sample)) {
+            if (preg_match('/\bWHERE\b/i', $sample)) {
+                $sample = self::safe_preg_replace('/\bSET\b\s+.*?\s+\bWHERE\b/i', 'SET ... WHERE', $sample);
+            } else {
+                $sample = self::safe_preg_replace('/\bSET\b\s+.*/i', 'SET ...', $sample);
+            }
+        }
+
+        if (strlen($sample) > 700) {
+            $sample = substr($sample, 0, 700) . '...';
+        }
+
+        return $sample;
+    }
+
+    private static function safe_preg_replace($pattern, $replacement, $subject)
+    {
+        if (!is_string($subject)) {
+            return '';
+        }
+
+        $result = @preg_replace($pattern, $replacement, $subject);
+
+        return is_string($result) ? $result : '';
     }
 
     /**
@@ -353,10 +500,15 @@ class OCM_SQL_Utils
             }
         }
 
-        $increment = 1000;
+        // Dynamic page sizing based on available memory
         $row_start = 0;
-        $row_inc = $increment;
+        $row_inc = self::get_dynamic_row_increment($table);
 
+        // Suppress row increment logging to avoid progress bar jumping
+        // if ($row_inc < 5000) {
+        //     One_Click_Migration::write_to_log(" SYSLOG: Using row increment of {$row_inc} for table {$table}");
+        // }
+        
         $search = array("\x00", "\x0a", "\x0d", "\x1a");
         $replace = array('\0', '\n', '\r', '\Z');
 
@@ -366,7 +518,8 @@ class OCM_SQL_Utils
 
             // \x08\\x09, not required
             if ($table_data) {
-              if (WP_DEBUG === true) One_Click_Migration::write_to_log(sprintf('SYSLOG: Inserting table data into table "%s"', $table));
+              // Suppress frequent SYSLOG messages that cause progress bar jumping
+              // if (WP_DEBUG === true) One_Click_Migration::write_to_log(sprintf('SYSLOG: Inserting table data into table "%s"', $table));
                 $thisEntry = '';
                 foreach ($table_data as $row) {
                     $values = array();
@@ -405,7 +558,8 @@ class OCM_SQL_Utils
 
         // Create footer/closing comment in SQL-file
         self::add_sql_line("\n# End of data contents of table $table\n\n");
-        if (WP_DEBUG === true) One_Click_Migration::write_to_log(sprintf('SYSLOG: End of data contents of table "%s"', $table));
+        // Suppress frequent SYSLOG messages that cause progress bar jumping
+        // if (WP_DEBUG === true) One_Click_Migration::write_to_log(sprintf('SYSLOG: End of data contents of table "%s"', $table));
 
         file_put_contents($assoc_args['result-file'], self::$sql_line);
     }
@@ -425,8 +579,16 @@ class OCM_SQL_Utils
         }
 
         if (!self::check_mysqldump_support()) {
-            if (WP_DEBUG === true) One_Click_Migration::write_to_log('SYSLOG: There is no mysqldump support');
-	        One_Click_Migration::write_to_log('Database backup in progress. Please do not leave the plugin page.');
+            // Only log once per backup session to prevent progress bar jumping
+            if (!self::$mysqldump_support_logged) {
+                One_Click_Migration::write_to_log('SYSLOG: There is no mysqldump support');
+                self::$mysqldump_support_logged = true;
+            }
+            // Only log the progress message once per backup session to prevent progress bar jumping
+            if (!self::$db_backup_progress_logged) {
+                One_Click_Migration::write_to_log('Database backup in progress. Please do not leave the plugin page.');
+                self::$db_backup_progress_logged = true;
+            }
             return self::export_table($assoc_args);
         }
 
@@ -442,7 +604,9 @@ class OCM_SQL_Utils
 
         $command_esc_args = array(DB_NAME);
 
+        $saved_tables = null;
         if (isset($assoc_args['tables'])) {
+            $saved_tables = $assoc_args['tables'];
             $tables = explode(',', trim($assoc_args['tables'], ','));
             unset($assoc_args['tables']);
             $command .= ' --tables';
@@ -458,6 +622,9 @@ class OCM_SQL_Utils
         $result = self::run($escaped_command, $assoc_args);
         if ($result == false)
         {
+            if ($saved_tables !== null) {
+                $assoc_args['tables'] = $saved_tables;
+            }
 	        One_Click_Migration::write_to_log('Database backup in progress. Please do not leave the plugin page.');
 	        return self::export_table($assoc_args);
         }
@@ -530,7 +697,7 @@ class OCM_SQL_Utils
 
     private static function split_sql_file($sql)
     {
-        return preg_split('/[.+;][\s]*\n/', $sql, -1, PREG_SPLIT_NO_EMPTY);
+        return preg_split('/;[\s]*\n/', $sql, -1, PREG_SPLIT_NO_EMPTY);
     }
 
     /**
@@ -594,6 +761,103 @@ class OCM_SQL_Utils
 			'char' => $char,
 			'coll' => $coll
         );
+    }
 
+    /**
+     * Get dynamic row increment based on available memory and table characteristics.
+     * @param string $table Table name
+     * @return int
+     */
+    private static function get_dynamic_row_increment($table) {
+        global $wpdb;
+        
+        try {
+            // Get table row count and average row size estimate
+            $row_count = $wpdb->get_var("SELECT COUNT(*) FROM `{$table}`");
+            $table_size_result = $wpdb->get_row("
+                SELECT 
+                    ROUND(((data_length + index_length) / 1024 / 1024), 2) AS 'size_mb',
+                    table_rows
+                FROM information_schema.TABLES 
+                WHERE table_schema = '" . DB_NAME . "' 
+                AND table_name = '{$table}'
+            ", ARRAY_A);
+            
+            $table_size_mb = $table_size_result ? max((float)$table_size_result['size_mb'], 0) : 0;
+            $estimated_row_size = $row_count > 0 ? ($table_size_mb * 1024 * 1024) / $row_count : 1024;
+            $estimated_row_size = max($estimated_row_size, 128); // Guard against zero-size tables causing division by zero
+            
+            // Calculate available memory
+            $memory_limit = ini_get('memory_limit');
+            $memory_bytes = self::convert_to_bytes($memory_limit);
+            $usage_memory = memory_get_usage(true);
+            $available_memory = min($memory_bytes - $usage_memory, $memory_bytes * 0.20); // Use max 20% of total memory
+            
+            // Ensure minimum memory available
+            $minimum_memory = 32 * 1024 * 1024;
+            if ($available_memory < $minimum_memory) {
+                One_Click_Migration::write_to_log(" SYSLOG: Low memory available, using conservative increment for table {$table}");
+                return 500; // Very conservative
+            }
+            
+            // Calculate safe row increment with safety factor
+            $safety_factor = 4; // Account for PHP overhead, string processing, etc.
+            $max_rows = floor($available_memory / ($estimated_row_size * $safety_factor));
+            
+            // Clamp between reasonable bounds
+            $increment = max(100, min($max_rows, 20000));
+            
+            // Suppress memory calculation logging to avoid progress bar jumping
+            // if ($estimated_row_size > 2048 || $available_memory < 128 * 1024 * 1024) {
+            //     One_Click_Migration::write_to_log(" SYSLOG: Table {$table} - Calculated increment: {$increment}");
+            // }
+                
+            return (int)$increment;
+            
+        } catch (\Throwable $e) {
+            One_Click_Migration::write_to_log(" SYSLOG: Error calculating dynamic increment for {$table}, using fallback: " . $e->getMessage());
+            return 1000; // Safe fallback
+        }
+    }
+
+    /**
+     * Convert memory limit string to bytes.
+     * @param string $val Memory limit string (e.g., "512M")
+     * @return int
+     */
+    private static function convert_to_bytes($val) {
+        $val = trim($val);
+        $last = strtolower($val[strlen($val)-1]);
+        $val = (int) $val;
+
+        switch($last) {
+            case 'g': $val *= 1024;
+            case 'm': $val *= 1024;
+            case 'k': $val *= 1024;
+        }
+
+        return $val;
+    }
+
+    /**
+     * Format bytes to human readable format.
+     * @param int $bytes
+     * @return string
+     */
+    private static function format_bytes($bytes) {
+        $units = ['B', 'KB', 'MB', 'GB'];
+        $bytes = max($bytes, 0);
+        $pow = floor(($bytes ? log($bytes) : 0) / log(1024));
+        $pow = min($pow, count($units) - 1);
+        $bytes /= (1 << (10 * $pow));
+        return round($bytes, 2) . ' ' . $units[$pow];
+    }
+    
+    /**
+     * Reset the logging flags for new backup sessions
+     */
+    public static function reset_backup_logging_flags() {
+        self::$mysqldump_support_logged = false;
+        self::$db_backup_progress_logged = false;
     }
 }

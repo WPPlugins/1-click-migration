@@ -21,6 +21,23 @@ class Error_Handler
     }
 
     /**
+     * Static cache for error deduplication.
+     * Maps error fingerprint => ['count' => int, 'time' => float]
+     */
+    private static $error_cache = [];
+
+    /**
+     * Minimum interval (seconds) between logging the same error.
+     */
+    private static $dedup_interval = 60;
+
+    /**
+     * Minimum interval (seconds) between logging the same PHP error across
+     * separate requests. The in-memory cache only dedupes within one request.
+     */
+    private static $persistent_dedup_interval = 3600;
+
+    /**
      * Error handler
      *
      * @param  integer $errno   Error level
@@ -31,10 +48,60 @@ class Error_Handler
      */
     public static function error($errno, $errstr, $errfile, $errline)
     {
+      $is_plugin_error = strpos($errfile, 'plugins/1-click-migration/') !== false;
+      $migration_active = get_option('ocm_action_start_backup') || get_option('ocm_action_start_restore') || OCM_Debug_Mode::is_active();
+
+      // Do not keep appending unrelated frontend/theme/plugin fatals to an old
+      // migration S3 log after backup/restore has finished.
+      if (!$migration_active && !$is_plugin_error) {
+          return;
+      }
+
+      // Skip vendor deprecation notices (e.g. nelexa/zip PHP 8.1+ return type warnings)
+      if ($errno === E_DEPRECATED && strpos($errfile, '/vendor/') !== false) {
+          return;
+      }
+
+      // Skip transient errno=11 (Resource deadlock avoided) read failures
+      if (strpos($errstr, 'errno=11') !== false) {
+          return;
+      }
+
+      // Skip unserialize notices — expected during URL search-replace on serialized data
+      if ($errno === E_NOTICE && strpos($errstr, 'unserialize()') !== false) {
+          return;
+      }
+
+      // Deduplicate: suppress identical errors within the dedup interval
+      $error_fingerprint = md5($errstr . '|' . $errfile . '|' . $errline);
+      $now = microtime(true);
+
+      if (isset(self::$error_cache[$error_fingerprint])) {
+          $cached = self::$error_cache[$error_fingerprint];
+          if (($now - $cached['time']) < self::$dedup_interval) {
+              // Still within dedup window — increment count and suppress
+              self::$error_cache[$error_fingerprint]['count']++;
+              return;
+          }
+          // Dedup window expired — log with suppression count if any were suppressed
+          $suppressed = $cached['count'];
+          self::$error_cache[$error_fingerprint] = ['count' => 0, 'time' => $now];
+          if ($suppressed > 0) {
+              One_Click_Migration::write_to_log(sprintf(' SYSLOG: [Suppressed %d duplicate(s) of previous error in last %ds]', $suppressed, self::$dedup_interval));
+          }
+      } else {
+          self::$error_cache[$error_fingerprint] = ['count' => 0, 'time' => $now];
+      }
+
+      if (!self::should_log_persistent_error($error_fingerprint, $now)) {
+          return;
+      }
+
       $file = OCM_DEBUG_LOG_FILE;
       $file_array = [];
       if(file_exists($file)){
-        $file_array = file($file);
+        $all_lines = file($file);
+        $file_array = array_slice($all_lines, -100);
       }
 
       $log_message = self::getMessage($errno, $errstr, $errfile, $errline);
@@ -43,18 +110,70 @@ class Error_Handler
             case E_ERROR :
                 One_Click_Migration::write_to_log(sprintf(' SYSLOG: "%s"', $log_message));
                 One_Click_Migration::write_to_log($errstr);
-                die();
+                // Only die for fatal errors originating from plugin code
+                if ($is_plugin_error) {
+                    die();
+                }
                 break;
             case E_NOTICE :
             case E_WARNING :
             default :
-                if (WP_DEBUG === true) One_Click_Migration::write_to_log(sprintf(' SYSLOG: "%s"', $log_message));
+                if (WP_DEBUG === true || OCM_Debug_Mode::is_active()) One_Click_Migration::write_to_log(sprintf(' SYSLOG: "%s"', $log_message));
                 break;
         }
 
       }
 
     }
+
+    private static function should_log_persistent_error($fingerprint, $now)
+    {
+      $cache = get_option('ocm_error_log_dedupe', []);
+      if (!is_array($cache)) {
+          $cache = [];
+      }
+
+      $last_time = isset($cache[$fingerprint]['time']) ? (float) $cache[$fingerprint]['time'] : 0.0;
+      $suppressed = isset($cache[$fingerprint]['count']) ? (int) $cache[$fingerprint]['count'] : 0;
+
+      if ($last_time > 0 && ($now - $last_time) < self::$persistent_dedup_interval) {
+          $cache[$fingerprint] = [
+              'time' => $last_time,
+              'count' => $suppressed + 1,
+          ];
+          update_option('ocm_error_log_dedupe', self::prune_persistent_error_cache($cache, $now), false);
+          return false;
+      }
+
+      $cache[$fingerprint] = [
+          'time' => $now,
+          'count' => 0,
+      ];
+      update_option('ocm_error_log_dedupe', self::prune_persistent_error_cache($cache, $now), false);
+
+      if ($suppressed > 0) {
+          One_Click_Migration::write_to_log(sprintf(
+              ' SYSLOG: [Suppressed %d duplicate(s) of previous error across requests in last %ds]',
+              $suppressed,
+              self::$persistent_dedup_interval
+          ));
+      }
+
+      return true;
+    }
+
+    private static function prune_persistent_error_cache(array $cache, $now)
+    {
+      foreach ($cache as $fingerprint => $entry) {
+          $last_time = isset($entry['time']) ? (float) $entry['time'] : 0.0;
+          if ($last_time <= 0 || ($now - $last_time) > 86400) {
+              unset($cache[$fingerprint]);
+          }
+      }
+
+      return $cache;
+    }
+
 
     private static function substr_in_array($needle, array $haystack)
     {

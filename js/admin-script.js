@@ -1,825 +1,274 @@
-const validateEmail = function (email) {
-    const regex = /^([a-zA-Z0-9_.+-])+@(([a-zA-Z0-9-])+\.)+([a-zA-Z0-9]{2,4})+$/;
-    return regex.test(email);
-};
+/* OneClick Migration 3.0 admin UI — vanilla JS, no jQuery UI accordion. */
+(function ($) {
+    'use strict';
 
-const buttonIsDisabled = function (button) {
-    return jQuery(button).hasClass('one-click-disabled');
-};
+    // -------- helpers --------
+    var EMAIL_RE = /^([a-zA-Z0-9_.+\-])+@(([a-zA-Z0-9\-])+\.)+([a-zA-Z0-9]{2,})+$/;
+    var noticeList = [];
+    var timer = null;
+    var timerInitiated = 0;
+    var stopTimer = false;
+    var isRestarted = false;
+    var isRestarting = 0;
 
-const disableButtons = function () {
-    jQuery('.ocm-button.backup-button, .ocm-button.restore-button').addClass('one-click-disabled');
-
-};
-
-const enableButtons = function () {
-    jQuery('.ocm-button').removeClass('one-click-disabled');
-};
-
-const setProgressBarToStart = function (text) {
-    jQuery('.ocm-progress-text').html(text);
-    jQuery('.progress-bar-color').css('width', '1%');
-    jQuery('.progress-bar-inner').text('1%');
-};
-
-const clearMessageError = function () {
-    jQuery('.ocm-info.error').hide();
-};
-
-const clearMessages = function () {
-    jQuery('.ocm-info.error, .ocm-info.notice').hide();
-};
-
-const checkInArray = function (text, noticeList) {
-  var status = false;
-
-  jQuery(noticeList).each(function(index, listText){
-
-
-
-    if(listText === text){
-      status = true;
-    }
-  });
-
-
-  return status;
-}
-
-const renderMessageNoticeType = function (text, noticeList) {
-
-  var inArray = checkInArray(text, noticeList);
-
-  if(inArray === false){
-      jQuery('.ocm-info.notice').append(`<span class="ocm-progress-notice"></span><span>${text}</span><br>`).fadeIn(300);
-      noticeList.push(text);
-  }
-
-};
-
-const renderMessage = function (text) {
-
-    if (text && text.match(/Error/)) {
-
-      if(text.indexOf('SYSLOG: "[PHP ERR][FATAL]') === -1){
-
-        jQuery('.ocm-info.error').html(`<span class="ocm-progress-notice"></span><span>${text}</span><br>`).fadeIn(300);
-      }
-
-    } else if (text && text.match(/Notice:/)) {
-        renderMessageNoticeType(text, noticeList);
-    } else {
-        jQuery('.ocm-progress-text').html(text);
-    }
-};
-
-const disableInputFields = function () {
-    jQuery('#ocm_user_email').attr("disabled", true);
-    jQuery('#ocm_user_password').attr("disabled", true);
-};
-
-const scrollToNextSection = function(target){
-
-    if (target.length) {
-        jQuery('html,body').animate({
-            scrollTop: target.offset().top
-        }, 1000);
-        return false;
+    function validateEmail(email) {
+        return EMAIL_RE.test(email);
     }
 
-}
-var restoreAction = "not-yet-started";
-var paypalAmount = siteData.defaultPrice;
-
-
-const customAlert = function (message) {
-    jQuery('<div></div>').html(message).dialog({
-        title: 'Paypal Transaction',
-        resizable: false,
-        modal: true,
-        buttons: {
-            'Ok': function () {
-                jQuery(this).dialog('close')
-            }
+    function disableButtons() {
+        $('.ocm-button.backup-button, .ocm-button.restore-button').addClass('one-click-disabled');
+    }
+    function enableButtons() {
+        $('.ocm-button').removeClass('one-click-disabled');
+        if (typeof siteData !== 'undefined' && siteData.otherPluginsActive > 0 && !$('#ocm-plugins-ack-checkbox').is(':checked')) {
+            $('.ocm-button.backup-button, .ocm-button.restore-button').addClass('one-click-disabled');
         }
-    })
-}
+    }
+    function buttonIsDisabled(el) { return $(el).hasClass('one-click-disabled'); }
 
+    function setProgress(value, statusText) {
+        $('#ocm-pg-pct').text(value);
+        $('#ocm-pg-fill').css('width', value);
+        if (typeof statusText === 'string') {
+            $('#ocm-pg-status').html(statusText);
+        }
+    }
 
+    function clearMessages() {
+        $('.ocm-info.error, .ocm-info.notice').hide().removeClass('show').empty();
+    }
 
-/**
- * Determine the plugin price when the coupon code is applied
- *
- * @param {*} selectedCode The coupon code to get the price for
- *
- * @return int The plugin price
- */
-const getPluginPrice = async function (selectedCode) {
+    function renderMessage(text) {
+        if (!text) return;
+        if (text.match(/Error/)) {
+            if (text.indexOf('SYSLOG: "[PHP ERR][FATAL]') === -1) {
+                $('.ocm-info.error').html(text).addClass('show').show();
+            }
+        } else if (text.match(/Notice:/)) {
+            if (noticeList.indexOf(text) === -1) {
+                noticeList.push(text);
+                $('.ocm-info.notice').append('<span>' + text + '</span><br>').addClass('show').show();
+            }
+        } else {
+            $('#ocm-pg-status').html(text);
+        }
+    }
 
-    var finalPrice = siteData.defaultPrice;
-    var APIRetries = 1;
-    var APIsuccess = false;
-    let apiResponse;
+    // -------- progress polling --------
+    function displayProgressBar() {
+        clearMessages();
+        var timeoutId, intervalId;
 
-//     while (APIRetries-- > 0 && !APIsuccess) {
-//         apiResponse = await retrievePricingFromAPI(selectedCode);
-// 
-//         if ('undefined' !== typeof apiResponse.price && apiResponse.price) {
-//             finalPrice = apiResponse.price;
-//             APIsuccess = true;
-//         }
-//     }
-    finalPrice = 0; //for a limited time
-    
-    paypalAmount = finalPrice;
-
-
-    return finalPrice;
-}
-
-
-
-/**
-* Update the #ocm-paypal-div display status
-* and make an AJAX call to mark the PayPal payment as complete
-*/
-const completePayPalPayment = function () {
-    jQuery("#ocm-paypal-div").hide().addClass('payment-completed');
-    jQuery(".reset-payment-container").hide();
-    jQuery.post(ajaxurl, { 
-        'action': 'ocm_make_payment',
-        '_wpnonce': siteData.paymentNonce
-    });
-}
-
-var timerInitiated = 0;
-var timer = null;
-var stopTimer = false;
-var isRestarted = false;
-var isRestarting = 0;
-var noticeList = [];
-
-const displayProgressBar = function () {
-
-    clearMessageError();
-
-    // Delay the interval so that if there's an existing log file,
-    // the progress bar doesn't jump back to 100% right away
-    var timeoutId, intervalId;
-    var restoreTimes = 0;
-
-    timeoutId = setTimeout(function () {
-        intervalId = setInterval(function () {
-            const apiURL = siteData.progressUrl;
-            jQuery.ajax({
-                url: apiURL,
-                method: 'GET',
-                beforeSend: function(xhr) {
-                    xhr.setRequestHeader('X-WP-Nonce', siteData.restNonce);
-                },
-                success: function(response) {
-
-                // Display maintenance mode status
-                if (response.maintenanceMode) {
-                    jQuery('.maintenance-mode-indicator').show();
-                } else {
-                    jQuery('.maintenance-mode-indicator').hide();
-                }
-
-                renderMessage(response.text);
-                if (response.customNotice) {
-                    renderMessageNoticeType(response.customNotice, noticeList);
-                }
-
-
-                // Set inner bar width
-                jQuery('#ocmProgressBar .progress-bar-color').css('width', response.value);
-                // Set progress indicator text
-                jQuery('.progress-bar-inner').text(response.value);
-
-                if (response.uploadFileData) {
-                    var progress = response.uploadFileData.progress,
-                        complete = response.uploadFileData.complete;
-
-                    jQuery('#ocmProgressBarUploadFile').css({ display: 'block' });
-                    jQuery('#ocmProgressBarUploadFile .progress-bar-inner')
-                        .css({ width: progress + '%' })
-                        .text(progress + '%');
-
-                    if (complete) {
-                        jQuery('#ocmProgressBarUploadFile').css('display', 'none');
-                    }
-                } else {
-                    jQuery('#ocmProgressBarUploadFile').css('display', 'none');
-                }
-                var responseText = response.text;
-
-                if (response.isStopped) {
-
-                    clearInterval(intervalId);
-                    clearTimeout(timeoutId);
-                    enableButtons();
-                } else if ('1%' === response.value) {
-                    jQuery('.ocm-info').fadeOut(100);
-                    jQuery('#ocmProgressBarUploadFile').css('display', 'none');
-                } 
-                else if ('77%' === response.value) {
-                    var target = jQuery('#ocm-paypal-div');
-
-                    const ocmStartAction = jQuery('#ocmStartAction').val();
-                    restoreTimes++;
-                    
-                    completePayPalPayment();
-
-                    if (restoreTimes == 1 && siteData.defaultPrice == 0) {
-
-                        completePayPalPayment();
-
-
-                    } else {
-
-                        if ((restoreAction === 'started-restore-action' || ocmStartAction === 'restore')) {
-                            if (jQuery('#ocm-paypal-div').hasClass('payment-completed')) {
-                                var message = " Thank you. Please wait while we finish up the restore process";
-                                jQuery('.ocm-progress-text').html(message);
-                            } else {
-
-
-                                if (jQuery('#ocm-paypal-div').css('display') == 'none') {
-                                  jQuery("#ocm-paypal-div").show();
-                                  jQuery(".reset-payment-container").show();
-                                  scrollToNextSection(target);
-                                }
-
-
-                            }
-
+        timeoutId = setTimeout(function () {
+            intervalId = setInterval(function () {
+                $.ajax({
+                    url: siteData.progressUrl,
+                    method: 'GET',
+                    beforeSend: function (xhr) { xhr.setRequestHeader('X-WP-Nonce', siteData.restNonce); },
+                    success: function (response) {
+                        if (response.maintenanceMode) {
+                            $('.ocm-maintenance-mode-indicator').show();
+                        } else {
+                            $('.ocm-maintenance-mode-indicator').hide();
                         }
 
+                        renderMessage(response.text);
+                        if (response.customNotice) {
+                            renderMessage(response.customNotice);
+                        }
+
+                        if (response.topBanner) {
+                            $('#ocm-top-banner').html(response.topBanner).show();
+                        } else {
+                            $('#ocm-top-banner').hide().empty();
+                        }
+
+                        // Bar + pct
+                        $('#ocm-pg-fill').css('width', response.value).addClass('running');
+                        $('#ocm-pg-pct').text(response.value);
+
+                        var responseText = response.text || '';
+
+                        if (response.isStopped) {
+                            clearInterval(intervalId);
+                            clearTimeout(timeoutId);
+                            $('#ocm-pg-fill').removeClass('running');
+                            enableButtons();
+                        } else if ('100%' === response.value) {
+                            $('#ocm-pg-fill').removeClass('running');
+                            $('.ocm-timer').hide();
+                            $('.restart-button').hide();
+                            enableButtons();
+                            if (responseText.indexOf('Backup completed') !== -1 || responseText.indexOf('Restore completed') !== -1) {
+                                clearInterval(intervalId);
+                                clearTimeout(timeoutId);
+                            }
+                        }
+
+                        if (responseText.indexOf('Process is Restarting') !== -1) {
+                            if (isRestarting === 0) {
+                                isRestarted = true;
+                                isRestarting = 1;
+                                displayDecreasingTimer();
+                            }
+                        }
+                    },
+                    error: function (xhr) {
+                        if (xhr.status === 403) {
+                            clearInterval(intervalId);
+                            clearTimeout(timeoutId);
+                            setTimeout(function () { window.location.reload(); }, 5000);
+                        }
                     }
-
-
-                } 
-                else if ('100%' === response.value) {
-
-                    jQuery('.ocm-info').fadeOut(100);
-                    jQuery('.ocm-timer').hide();
-                    jQuery('.restart-button').hide();
-                    jQuery('.ocm-restart-message').hide();
-                    jQuery('.oocm-timer-text').hide();
-
-
-
-                    if (responseText.includes("Notice: File themes was skipped due to timeout")) {
-
-                      jQuery('.ocm-themes-skipped').show();
-
-                    }
-                    if (responseText.includes("Notice: File plugins was skipped due to timeout")) {
-
-                      jQuery('.ocm-plugins-skipped').show();
-
-                    }
-                    if (responseText.includes("Notice: File db was skipped due to timeout")) {
-
-                      jQuery('.ocm-db-skipped').show();
-
-                    }
-                    if (responseText.includes("Notice: File uploads was skipped due to timeout")) {
-
-                      jQuery('.ocm-uploads-skipped').show();
-
-                    }
-
-                    if (responseText.includes("Notice: File themes.zip.crypt was not found on the remote server. Please try to back it up again.")) {
-
-
-                      jQuery('.ocm-themes-not-found').show();
-
-                    }
-                    if (responseText.includes("Notice: File plugins.zip.crypt was not found on the remote server. Please try to back it up again.")) {
-
-
-                      jQuery('.ocm-plugins-not-found').show();
-
-                    }
-                    if (responseText.includes("Notice: File uploads.zip.crypt was not found on the remote server. Please try to back it up again.")) {
-
-
-                      jQuery('.ocm-uploads-not-found').show();
-
-                    }
-                    if (responseText.includes("Notice: File db.zip.crypt was not found on the remote server. Please try to back it up again.")) {
-
-
-                      jQuery('.ocm-db-not-found').show();
-
-                    }
-
-                    enableButtons();
-                    if (responseText.includes("Backup Completed") || responseText.includes("Restore Completed")) {
-
-                      clearInterval(intervalId);
-                      clearTimeout(timeoutId);
-                    }
-                }
-
-
-                if(responseText.includes("Process is Restarting")){
-
-                  if(isRestarting === 0){
-                    isRestarted = true;
-                    isRestarting = 1;
-                    displayDecreasingTimer();
-                  }
-
-                }
-
-                },
-                error: function(xhr, status, error) {
-                    // If we get a 403 (authentication failure), reload page to refresh nonce
-                    // This happens after restore when DB is replaced and user logs back in
-                    if (xhr.status === 403) {
-                        console.log('Progress endpoint returned 403 - waiting for restore to complete before reloading');
-                        clearInterval(intervalId);
-                        clearTimeout(timeoutId);
-                        
-                        // Wait 5 seconds for restore to complete before reloading
-                        // This prevents showing empty WordPress install page during DB replacement
-                        setTimeout(function() {
-                            console.log('Reloading page after 403 error to refresh authentication');
-                            window.location.reload();
-                        }, 5000);
-                    }
-                }
-            });
-        }, 1000);
-    }, 2000);
-};
-
-var displayDecreasingTimer = function(){
-  jQuery('.ocm-timer').show();
-  // jQuery('.restart-button').addClass('one-click-disabled');
-  jQuery('.restart-button').hide();
-  jQuery('.ocm-restart-message').hide();
-
-  var timeOut = siteData.timeout;
-
-
-  if(timerInitiated === 0 || isRestarted === true){
-
-    timer = setInterval(function(){
-      if(isRestarted){
-        clearInterval(timer);
-      }
-      timeOut = timeOut - 1;
-      timeOutText = timeOut;
-
-      jQuery('.ocm-decreasing-timer').text(timeOutText);
-
-      if(timeOut == 0 ){
-        stopTimer = true;
-        isRestarting = 0;
-         jQuery('.restart-button').show();
-         jQuery('.restart-button').removeClass('one-click-disabled');
-
-         jQuery('.ocm-restart-message').show();
-         clearInterval(timer);
-      }
-
-    }, 1000);
-    timerInitiated = 1;
-    isRestarted = false;
-
-
-  };
-
-};
-
-var stopTimer = function(timer, stopTimer){
-  if(stopTimer === true){
-    clearInterval(timer);
-  }
-
-};
-
-var hideRestartBtn = function(){
-  jQuery('.restart-button').click(function(){
-    $(this).hide();
-  });
-};
-
-/**
- * Retrieve the price to display to the user
- *
- * @param {string} discountCode The discount code
- * @param {string} email User email address
- */
-const retrievePricingFromAPI = function (discountCode) {
-    const userId = jQuery.MD5(jQuery('#ocm_user_email').val());
-    let apiEndpoint = siteData.priceAPIEndpoint + '?id=' + userId + '&domain=' + siteData.domain;
-    if (typeof discountCode !== 'undefined') {
-        apiEndpoint += '&discountcode=' + discountCode.toLowerCase();
+                });
+            }, 1000);
+        }, 2000);
     }
 
-    return new Promise(function (resolve, reject) {
-        jQuery.ajax({
-            url: apiEndpoint,
-            error: function (error) {
-                reject(error)
-            },
-            success: function (result) {
-                if (typeof discountCode === 'undefined') {
-                    siteData.defaultPrice = result.price;
+    function displayDecreasingTimer() {
+        var timeOut = siteData.timeout;
+        if (timerInitiated === 0 || isRestarted === true) {
+            timer = setInterval(function () {
+                if (isRestarted) { clearInterval(timer); }
+                timeOut = timeOut - 1;
+                if (timeOut === 0) {
+                    stopTimer = true;
+                    isRestarting = 0;
+                    clearInterval(timer);
                 }
-                resolve(result)
-            }
-
-        });
-    });
-}
-
-jQuery(document).ready(function () {
-
-    const ocmStartAction = jQuery('#ocmStartAction').val();
-    const buttons = jQuery('.ocm-button');
-
-
-    if ('backup' === ocmStartAction) {
-        displayProgressBar();
-        jQuery('.restart-button').attr('data-action', 'backup');
-    } else if ('restore' === ocmStartAction) {
-      var apiPrice =  getPluginPrice();
-      var initialPrice = Promise.resolve(apiPrice);
-      initialPrice.then((result) => {
-        var price =  parseFloat(result).toFixed(2);
-        var amountText =  ' $' + price + ' USD'
-        jQuery('#ocm-api-price').text(amountText);
-        jQuery('#ocm-coupon-amount').text(amountText);
-      }, function (err) {
-        jQuery('#ocm-api-price').text(paypalAmount);
-        jQuery('#ocm-coupon-amount').text(paypalAmount);
-      });
-        displayProgressBar();
-        jQuery('.restart-button').attr('data-action', 'restore');
-    }
-
-    buttons.click(function (e) {
-        const clickButton = jQuery(e.target);
-
-        if (clickButton.hasClass('cancel-actions-button')) {
-            return true;
+            }, 1000);
+            timerInitiated = 1;
+            isRestarted = false;
         }
+    }
 
-        e.preventDefault();
-        if (buttonIsDisabled(e.target)) {
+    // -------- submit handlers --------
+    function getSelectedExcludes() {
+        var out = [];
+        $('input[data-ocm-exclude]:checked').each(function () {
+            out.push($(this).data('ocm-exclude'));
+        });
+        return out;
+    }
+
+    function submitBackup() {
+        clearMessages();
+        var email = $('#ocm_user_email').val();
+        if (!validateEmail(email)) {
+            $('#ocm-pg-status').html('<span style="color:var(--ocm-err)">Please enter a valid email.</span>');
             return;
         }
-
-        clearMessages();
+        var excludes = getSelectedExcludes();
+        if (excludes.length >= 4) {
+            $('.ocm-exclusion-warning').show();
+            return;
+        }
+        $('.ocm-exclusion-warning').hide();
         disableButtons();
-
-        const user_name = jQuery('#ocm_user_email').val();
-        const password = jQuery('#ocm_user_password').val();
-        var selectedFolders = jQuery('#selective-backup').val();
-        var selected = '';
-        if(selectedFolders){
-          selected = selectedFolders.join(',');
-
-        }
-        
-        jQuery('form .error.notice').remove();
-
-        if (password.length < 4) {
-            jQuery('.form-table').append('<div class="error notice"><p>Please choose a longer password.</p></div>');
-            enableButtons();
-            return false;
-        }
-
-        if (!validateEmail(user_name)) {
-            jQuery('.form-table').append('<div class="error notice"><p>Please enter a valid email.</p></div>');
-            enableButtons();
-            return false;
-        }
-        
-        // Use AJAX to call the backup URL with proper parameters and nonce
-        const backup_url = e.target.href + '&username=' + encodeURIComponent(user_name) + '&password=' + encodeURIComponent(password) + '&selected=' + encodeURIComponent(selected);
-        const nonce = clickButton.hasClass('backup-button') ? siteData.backupNonce : siteData.restoreNonce;
-        const secure_backup_url = backup_url + '&_wpnonce=' + nonce;
-        
-        if (clickButton.hasClass('restore-button')) {
-            const bucketExistsUrl = siteData.bucketExistsUrl,
-                bucket_check_url = bucketExistsUrl.match(/\?/)
-                    ? bucketExistsUrl + '&username=' + user_name + '&password=' + password
-                    : bucketExistsUrl + '?username=' + user_name + '&password=' + password
-                ;
-
-            jQuery.ajax({
-                url: bucket_check_url,
-                method: 'GET',
-                beforeSend: function(xhr) {
-                    xhr.setRequestHeader('X-WP-Nonce', siteData.restNonce);
-                },
-                success: function(data) {
-                if ('false' === data) {
-                    jQuery('.form-table').append("<div class=\"error notice\"><p>We could not find a backup for this email and password combination. Please try again or if your backup was created more than 24 hours ago, you need to re-create it as it's been deleted.</p></div>");
-                    enableButtons();
-                } else {
-                    // Set progress bar to 1%
-                    setProgressBarToStart('Restore started');
-
-                    var apiPrice =  getPluginPrice();
-                    var initialPrice = Promise.resolve(apiPrice);
-                    initialPrice.then((result) => {
-                      var price =  parseFloat(result).toFixed(2);
-                      var amountText =  ' $' + price + ' USD'
-                      jQuery('#ocm-api-price').text(amountText);
-                      jQuery('#ocm-coupon-amount').text(amountText);
-                    }, function (err) {
-                      jQuery('#ocm-api-price').text(paypalAmount);
-                      jQuery('#ocm-coupon-amount').text(paypalAmount);
-                    });
-
-
-                    restoreAction = 'started-restore-action';
-                    displayProgressBar();
-                    displayDecreasingTimer();
-
-                    jQuery.get(secure_backup_url, function (data) {
-                        // Success - the restore process has started
-                    }).fail(function(xhr, status, error) {
-                        // Handle errors
-                        enableButtons();
-                    });
-
-
-                }
-                }
-            });
-        } else {
-            // Set progress bar to 1%
-            setProgressBarToStart('Backup started');
-            displayProgressBar();
-            displayDecreasingTimer();
-            if ('backup' === ocmStartAction) {
-
-                jQuery('.restart-button').attr('data-action', 'backup');
-            }
-
-            jQuery.get(secure_backup_url, function (data) {
-                // Success - the backup process has started
-            }).fail(function(xhr, status, error) {
-                // Handle errors
-                enableButtons();
-            });
-        }
-
-    });
-
-
-    // Catering for the PayPal coupon input
-    jQuery("#ocm-coupon-button").click(function () {
-        jQuery('#ocm-discount-response').html('Applying discount...');
-        var couponInput = jQuery('#ocm-coupon-code').val();
-        var discountAmount = getPluginPrice(couponInput);
-        var finalPrice = Promise.resolve(discountAmount);
-        finalPrice.then((result) => {
-            jQuery('#ocm-discount-response').html('Discount applied').fadeTo("slow", 0);
-            paypalAmount = parseFloat(result).toFixed(2);
-
-            var amountText = "";
-            if (parseFloat(result) === 0) {//When it is free at 100 % discount
-                completePayPalPayment();
-            } else {
-                amountText = ' $ ' + parseFloat(result).toFixed(2) + ' USD';
-                jQuery("#ocm-coupon-amount").text(amountText);
-            }
-        }, function (err) {
-            jQuery('#ocm-discount-response').html('');
-        });
-
-    })
-
-    //Added the PayPal integration..
-    jQuery("#ocm-paypal-button").ready(function ($) {
-
-
-        paypal.Buttons({
-            //Style the paypal button..
-            style: {
-                color: 'gold',
-                shape: 'pill',
-                label: 'pay',
-                size: 'large',
-                height: 40
-            },
-
-             // Set up the transaction
-            createOrder: function (data, actions) {
-                return actions.order.create({
-                    purchase_units: [{
-                        amount: {
-                            value: paypalAmount
-                        },
-                    }],
-
-                    application_context: {
-                        shipping_preference: "NO_SHIPPING"
-                    }
-                });
-            },
-
-            // Finalize the transaction
-            onApprove: function (data, actions) {
-                return actions.order.capture().then(function (details) {
-                    completePayPalPayment();
-                });
-            },
-            onError: function (err) {
-                if (err) {
-                    customAlert("Failed to process the paypal payment...");
-                }
-            }
-
-        }).render('#ocm-paypal-button');
-    });
-
-
-    //Disable both restore and backup buttons while payment is happening.
-    if (jQuery('.progress-bar-inner').html() == "77%") {
-        if (jQuery('#ocm-paypal-div').css('display') == 'none') {
-
-            jQuery("#ocm-paypal-div").show();
-            jQuery(".reset-payment-container").show();
-            var target = jQuery('#ocm-paypal-div');
-            scrollToNextSection(target);
-
-
-        }
-
-        disableButtons();
-        disableInputFields();
+        var url = $('#ocm-backup-href').attr('href')
+            + '&username=' + encodeURIComponent(email)
+            + '&selected=' + encodeURIComponent(excludes.join(','))
+            + '&_wpnonce=' + siteData.backupNonce;
+        setProgress('1%', 'Backup started');
         displayProgressBar();
-
+        displayDecreasingTimer();
+        $.get(url).fail(function () { enableButtons(); });
     }
 
-
-    var renderMultiselect = function(){
-
-      document.multiselect('#selective-backup');
-      jQuery('.multiselect-input-div').append('<span class="multiselect-placeholder">Advanced Options<span class="placeholder-small-text"> (click to expand) </span></sapn>');
-      jQuery('#selective-backup_input').attr('readonly');
-      jQuery('.multiselect-dropdown-arrow, .multiselect-placeholder').click(function(){
-      jQuery('#selective-backup_itemList').toggle();
-      var display = jQuery('#selective-backup_itemList').css('display');
-
-      if(display === 'block'){
-        jQuery('.multiselect-dropdown-arrow').addClass("multiselect-rotate-arrow-down");
-      }
-      if(display === 'none'){
-        jQuery('.multiselect-dropdown-arrow').removeClass("multiselect-rotate-arrow-down");
-      }
-
-
-      });
-      
-      // Hook into multiselect checkbox clicks to update button states
-      setTimeout(function() {
-        jQuery('#selective-backup_itemList').on('click', '.multiselect-checkbox', function() {
-          // Use setTimeout to let the multiselect library update the underlying select first
-          setTimeout(function() {
-            updateButtonStates();
-          }, 10);
-        });
-      }, 100);
-
-    };
-
-  // Function to check if all components are excluded and disable buttons accordingly
-  var updateButtonStates = function() {
-    var selectedFolders = jQuery('#selective-backup').val() || [];
-    var allExcluded = selectedFolders.length === 4; // All 4 options selected means everything excluded
-    
-    if (allExcluded) {
-        jQuery('.backup-button, .restore-button').addClass('disabled').attr('disabled', 'disabled');
-        jQuery('.backup-button, .restore-button').css({
-            'opacity': '0.5',
-            'cursor': 'not-allowed',
-            'pointer-events': 'none'
-        });
-        jQuery('.ocm-exclusion-warning').show();
-    } else {
-        jQuery('.backup-button, .restore-button').removeClass('disabled').removeAttr('disabled');
-        jQuery('.backup-button, .restore-button').css({
-            'opacity': '1',
-            'cursor': 'pointer',
-            'pointer-events': 'auto'
-        });
-        jQuery('.ocm-exclusion-warning').hide();
+    function submitRestore() {
+        clearMessages();
+        var raw = ($('#ocm_restore_code').val() || '').replace(/[\s\-]+/g, '').toUpperCase();
+        if (raw.length < 6 || raw.length > 32) {
+            $('#ocm-pg-status').html('<span style="color:var(--ocm-err)">Paste the 8-character restore code we emailed you (e.g. <code>XXXX-XXXX</code>).</span>');
+            return;
+        }
+        var excludes = getSelectedExcludes();
+        if (excludes.length >= 4) {
+            $('.ocm-exclusion-warning').show();
+            return;
+        }
+        $('.ocm-exclusion-warning').hide();
+        disableButtons();
+        var url = $('#ocm-restore-href').attr('href')
+            + '&restore_code=' + encodeURIComponent(raw)
+            + '&selected=' + encodeURIComponent(excludes.join(','))
+            + '&_wpnonce=' + siteData.restoreNonce;
+        setProgress('1%', 'Restore started');
+        displayProgressBar();
+        displayDecreasingTimer();
+        $.get(url).fail(function () { enableButtons(); });
     }
-  };
 
-  var reloadPaypalButtons = function(){
-    jQuery(".reset-payment-actions-button").click(function(){
-      window.location.href = window.location.href;
+    function setActiveTab(name) {
+        $('.ocm-tab').each(function () {
+            var on = $(this).data('ocm-tab') === name;
+            $(this).toggleClass('active', on).attr('aria-selected', on ? 'true' : 'false');
+        });
+        $('.ocm-pane').each(function () {
+            $(this).toggleClass('active', $(this).data('ocm-pane') === name);
+        });
+    }
+
+    // -------- DOMReady --------
+    $(function () {
+        var startAction = $('#ocmStartAction').val();
+
+        // Plugin warning
+        if (typeof siteData !== 'undefined' && siteData.otherPluginsActive > 0) {
+            $('#ocm-plugins-warning').css('display', 'flex');
+            $('#ocm-other-plugins-count').text(siteData.otherPluginsActive);
+            disableButtons();
+        }
+        $('#ocm-plugins-ack-checkbox').on('change', function () {
+            if ($(this).is(':checked')) {
+                enableButtons();
+            } else {
+                disableButtons();
+            }
+        });
+
+        // Tab clicks
+        $('.ocm-tab').on('click', function () { setActiveTab($(this).data('ocm-tab')); });
+
+        // Help accordion (single-open behavior)
+        $('[data-ocm-help] .ocm-help-toggle').on('click', function () {
+            var $item = $(this).closest('[data-ocm-help]');
+            var willOpen = !$item.hasClass('open');
+            $('[data-ocm-help]').removeClass('open');
+            if (willOpen) $item.addClass('open');
+        });
+
+        // Advanced toggle
+        $('#ocm-adv-toggle').on('click', function () {
+            var $btn = $(this);
+            var $grid = $('#ocm-adv-grid');
+            var open = $grid.toggleClass('open').hasClass('open');
+            $btn.toggleClass('open', open).attr('aria-expanded', open ? 'true' : 'false');
+        });
+
+        // Restore code formatter (XXXX-XXXX as user types)
+        $('#ocm_restore_code').on('input', function () {
+            var v = ($(this).val() || '').replace(/[^a-zA-Z0-9]/g, '').toUpperCase().slice(0, 8);
+            if (v.length > 4) v = v.slice(0, 4) + '-' + v.slice(4);
+            $(this).val(v);
+        });
+
+        // Submit handlers
+        $('#ocm-btn-backup').on('click', function (e) {
+            e.preventDefault();
+            if (buttonIsDisabled(this)) return;
+            submitBackup();
+        });
+        $('#ocm-btn-restore').on('click', function (e) {
+            e.preventDefault();
+            if (buttonIsDisabled(this)) return;
+            submitRestore();
+        });
+
+        // Auto-resume polling if a job is in progress on page load
+        if (startAction === 'backup' || startAction === 'restore') {
+            setActiveTab(startAction);
+            displayProgressBar();
+        }
     });
-
-  };
-
-  var restartFailedProcess = function(){
-    jQuery(".restart-button").click(function(){
-
-      jQuery(this).addClass('one-click-disabled');
-      jQuery('.ocm-restart-message').hide();
-      jQuery('.ocm-timer').hide();
-      var ajaxurl = siteData.ajaxurl;
-      var process = jQuery('.restart-button').attr('data-action');
-
-      jQuery.ajax({
-          type: "POST",
-          url: ajaxurl,
-          data : {
-            action: 'ocm_restart_failed_process',
-            process: process,
-            _wpnonce: siteData.restartNonce
-          },
-
-          success: function (result) {
-
-
-          }
-
-      });
-    });
-  };
-
-  var markRestoreStarted = function(){
-    jQuery(".restore-button").click(function(){
-
-        jQuery('.restart-button').attr('data-action', 'restore');
-        jQuery('.restart-button').text("Resume Restore");
-        var target = jQuery('.progress-row');
-        scrollToNextSection(target);
-    });
-  };
-  var markBackupStarted = function(){
-    jQuery(".backup-button").click(function(){
-      
-        jQuery('.restart-button').attr('data-action', 'backup');
-        jQuery('.restart-button').text("Resume Backup");
-        var target = jQuery('.progress-row');
-        scrollToNextSection(target);
-    });
-  };
-
-  var initializeAccordion = function(){
-    jQuery('#ocm-instruction-box-accordion').accordion(
-      {
-        active: false,
-        collapsible: true
-      }
-    );
-
-
-  }
-
-  var toggleCouponCodeRow = function(){
-    jQuery('#ocm-payment-table').on('click', '.ocm-hide-mc-row', function(){
-      var thisElem = jQuery(this);
-
-        jQuery('#ocm_migration_code_row').show();
-        thisElem.removeClass('ocm-hide-mc-row');
-        thisElem.addClass('ocm-show-mc-row');
-
-    });
-
-    jQuery('#ocm-payment-table').on('click', '.ocm-show-mc-row', function(){
-
-      var thisElem = jQuery(this);
-
-        jQuery('#ocm_migration_code_row').hide();
-        thisElem.removeClass('ocm-show-mc-row');
-        thisElem.addClass('ocm-hide-mc-row');
-
-
-    });
-
-  }
-
-
-    renderMultiselect();
-    
-    // Check button states on page load
-    updateButtonStates();
-    
-    reloadPaypalButtons();
-    restartFailedProcess();
-    markRestoreStarted();
-    markBackupStarted();
-    initializeAccordion();
-    toggleCouponCodeRow();
-    hideRestartBtn();
-
-    // displayDecreasingTimer();
-
-});
+})(jQuery);

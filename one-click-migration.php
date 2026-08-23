@@ -4,7 +4,7 @@
  * Plugin Name: 1 Click Migration
  * Plugin URI: https://wordpress.org/plugins/1-click-migration/
  * Description: Migrate, copy, or clone your entire site with 1 click. <strong>Any host, no size limitation, no premium versions.</strong>
- * Version: 2.3.6
+ * Version: 3.1.5
  * Author: 1ClickMigration
  * Author URI: https://1clickmigration.com/
  * Text Domain: 1-click-migration
@@ -40,6 +40,7 @@ require_once __DIR__ . '/inc/db/class-ocm-db-import.php';
 require_once __DIR__ . '/inc/db/class-ocm-search-replace-db.php';
 require_once __DIR__ . '/inc/db/class-ocm-db.php';
 require_once __DIR__ . '/inc/handler/class-error-handler.php';
+require_once __DIR__ . '/inc/handler/class-ocm-debug-mode.php';
 
 // If the function it's not available, require it.
 if ( ! function_exists( 'download_url' ) ) {
@@ -48,6 +49,11 @@ if ( ! function_exists( 'download_url' ) ) {
 
 class One_Click_Migration
 {
+    const MU_PLUGIN_ISOLATION_FILE = 'ocm-plugin-isolation.php';
+    const BACKUP_ISOLATION_TOKEN_OPTION = 'ocm_backup_isolation_token';
+    const BACKUP_ISOLATION_TOKEN_HASH_OPTION = 'ocm_backup_isolation_token_hash';
+    const BACKUP_ISOLATION_ALLOWED_PLUGINS_OPTION = 'ocm_backup_isolation_allowed_plugins';
+
     /** @var OCM_BackgroundBackup */
     public static $process_backup_single;
 
@@ -83,8 +89,12 @@ class One_Click_Migration
     {
         add_action('admin_menu', array(OCM_Admin_Page::class, 'add_admin_page'));
         add_action('admin_init', array(__CLASS__, 'register_settings'));
+        // add_action('admin_init', array(__CLASS__, 'ensure_mu_plugin_isolation_shim')); // disabled while debugging restore
         add_action('admin_enqueue_scripts', array(__CLASS__, 'admin_styles'));
+        add_action('template_redirect', array(__CLASS__, 'handle_maintenance_mode'));
         add_action('admin_post_start_backup', array(OCM_Backup::class, 'start_backup'));
+        add_action('wp_ajax_ocm_loopback_check', array(__CLASS__, 'loopback_check'));
+        add_action('wp_ajax_nopriv_ocm_loopback_check', array(__CLASS__, 'loopback_check'));
         add_action('wp_ajax_ocm_restart_failed_process', array(OCM_Backup::class, 'restart_failed_process'));
         add_action('admin_post_start_restore', array(OCM_Backup::class, 'start_restore'));
         add_action('admin_post_cancel_actions', array(OCM_Backup::class, 'cancel_actions'));
@@ -100,17 +110,6 @@ class One_Click_Migration
             ));
         });
 
-        add_action('rest_api_init', static function () {
-            register_rest_route('ocm/v1', '/bucket_exists/', array(
-                'methods' => 'GET',
-                'callback' => array(OCM_S3::class, 'bucket_exists'),
-                'permission_callback' => function() {
-                    return is_user_logged_in() && current_user_can('manage_options');
-                },
-            ));
-        });
-
-        add_action('wp_ajax_ocm_make_payment', array(OCM_Admin_Page::class, 'submit_paypal_payment'));
         add_action( 'admin_notices', array(OCM_Backup::class, 'add_file_not_found_notice'));
 
     }
@@ -144,45 +143,14 @@ class One_Click_Migration
     public static function init_handler(){
 
       Error_Handler::init_error_handler();
+      OCM_Debug_Mode::restore_if_active();
     }
 
     public static function register_settings()
     {
+        // The admin page renders fields directly via class-admin-page.php; we only need
+        // register_setting() so that options.php accepts the form submission for ocm_user_email.
         register_setting('one-click-migration', 'ocm_user_email');
-        register_setting('one-click-migration', 'ocm_user_password');
-
-        add_settings_section(
-            'ocm_key_section',
-            __('Easiest to use migration plugin', '1click-migration'),
-            array(__CLASS__, 'ocm_key_section_display'),
-            'one-click-migration'
-        );
-
-        add_settings_section(
-            'ocm_backup_restore_section',
-            __('Backup & Restore', '1click-migration'),
-            array(__CLASS__, 'render_backup_restore_section'),
-            'one-click-migration'
-        );
-
-    }
-
-    public static function render_backup_restore_section(){
-      add_settings_field('ocm_user_email', __('Email', '1click-migration'), array(__CLASS__, 'ocm_email_field_display'), 'one-click-migration', 'ocm_backup_restore_section', [
-          'label_for' => 'ocm_user_email',
-          'class' => 'ocm-user-email',
-      ]);
-
-      add_settings_field('ocm_user_password', __('Password', '1click-migration'), array(__CLASS__, 'ocm_password_field_display'), 'one-click-migration', 'ocm_backup_restore_section', [
-          'label_for' => 'ocm_user_password',
-          'class' => 'ocm-user-password',
-      ]);
-
-      add_settings_field('ocm_start_action', '', array(__CLASS__, 'ocm_start_action_field_display'), 'one-click-migration', 'ocm_backup_restore_section', [
-          'label_for' => 'ocm_start_action',
-          'class' => 'hidden',
-      ]);
-
     }
 
     public static function admin_styles($hook)
@@ -191,19 +159,9 @@ class One_Click_Migration
             return;
         }
 
-        $paypal_args = array(
-			"client-id"=>"AWSeMMPXTkPFkf_ogsDt63v0ogN0ve4QcAoqdBvxUrU_t7ZFmAl0yO1bV0-6gRfCYTxihJJeFqCrJtw4",
-			"currency"=> "USD"
-        );
+        wp_enqueue_style('custom_ocm_admin_css', plugins_url('css/admin-style.css', __FILE__), array(), self::$version);
 
-        wp_enqueue_style( 'jquery-ui-style', plugins_url('css/jquery-ui.css', __FILE__), array(),null);
-        wp_enqueue_style('multiselect-css', plugins_url('css/multiselect.css', __FILE__), array('jquery-ui-style'));
-        wp_enqueue_style('custom_ocm_admin_css', plugins_url('css/admin-style.css', __FILE__), array('multiselect-css'), self::$version);
-
-        wp_enqueue_script('ocm_admin_md5', plugins_url('js/jquery.md5.min.js', __FILE__), array('jquery'), self::$version);
-        wp_enqueue_script( 'ocm_paypal_js', add_query_arg( $paypal_args, 'https://www.paypal.com/sdk/js'), array(),null);
-        wp_enqueue_script('jquery-ui-js', plugins_url('js/jquery-ui.js', __FILE__), ['jquery']);
-        wp_enqueue_script('custom_ocm_admin_js', plugins_url('js/admin-script.js', __FILE__), array('jquery','jquery-ui-core','ocm_paypal_js','jquery-ui-dialog','ocm_admin_md5', 'jquery-ui-js'), self::$version);
+        wp_enqueue_script('custom_ocm_admin_js', plugins_url('js/admin-script.js', __FILE__), array('jquery'), self::$version, true);
         $ocm_user_email = get_option('ocm_user_email');
         $user_email = '';
         $urlparts = parse_url(home_url());
@@ -214,75 +172,81 @@ class One_Click_Migration
         }
         $timeout = One_Click_Migration::get_timeout();
 
+        $active_plugins = get_option('active_plugins', array());
+        $this_plugin_basename = plugin_basename(OCM_MAIN_FILE);
+        $other_active_count = 0;
+        foreach ($active_plugins as $plugin) {
+            if ($plugin !== $this_plugin_basename) {
+                $other_active_count++;
+            }
+        }
+
         wp_localize_script('custom_ocm_admin_js', 'siteData', array(
             'progressUrl' => get_rest_url(null, 'ocm/v1/progress'),
-            'bucketExistsUrl' => get_rest_url(null, 'ocm/v1/bucket_exists'),
-            'priceAPIEndpoint' => 'https://1clickmigration.com/api/',
-			      'defaultPrice' => 3.99,
             'userEmail' => $user_email,
             'domain' => $domain,
             'timeout' => $timeout,
             'ajaxurl' => admin_url('admin-ajax.php'),
             'restartNonce' => wp_create_nonce('ocm_restart_failed_process'),
-            'paymentNonce' => wp_create_nonce('ocm_make_payment'),
             'restNonce' => wp_create_nonce('wp_rest'),
             'backupNonce' => wp_create_nonce('one_click_migration_start_backup'),
-            'restoreNonce' => wp_create_nonce('one_click_migration_start_restore')
+            'restoreNonce' => wp_create_nonce('one_click_migration_start_restore'),
+            'otherPluginsActive' => $other_active_count
         ));
-        wp_enqueue_script('multiselect-js', plugins_url('js/multiselect.min.js', __FILE__), ['jquery','custom_ocm_admin_js']);
-
-    }
-
-    public static function ocm_key_section_display($args)
-    {
-
-        require_once __DIR__ . '/templates/admin/instruction-box.php';
-
-
-    }
-
-    public static function ocm_email_field_display($args)
-    {
-        $label = esc_attr($args['label_for']);
-        ?>
-        <span class="ocm-settings-email-icon"></span>
-        <input type="text" placeholder="Email" value="" id="<?php echo $label ?>" name="<?php echo $label ?>"
-               style="width: 100%; max-width: 350px">
-        <?php
-    }
-
-    public static function ocm_password_field_display($args)
-    {
-        $label = esc_attr($args['label_for']);
-        ?>
-        <span class="ocm-settings-pass-icon"></span>
-        <input type="password" value="" placeholder="Password" id="<?php echo $label; ?>" name="<?php echo $label; ?>"
-               style="width: 100%; max-width: 350px">
-        <?php
-    }
-
-    public static function ocm_start_action_field_display($args)
-    {
-        $label = esc_attr($args['label_for']);
-        $ocm_action_start_backup = get_option('ocm_action_start_backup');
-        $ocm_action_start_restore = get_option('ocm_action_start_restore');
-
-        if ($ocm_action_start_backup) {
-            $value = 'backup';
-        } else {
-            $value = ($ocm_action_start_restore ? 'restore' : '');
-        }
-        ?>
-        <input type="hidden" value="<?php echo esc_attr($value) ?>" id="ocmStartAction" name="<?php echo $label ?>">
-        <?php
     }
 
     public static function install()
     {
-        // Ensure clean state on activation
-        self::stop_and_reset();
-        
-        // Make sure our API route is added
+        // Activation fires before plugins_loaded, so plugin infrastructure
+        // (background jobs, S3, write_to_log) may not be available.
+        // Do a direct, minimal cleanup that doesn't depend on any of that.
+
+        // 1. Delete critical options via direct SQL first (before any plugin code runs)
+        global $wpdb;
+        $table = $wpdb->options;
+        $wpdb->query("DELETE FROM {$table} WHERE option_name IN (
+            'ocm_presigned_urls',
+            'ocm_bucket_key',
+            'ocm_bucket_id',
+            'ocm_aes_key',
+            'ocm_restore_code_plain',
+            'ocm_action_start_backup',
+            'ocm_action_start_restore',
+            'ocm_is_stopped',
+            'ocm_user_email',
+            'ocm_user_password',
+            'backup_steps',
+            'restore_steps',
+            'ocm_excluded_folders',
+            'ocm_skipped_folders',
+            'ocm_log_merged_bucket'
+        )");
+
+        // 2. Delete all remaining plugin options
+        self::delete_options();
+
+        // 3. Clean up background process batch rows and transients via direct SQL
+        $wpdb->query("DELETE FROM {$table} WHERE option_name LIKE 'wp_ocm_background_%'");
+        $wpdb->query("DELETE FROM {$table} WHERE option_name LIKE '_site_transient_wp_ocm_background_%'");
+        $wpdb->query("DELETE FROM {$table} WHERE option_name LIKE '_site_transient_timeout_wp_ocm_background_%'");
+        $wpdb->query("DELETE FROM {$table} WHERE option_name = 'backup_steps'");
+        $wpdb->query("DELETE FROM {$table} WHERE option_name = 'restore_steps'");
+
+        // 3. Delete the local debug log file
+        $log_file = defined('OCM_DEBUG_LOG_FILE') ? OCM_DEBUG_LOG_FILE : (plugin_dir_path(__FILE__) . 'ocm_debug.log');
+        if (file_exists($log_file)) {
+            @unlink($log_file);
+        }
+
+        // 4. Disable maintenance mode if it was left on
+        $maintenance_file = ABSPATH . '.maintenance';
+        if (file_exists($maintenance_file)) {
+            @unlink($maintenance_file);
+        }
+
+        // self::ensure_mu_plugin_isolation_shim(); // disabled while debugging restore
+        self::remove_mu_plugin_isolation_shim();
+
         flush_rewrite_rules();
     }
 
@@ -305,12 +269,15 @@ class One_Click_Migration
       delete_option('ocm_upload_auto_try_nb_themes');
       delete_option('ocm_upload_auto_try_nb_plugins');
       delete_option('ocm_upload_auto_try_nb_uploads');
-      delete_option('ocm_payment_status');
       delete_option('ocm_excluded_folders');
       delete_option('ocm_skipped_folders');
       delete_option('ocm_log_download');
       delete_option('ocm_log_url');
       delete_option('ocm_bucket_key');
+      delete_option('ocm_bucket_id');
+      delete_option('ocm_aes_key');
+      delete_option('ocm_restore_code_plain');
+      self::clear_backup_plugin_isolation();
       delete_option('ocm_backup_compress_retry_db');
       delete_option('ocm_backup_compress_retry_themes');
       delete_option('ocm_backup_compress_retry_plugins');
@@ -362,6 +329,7 @@ class One_Click_Migration
     {
         // Use stop_and_reset for complete cleanup on deactivation
         self::stop_and_reset();
+        self::remove_mu_plugin_isolation_shim();
     }
     
     /**
@@ -431,24 +399,34 @@ class One_Click_Migration
           }
       }
 
+      $timestamp = date('m/d/YTH:i:sa');
+      $line = $timestamp . ' - ' . $string;
+
       if($urls){
 
-        // If ocm_debug doesn't exist, make sure to grab the latest from S3 so we can append
+        // If ocm_debug doesn't exist, make sure to grab the latest from S3 so we can append.
+        // Download to memory first; only write the local file on 200 so a failed download
+        // does not leave an empty file that suppresses later download attempts.
         if (isset($urls->log_download) && !file_exists($file)) {
-            $file_path = fopen($file, 'wb');
-            $client = new Client();
-            $response = $client->get($urls->log_download, ['http_errors' => false]);
+            try {
+                $client = new Client();
+                $response = $client->get($urls->log_download, ['http_errors' => false]);
 
-            if ($response->getStatusCode() !== 404) {
-                $client->get($urls->log_download, ['save_to' => $file_path]);
+                if ($response->getStatusCode() === 200) {
+                    $body = (string) $response->getBody();
+                    if ($body !== '') {
+                        file_put_contents($file, $body);
+                    }
+                }
+            } catch (Exception $e) {
+                // Presigned URL may have expired — leave no local file so the next
+                // write_to_log call can retry the download once fresh URLs land.
+                error_log('[1-Click Migration] Could not download existing log from S3: ' . $e->getMessage());
             }
         }
 
-        $timestamp = date('m/d/YTH:i:sa');
-        $string = $timestamp . ' - ' . $string;
-
         $log_file = fopen($file, 'ab');
-        fwrite($log_file, $string . PHP_EOL);
+        fwrite($log_file, $line . PHP_EOL);
         fclose($log_file);
 
         try {
@@ -473,12 +451,10 @@ class One_Click_Migration
 
       }
 
-      if($string === "Stop & Reset Finished"){
-        $timestamp = date('m/d/YTH:i:sa');
-        $string = $timestamp . ' - ' . $string;
-        $log_file = fopen($file, 'ab');
-        fwrite($log_file, $string . PHP_EOL);
-        fclose($log_file);
+      if(!$urls){
+          $log_file = fopen($file, 'ab');
+          fwrite($log_file, $line . PHP_EOL);
+          fclose($log_file);
 
       }
 
@@ -515,9 +491,125 @@ class One_Click_Migration
         return (self::get_current_max_execution_time()-5) > 0 ? self::get_current_max_execution_time()-5 : OCM_SET_TIME_LIMIT;
     }
 
+    public static function ensure_mu_plugin_isolation_shim()
+    {
+        // Plugin isolation disabled while debugging restore. Actively remove any
+        // existing shim file so a stale copy doesn't keep firing on admin loads.
+        self::remove_mu_plugin_isolation_shim();
+        return false;
+    }
+
+    public static function remove_mu_plugin_isolation_shim()
+    {
+        $dir = defined('WPMU_PLUGIN_DIR') ? WPMU_PLUGIN_DIR : WP_CONTENT_DIR . '/mu-plugins';
+        $file = trailingslashit($dir) . self::MU_PLUGIN_ISOLATION_FILE;
+
+        if (is_file($file)) {
+            @unlink($file);
+        }
+    }
+
+    public static function start_backup_plugin_isolation()
+    {
+        if (!self::ensure_mu_plugin_isolation_shim()) {
+            self::clear_backup_plugin_isolation();
+            return false;
+        }
+
+        try {
+            $token = bin2hex(random_bytes(32));
+        } catch (Exception $e) {
+            $token = wp_generate_password(64, false, false);
+        }
+
+        update_option(self::BACKUP_ISOLATION_TOKEN_OPTION, $token, false);
+        update_option(self::BACKUP_ISOLATION_TOKEN_HASH_OPTION, hash_hmac('sha256', $token, wp_salt('auth')), false);
+        update_option(self::BACKUP_ISOLATION_ALLOWED_PLUGINS_OPTION, array(plugin_basename(OCM_MAIN_FILE)), false);
+
+        return true;
+    }
+
+    public static function get_backup_plugin_isolation_token()
+    {
+        $token = get_option(self::BACKUP_ISOLATION_TOKEN_OPTION, '');
+        return is_string($token) ? $token : '';
+    }
+
+    public static function clear_backup_plugin_isolation()
+    {
+        delete_option(self::BACKUP_ISOLATION_TOKEN_OPTION);
+        delete_option(self::BACKUP_ISOLATION_TOKEN_HASH_OPTION);
+        delete_option(self::BACKUP_ISOLATION_ALLOWED_PLUGINS_OPTION);
+    }
+
+    private static function get_mu_plugin_isolation_shim_contents()
+    {
+        return <<<'PHP'
+<?php
+/**
+ * Plugin Name: 1 Click Migration Plugin Isolation
+ * Description: Keeps normal plugins out of signed 1 Click Migration backup worker requests.
+ */
+
+if (!defined('ABSPATH')) {
+    exit;
+}
+
+function ocm_mu_plugin_isolation_authorized()
+{
+    $token = isset($_SERVER['HTTP_X_OCM_ISOLATION_TOKEN']) ? (string) $_SERVER['HTTP_X_OCM_ISOLATION_TOKEN'] : '';
+    if ($token === '') {
+        return false;
+    }
+
+    $expected_hash = get_option('ocm_backup_isolation_token_hash', '');
+    if (!is_string($expected_hash) || $expected_hash === '') {
+        return false;
+    }
+
+    $actual_hash = hash_hmac('sha256', $token, wp_salt('auth'));
+    return hash_equals($expected_hash, $actual_hash);
+}
+
+function ocm_mu_plugin_isolation_allowed_plugins()
+{
+    $allowed = get_option('ocm_backup_isolation_allowed_plugins', array());
+    if (!is_array($allowed) || empty($allowed)) {
+        $allowed = array('1-click-migration/one-click-migration.php');
+    }
+
+    return array_values(array_unique(array_filter($allowed, 'is_string')));
+}
+
+add_filter('option_active_plugins', function ($plugins) {
+    if (!ocm_mu_plugin_isolation_authorized()) {
+        return $plugins;
+    }
+
+    return ocm_mu_plugin_isolation_allowed_plugins();
+}, 1);
+
+add_filter('site_option_active_sitewide_plugins', function ($plugins) {
+    if (!ocm_mu_plugin_isolation_authorized() || !is_array($plugins)) {
+        return $plugins;
+    }
+
+    return array_intersect_key($plugins, array_flip(ocm_mu_plugin_isolation_allowed_plugins()));
+}, 1);
+PHP;
+    }
+
     public static function progress_endpoint()
     {
         return OCM_Backup::get_progress();
+    }
+
+    public static function loopback_check()
+    {
+        wp_send_json_success(array(
+            'plugin' => '1-click-migration',
+            'status' => 'ok',
+        ));
     }
 
     public static function reset_actions_start_mark()
@@ -528,6 +620,8 @@ class One_Click_Migration
 
     public static function cancel_all_process()
     {
+        self::clear_backup_plugin_isolation();
+
         // Load the background helper class before using it
         if (!class_exists('OCM\OCM_BackgroundHelper')) {
             require_once __DIR__ . '/inc/background/class-background-helper.php';
@@ -546,6 +640,8 @@ class One_Click_Migration
 
     public static function stop_and_reset()
     {
+        OCM_Debug_Mode::disable();
+
         One_Click_Migration::write_to_log("stop and reset started");
 
         // Disable maintenance mode when stopping the process
@@ -625,17 +721,51 @@ class One_Click_Migration
     }
 
     /**
+     * Pull the backup-side log from S3 and prepend it to whatever the restore
+     * has already written locally. Idempotent for a given bucket via the
+     * ocm_log_merged_bucket option, so it's safe to call repeatedly.
+     */
+    public static function merge_backup_log_from_s3()
+    {
+        $urls = get_option('ocm_presigned_urls');
+        $bucket_id = get_option('ocm_bucket_id');
+        if (!$urls || !is_object($urls) || empty($urls->log_download) || !$bucket_id) {
+            return;
+        }
+        if (get_option('ocm_log_merged_bucket') === $bucket_id) {
+            return;
+        }
+
+        try {
+            $client = new Client();
+            $response = $client->get($urls->log_download, ['http_errors' => false, 'timeout' => 15]);
+            if ($response->getStatusCode() !== 200) {
+                return;
+            }
+            $remote = (string) $response->getBody();
+            if ($remote === '') {
+                update_option('ocm_log_merged_bucket', $bucket_id, false);
+                return;
+            }
+            $file = OCM_DEBUG_LOG_FILE;
+            $local = file_exists($file) ? (string) @file_get_contents($file) : '';
+            $combined = rtrim($remote, "\r\n") . PHP_EOL . $local;
+            file_put_contents($file, $combined);
+            update_option('ocm_log_merged_bucket', $bucket_id, false);
+        } catch (Exception $e) {
+            error_log('[1-Click Migration] merge_backup_log_from_s3 failed: ' . $e->getMessage());
+        }
+    }
+
+    /**
      * Enable WordPress maintenance mode (custom implementation)
      */
     public static function enable_maintenance_mode()
     {
         // Set option to indicate maintenance mode is active
         update_option('ocm_maintenance_mode', true);
-        
-        // Add hook to show maintenance page for non-admin users
-        add_action('template_redirect', array(__CLASS__, 'handle_maintenance_mode'));
-        
-        One_Click_Migration::write_to_log('Maintenance mode enabled (custom)');
+
+        One_Click_Migration::write_to_log('Maintenance mode enabled');
         return true;
     }
 
@@ -649,8 +779,8 @@ class One_Click_Migration
             return;
         }
         
-        // Allow admin users to bypass maintenance mode
-        if (is_admin() || (is_user_logged_in() && current_user_can('manage_options'))) {
+        // Allow admin users and REST API requests to bypass maintenance mode
+        if (is_admin() || defined('REST_REQUEST') || (is_user_logged_in() && current_user_can('manage_options'))) {
             return;
         }
         
@@ -703,19 +833,17 @@ class One_Click_Migration
      */
     public static function disable_maintenance_mode()
     {
+        // Remove the custom maintenance mode option
+        delete_option('ocm_maintenance_mode');
+
+        // Also clean up the .maintenance file if it exists
         $maintenance_file = ABSPATH . '.maintenance';
-        
         if (file_exists($maintenance_file)) {
-            if (unlink($maintenance_file)) {
-                One_Click_Migration::write_to_log('Maintenance mode disabled');
-                return true;
-            } else {
-                One_Click_Migration::write_to_log('Error: Failed to disable maintenance mode');
-                return false;
-            }
+            unlink($maintenance_file);
         }
-        
-        return true; // Already disabled
+
+        One_Click_Migration::write_to_log('Maintenance mode disabled');
+        return true;
     }
 }
 

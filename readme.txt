@@ -1,35 +1,36 @@
-===1-Click Migration – Free WordPress Backup & Migration Plugin===
+===1 Click Migration & Backup: Free WordPress Migration Plugin with Zero Downtime & Easy Clone===
 Contributors: 1clickmigration
-Tags: backup, migration, clone, restore, transfer
+Tags: wordpress migration, wordpress backup, clone wordpress, wordpress restore, wordpress site transfer, free wordpress migration plugin, wordpress staging, zero downtime migration, move wordpress site
 Requires at least: 4.0
-Tested up to: 6.8.3
+Tested up to: 7.0
 Requires PHP: 7.4
-Stable tag: 2.3.6
+Stable tag: 3.1.5
 Author URI: https://1clickmigration.com
 License: GPLv3 or later
 License URI: http://www.gnu.org/licenses/gpl-3.0.html
 
-WordPress backup and migration plugin. Migrate, backup, clone, and restore your WordPress site with zero downtime. No size limits, 100% free.
+Free WordPress migration plugin for backup, restore, clone, and site transfer with zero downtime. Migrate WordPress site easily.
 
 == Description ==
-### 1-Click Migration – WordPress Backup & Migration Plugin ###
 
-Looking for a **reliable WordPress backup and migration plugin**? 1-Click Migration lets you **backup, migrate, clone, or transfer your WordPress site** between hosts or domains with **zero downtime**. Perfect for **WordPress site migration**, **staging sites**, and **website backups**.
+### 1-Click Migration: Your Ultimate Free WordPress Migration Plugin & Backup Solution ###
+
+Discover the ultimate free WordPress migration plugin for effortless WordPress backup and restore. 1-Click Migration empowers you to migrate WordPress site, clone WordPress site, or perform a WordPress site transfer between hosts or domains with guaranteed zero downtime WordPress migration. It's the ideal WordPress staging plugin and a complete solution for robust WordPress backup and restore.
 
 **Why Choose 1-Click Migration for WordPress Backup & Migration?**
 
-✅ **One-Click Backup & Migration** – Backup and restore your WordPress site with a single click
-✅ **WordPress Site Migration** – Migrate your site to a new host or domain safely and easily
-✅ **Clone WordPress Sites** – Create staging sites or development copies instantly
-✅ **Zero Downtime Migration** – Your live site stays online during the entire backup and migration process
-✅ **Selective Backup & Restore** – Choose what to backup: database, plugins, uploads, themes
-✅ **Automatic URL Replacement** – All URLs and serialized data update automatically for new domains
-✅ **Secure Encrypted Backups** – Password-protected WordPress backups with military-grade encryption
-✅ **Server-to-Server Transfer** – Direct site transfer without large downloads or uploads
-✅ **No Size Limits** – Backup and migrate WordPress sites of any size, 100% free
-✅ **No Technical Skills Required** – Easy WordPress migration for beginners and professionals
+✅ **One-Click WordPress Backup & Migration** – Effortlessly backup and restore your WordPress site with a single click
+✅ **Seamless WordPress Site Migration** – Easily migrate WordPress site to a new host or domain safely and quickly, making any WordPress site transfer a breeze.
+✅ **Clone WordPress Site for Staging** – Instantly clone WordPress site to create WordPress staging plugin environments or development copies.
+✅ **Zero Downtime WordPress Migration** – Ensure your live site remains fully operational throughout the entire WordPress backup and migration process for true zero downtime WordPress migration.
+✅ **Selective WordPress Backup & Restore** – Granularly choose what to backup and restore for your WordPress site: database, plugins, uploads, themes, and more.
+✅ **Automatic URL & Data Replacement** – All URLs and serialized data update automatically when you move WordPress site to a new domain.
+✅ **Secure Encrypted WordPress Backups** – Keep your WordPress backups safe with password protection and military-grade encryption.
+✅ **Direct WordPress Site Transfer** – Perform a swift WordPress site transfer directly server-to-server, avoiding large downloads or uploads.
+✅ **No Size Limits for WordPress Migration** – Backup and migrate WordPress site of any size, 100% free, unlike other free WordPress migration plugins.
+✅ **Easy WordPress Migration for All** – Enjoy an intuitive and easy WordPress migration plugin experience for beginners and professionals alike.
 
-Perfect for: WordPress site migration, website backup, staging site setup, clone WordPress, change hosting provider, domain name change, WordPress site transfer, development environment setup.
+Perfect for: Migrate WordPress site, complete WordPress backup and restore, create WordPress staging plugin environments, clone WordPress site for development, seamless WordPress site transfer between hosts, or to move WordPress site to a new domain. Your all-in-one free WordPress migration plugin!
 
 Learn more: [1ClickMigration.com](https://1clickmigration.com)
 
@@ -39,13 +40,13 @@ Learn more: [1ClickMigration.com](https://1clickmigration.com)
 1. Remove unnecessary themes, plugins, and media files to optimize backup size
 2. Optional: Clean your database with [Advanced Database Cleaner](https://wordpress.org/plugins/advanced-database-cleaner/)
 3. Deactivate all plugins except 1-Click Migration
-4. Enter your email and a strong password for backup encryption
-5. Click **Backup Site** – typically completes in 10-30 minutes
+4. Enter your email and click **Backup Site** – typically completes in 10-30 minutes
+5. Save the 8-character restore code we email you when the backup completes
 
 **Migrate & Restore Your WordPress Site:**
 1. Install WordPress and 1-Click Migration on your new hosting provider
 2. Delete any pre-installed plugins from the new site
-3. Enter your email and backup password
+3. Enter the same email you used for the backup, paste the restore code from your email
 4. Click **Restore Site** to complete your WordPress migration
 5. Large sites can use selective restore options for files over 1GB
 
@@ -66,10 +67,10 @@ Choose exactly what to backup and migrate:
 * **Progress Tracking** – Real-time backup and migration progress monitoring
 
 **WordPress Backup Security & Privacy:**
-* Data encrypted on your server using your password before backup
+* AES-256 encryption applied locally before files leave your server
 * Secure Amazon S3 cloud storage for WordPress backups
-* Backups automatically deleted after 24 hours
-* We never have access to your password or unencrypted files
+* Backups automatically deleted after 48 hours
+* Restore requires both your email and the 8-character code we send you
 * GDPR compliant WordPress backup solution
 
 == Installation ==
@@ -82,6 +83,12 @@ Choose exactly what to backup and migrate:
 = How long does WordPress backup and migration take? =
 Most WordPress site backups and migrations complete in 10-30 minutes, depending on site size and hosting server resources.
 
+= How long do I have to restore my backup? =
+Backups and their restore codes are valid for 48 hours after creation. After that the backup is deleted from our servers and you'll need to run a fresh backup.
+
+= What if I lose the restore code email? =
+The restore code is the only way to download your backup, and we cannot retrieve a lost code. If you don't see the email, check spam — otherwise just run the backup again to get a new code.
+
 = Can I backup only specific parts of my WordPress site? =
 Yes! Use the advanced options to selectively backup and migrate your database, plugins, uploads, or themes. Perfect for large WordPress sites.
 
@@ -92,7 +99,7 @@ Not currently. The plugin is optimized for single WordPress site backup and migr
 Yes! 1-Click Migration automatically updates all database entries including serialized data when you migrate your WordPress site to a new domain.
 
 = How long do I have to restore my WordPress backup? =
-WordPress backups are available for 24 hours after creation. You can create a new backup anytime if you miss the restoration window.
+WordPress backups are available for 48 hours after creation. You can create a new backup anytime if you miss the restoration window.
 
 = Is there a limit on WordPress site size for backup and migration? =
 No! Unlike other WordPress migration plugins, 1-Click Migration handles sites of any size completely free. Large sites over 1GB can use selective restore options.
@@ -108,8 +115,91 @@ All of them! Migrate WordPress sites between any hosting providers: Bluehost, Si
 
 == Screenshots ==
 1. One-click WordPress backup & migration dashboard
+2. Advanced Options
+3. Restore Completed
 
 == Changelog ==
+= 3.1.5 =
+* **Backup Reliability**: Added multipart uploads for large backup archives to reduce S3 timeout failures on slower hosts.
+* **Restore Reliability**: Added resumable downloads and stronger ZIP state validation so large restores can recover from interrupted transfers.
+* **Database Restore**: Hardened SQL import fallback for hosts without MySQL CLI access.
+* **Compatibility**: Removed pre-3.0 legacy backup endpoint handling.
+
+= 3.1.4 =
+* **Log Noise Reduction**: Suppressed unrelated theme/plugin PHP errors after migrations finish and deduplicated identical PHP errors across requests while migrations are active.
+
+= 3.1.3 =
+* **User Guidance**: Added contextual "How to fix" messages for quota, write permission, loopback, download/decrypt/extract, and database import failures.
+
+= 3.1.2 =
+* **Restore Reliability**: Restore now fails clearly when disk quota or write permissions prevent downloads, decryption, or ZIP extraction instead of reporting partial files as restored.
+* **Restore Diagnostics**: Added a restore workspace write probe and hardened DB failure-context logging for malformed SQL payloads.
+
+= 3.1.1 =
+* **Backup Diagnostics**: Added admin-ajax loopback and worker dispatch logging to help identify hosts that block background backup workers.
+
+= 3.1 =
+* **Restore Reliability**: Fixed PHP fallback database imports on hosts where `proc_open` is disabled so comment-prefixed SQL table definitions are imported correctly.
+* **Restore Safety**: Database import errors now stop the restore and surface a clear failure instead of logging `Restore completed.`
+* **Restore Validation**: Restore now verifies the imported `siteurl` option before running URL replacement.
+
+= 3.0 =
+* **Redesigned Admin UI**: New tabbed Backup / Restore interface with clearer steps, inline help, progress card, and a yellow notice banner that surfaces the email/restore-code reminder after a backup completes.
+* **Simpler Restore Access**: Backup now uses your email and sends an 8-character restore code when the backup completes. Restore takes only that code — no separate email field needed.
+* **Pre-Flight Disk Space Check**: Backup and restore exit early with a clear message if there's not enough free disk space, instead of failing midway.
+* **Backup Security**: Files continue to be encrypted (AES-256) before upload, with improved key handling behind the scenes.
+* **Retention**: Backup availability is now consistently 48 hours.
+* **Backup Reliability**: Improved backup stability on sites with plugins that interfere with long-running background tasks.
+* **Restore Reliability**: Improved restore stability when plugin code, locked folders, or stubborn file permissions would previously interrupt a migration.
+* **Security**: Removed the old legacy access path and tightened the restore flow.
+* **Compatibility**: Existing backups from the previous version remain restorable during the short upgrade window only.
+
+= 2.6.1 =
+* **Critical Fix**: Fixed fatal `Call to undefined function OCM\ini_set()` crash on shared hosts that disable `ini_set`/`ini_get` via `disable_functions` — this was a 100% restore blocker on affected cPanel hosts
+* **Critical Fix**: Fixed "OS: Windows" log message being written 250+ times per backup on Windows/XAMPP hosts — now logs only once per session
+* **Bug Fix**: Fixed fatal crash when Stop & Reset is clicked mid-backup — background process now re-creates the temporary directory if it was deleted
+
+= 2.6.0 =
+* **Critical Fix**: Fixed DivisionByZeroError crash during database backup when tables report 0 MB in information_schema (affected Gravity Forms and other small tables)
+* **Bug Fix**: Changed error catch from `Exception` to `Throwable` so PHP 8 DivisionByZeroError is properly caught by the fallback handler
+* **Log Noise Reduction**: Added error deduplication to suppress identical PHP errors from being logged 30+ times per session (e.g. theme/plugin bugs)
+* **Log Noise Reduction**: Suppressed per-table "Table being backed up" log messages that generated 50-80+ lines per backup on large sites
+* **Log Fix**: Fixed misleading "Bucket created" log message that appeared after AWS 502 errors — now correctly says "Retrying bucket creation"
+
+= 2.5.9 =
+* **Maintenance Mode**: Automatically enables maintenance mode during restore to prevent visitors from seeing broken pages, white screens, or database errors
+* **Admin & API Bypass**: Admin users and REST API requests (e.g. progress polling) bypass maintenance mode so the dashboard stays functional
+* **Progress Indicator**: The admin progress endpoint now reports maintenance mode status so the dashboard indicator works
+* **Auto Cleanup**: Maintenance mode is automatically disabled when the restore completes or is cancelled via Stop & Reset
+
+= 2.5.8 =
+* **Timeout Fix**: Reset PHP time limit before each major operation (archive, encrypt, upload, download, decrypt, extract) to prevent timeouts on large sites
+* **Upload Fix**: Upload timeout now uses the full execution budget instead of the exhausted background process remaining time
+* **Download Fix**: Restore file downloads now use the full timeout budget instead of remaining background process time
+* **Bug Fix**: Fixed `Undefined array key "tables"` crash when mysqldump fails and falls back to PHP-based export
+* **Bug Fix**: Fixed `error_reporting` never being restored on success paths in zip creation and folder backup
+* **Resilience**: Error handler no longer kills the process for fatal errors from external themes/plugins (e.g. WooCommerce dependency in child themes)
+* **Reliability**: Added pre-flight disk space check before DB and folder backups to fail early with a clear message
+* **Cleanup**: Removed dead `retry` parameter from `wp_remote_post` calls
+
+= 2.5.7 =
+* **Bug Fix**: Fixed fatal error during restore where `$presigned_urls` (stdClass) was passed to `sprintf` instead of the directory path string
+* **Bug Fix**: Made `mkdir` recursive when creating `tmp/db/` directory so it succeeds even if the parent `tmp/` directory was cleaned up
+* **Restore Fix**: Clear stale background process queues after DB import to prevent source site's backup tasks from firing on the destination
+
+= 2.5.6 =
+* **Concurrency Fix**: Added MySQL advisory locks to prevent concurrent background handlers from processing the same batch simultaneously
+* **Reliability**: Fixed race condition where multiple handlers could duplicate compress, encrypt, and upload operations
+* **Upload Fallback**: Improved upload step to construct expected encrypted file path when step metadata is missing, preventing silent upload skips
+
+= 2.3.7 =
+* **Progress Bar Fix**: Resolved progress bar jumping back to 1% during database backup operations
+* **Memory Management**: Implemented dynamic memory management with automatic page sizing based on available system resources
+* **Error Handling**: Added robust validation and error handling for S3 file uploads with proper file path checking
+* **Logging Improvements**: Enhanced logging system with better filtering to prevent progress bar interference from verbose messages
+* **Debug Tools**: Added conditional debug logging (WP_DEBUG only) to help identify unmapped progress messages
+* **Database Optimization**: Improved database export operations with dynamic row increment sizing and better memory monitoring
+
 = 2.3.6 =
 * **Reliability Fix**: Disabled async dispatch in favor of direct processing for guaranteed execution on all hosting environments
 * **Compatibility**: Resolved backup hanging issues on AWS and other servers where async HTTP requests may fail silently
@@ -163,6 +253,26 @@ All of them! Migrate WordPress sites between any hosting providers: Bluehost, Si
 
 = 1.0 – 1.2 =
 * Initial release & dependency updates
+
+== Upgrade Notice ==
+
+= 3.1.5 =
+Improves large backup/restore reliability with multipart uploads, resumable downloads, and removes pre-3.0 legacy endpoint handling.
+
+= 3.1.4 =
+Reduces duplicate monitor emails by preventing old migration logs from collecting unrelated site PHP fatals after backup or restore completion.
+
+= 3.1.3 =
+Adds clearer recovery guidance when backup or restore fails on host configuration, quota, permissions, or database import issues.
+
+= 3.1.2 =
+Improves restore failure handling for disk quota/write errors and hardens restore diagnostics.
+
+= 3.1.1 =
+Adds backup worker diagnostics for hosts that block WordPress background loopback requests.
+
+= 3.1 =
+Restore reliability update for hosts without native MySQL CLI access. Please update now to keep backup and restore working.
 
 == Reviews ==
 If you love 1-Click Migration, please leave a **5-star review** on WordPress.org! Your feedback helps us improve this WordPress migration plugin.

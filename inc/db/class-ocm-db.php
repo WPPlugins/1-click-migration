@@ -61,13 +61,85 @@ class OCM_DB {
 	}
 
 	/**
-	 * Returns the current page size.
+	 * Returns the current page size with memory-aware calculation.
 	 * @access public
 	 * @return int
 	 */
 	public function get_page_size() {
-		$page_size = 20000;
-		return absint( $page_size );
+		return $this->get_dynamic_page_size();
+	}
+
+	/**
+	 * Calculate dynamic page size based on available memory.
+	 * @access private
+	 * @param int $estimated_row_size Estimated bytes per row (default: 1024)
+	 * @return int
+	 */
+	private function get_dynamic_page_size($estimated_row_size = 1024) {
+		// Get current memory usage and limits
+		$memory_limit = ini_get('memory_limit');
+		$memory_bytes = $this->convert_to_bytes($memory_limit);
+		$usage_memory = memory_get_usage(true);
+		$peak_memory = memory_get_peak_usage(true);
+		
+		// Calculate available memory (use conservative estimate)
+		$free_memory = $memory_bytes - $usage_memory;
+		$available_memory = min($free_memory, $memory_bytes * 0.25); // Use max 25% of total memory
+		
+		// Ensure we have at least 64MB available for safety
+		$minimum_memory = 64 * 1024 * 1024;
+		if ($available_memory < $minimum_memory) {
+			One_Click_Migration::write_to_log(" SYSLOG: Low memory available (" . $this->format_bytes($available_memory) . "), using conservative page size");
+			return 1000; // Conservative fallback
+		}
+		
+		// Calculate max rows based on estimated row size
+		$max_rows = floor($available_memory / ($estimated_row_size * 3)); // 3x safety factor
+		
+		// Clamp between reasonable bounds
+		$page_size = max(1000, min($max_rows, 50000));
+		
+		// Only log memory issues to avoid progress bar jumping
+		if ($available_memory < 64 * 1024 * 1024) {
+			One_Click_Migration::write_to_log(" SYSLOG: Low memory - Page Size reduced to: " . $page_size);
+		}
+		
+		return absint($page_size);
+	}
+
+	/**
+	 * Convert memory limit string to bytes.
+	 * @access private
+	 * @param string $val Memory limit string (e.g., "512M")
+	 * @return int
+	 */
+	private function convert_to_bytes($val) {
+		$val = trim($val);
+		$last = strtolower($val[strlen($val)-1]);
+		$val = (int) $val;
+
+		switch($last) {
+			case 'g': $val *= 1024;
+			case 'm': $val *= 1024;
+			case 'k': $val *= 1024;
+		}
+
+		return $val;
+	}
+
+	/**
+	 * Format bytes to human readable format.
+	 * @access private
+	 * @param int $bytes
+	 * @return string
+	 */
+	private function format_bytes($bytes) {
+		$units = ['B', 'KB', 'MB', 'GB'];
+		$bytes = max($bytes, 0);
+		$pow = floor(($bytes ? log($bytes) : 0) / log(1024));
+		$pow = min($pow, count($units) - 1);
+		$bytes /= (1 << (10 * $pow));
+		return round($bytes, 2) . ' ' . $units[$pow];
 	}
 
 	/**
@@ -135,10 +207,7 @@ class OCM_DB {
 		foreach ($tables as $table) {
 			// Load up the default settings for this chunk.
 			$table 			= esc_sql( $table );
-			$page = 0;
-			$current_page 	= absint( $page );
 			$pages 			= $this->get_pages_in_table( $table );
-			$done 			= false;
 
 			// Get a list of columns in this table.
 			list( $primary_key, $columns ) = $this->get_columns( $table );
@@ -150,63 +219,68 @@ class OCM_DB {
 			}
 
 			$current_row 	= 0;
-			$start 			= $page * $this->page_size;
-			$end 			= $this->page_size;
 
-			// Grab the content of the table.
-			$data = $this->wpdb->get_results( "SELECT * FROM `$table` LIMIT $start, $end", ARRAY_A );
+			for ( $current_page = 0; $current_page < $pages; $current_page++ ) {
+				$start 	= $current_page * $this->page_size;
+				$end 	= $this->page_size;
 
-			// Loop through the data.
-			foreach ( $data as $row ) {
-				$current_row++;
-				$update_sql = array();
-				$where_sql 	= array();
-				$upd 		= false;
+				// Grab the content of the table.
+				$data = $this->wpdb->get_results( "SELECT * FROM `$table` LIMIT $start, $end", ARRAY_A );
 
-				foreach( $columns as $column ) {
-
-					$data_to_fix = $row[ $column ];
-
-
-					if ( $column == $primary_key ) {
-						$where_sql[] = $column . ' = "' .  $this->mysql_escape_mimic( $data_to_fix ) . '"';
-						continue;
-					}
-
-					// Run a search replace on the data that'll respect the serialisation.
-					$edited_data = $this->recursive_unserialize_replace( $args['search_for'], $args['replace_with'], $data_to_fix, false );
-
-					// Something was changed
-					if ( $edited_data != $data_to_fix ) {
-						$update_sql[] = $column . ' = "' . $this->mysql_escape_mimic( $edited_data ) . '"';
-						$upd = true;
-						$table_report['change']++;
-					}
-
+				if ( empty( $data ) ) {
+					break;
 				}
 
-			 if ( $upd && ! empty( $where_sql ) ) {
-					// If there are changes to make, run the query.
-					$sql 	= 'UPDATE ' . $table . ' SET ' . implode( ', ', $update_sql ) . ' WHERE ' . implode( ' AND ', array_filter( $where_sql ) );
-					$result = $this->wpdb->query( $sql );
+				// Loop through the data.
+				foreach ( $data as $row ) {
+					$current_row++;
+					$update_sql = array();
+					$where_sql 	= array();
+					$upd 		= false;
 
-					if ( ! $result ) {
-						$table_report['errors'][] = sprintf( __( 'Error updating row: %d.', '1-click-migration' ), $current_row );
-					} else {
-						$table_report['updates']++;
+					foreach( $columns as $column ) {
+
+						$data_to_fix = $row[ $column ];
+
+
+						if ( $column == $primary_key ) {
+							$where_sql[] = $column . ' = "' .  $this->mysql_escape_mimic( $data_to_fix ) . '"';
+							continue;
+						}
+
+						// Run a search replace on the data that'll respect the serialisation.
+						$edited_data = $this->recursive_unserialize_replace( $args['search_for'], $args['replace_with'], $data_to_fix, false );
+
+						// Something was changed
+						if ( $edited_data != $data_to_fix ) {
+							$update_sql[] = $column . ' = "' . $this->mysql_escape_mimic( $edited_data ) . '"';
+							$upd = true;
+							$table_report['change']++;
+						}
+
 					}
 
-				}
+				 if ( $upd && ! empty( $where_sql ) ) {
+						// If there are changes to make, run the query.
+						$sql 	= 'UPDATE ' . $table . ' SET ' . implode( ', ', $update_sql ) . ' WHERE ' . implode( ' AND ', array_filter( $where_sql ) );
+						$result = $this->wpdb->query( $sql );
 
-			} // end row loop
+						if ( ! $result ) {
+							$table_report['errors'][] = sprintf( __( 'Error updating row: %d.', '1-click-migration' ), $current_row );
+						} else {
+							$table_report['updates']++;
+						}
 
-			if ( $current_page >= $pages - 1 ) {
-				$done = true;
-			}
+					}
 
-			// Flush the results and return the report.
+				} // end row loop
+
+				// Flush the results after each page.
+				$this->wpdb->flush();
+
+			} // end page loop
+
 			$table_report['end'] = microtime( true );
-			$this->wpdb->flush();
 
 	}
 
@@ -336,7 +410,7 @@ class OCM_DB {
 
 
 		$serialized_string   = trim( $serialized_string );
-		$unserialized_string = unserialize( $serialized_string );
+		$unserialized_string = @unserialize( $serialized_string );
 
 		return $unserialized_string;
 	}

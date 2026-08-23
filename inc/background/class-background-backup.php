@@ -20,11 +20,28 @@ class OCM_BackgroundBackup extends WP_Background_Process
                 return One_Click_Migration::get_timeout();
             }
         );
+
+        add_filter($this->getIdentifier() . '_post_args', array($this, 'add_plugin_isolation_header'));
     }
 
     protected function getIdentifier()
     {
         return $this->identifier;
+    }
+
+    public function add_plugin_isolation_header($args)
+    {
+        $token = One_Click_Migration::get_backup_plugin_isolation_token();
+        if ($token === '') {
+            return $args;
+        }
+
+        if (empty($args['headers']) || !is_array($args['headers'])) {
+            $args['headers'] = array();
+        }
+
+        $args['headers']['X-OCM-Isolation-Token'] = $token;
+        return $args;
     }
 
     /**
@@ -43,17 +60,19 @@ class OCM_BackgroundBackup extends WP_Background_Process
     {
 
 
-        list($action, $password) = $data;
+        list($action) = $data;
         $presigned_urls = get_option('ocm_presigned_urls');
+        $aes_key_b64    = get_option('ocm_aes_key');
+        $aes_key        = $aes_key_b64 ? base64_decode($aes_key_b64) : '';
 
         One_Click_Migration::write_to_log(sprintf(' SYSLOG: *** BACKGROUND TASK STARTED: %s ***', $action));
 
 
 
         if ('db' === $action) {
-            $return = OCM_Backup::initiate_db_backup($presigned_urls, $password);
+            $return = OCM_Backup::initiate_db_backup($presigned_urls, $aes_key);
         } else {
-            $return = OCM_Backup::initiate_folder_backup($action, $presigned_urls, $password);
+            $return = OCM_Backup::initiate_folder_backup($action, $presigned_urls, $aes_key);
         }
 
         if (in_array($return, [self::RETURN_TYPE_STOP_PROCESSS, self::RETURN_TYPE_END_PROCESSS], true)) {
@@ -85,6 +104,7 @@ class OCM_BackgroundBackup extends WP_Background_Process
      */
     protected function complete()
     {
+        OCM_Debug_Mode::disable();
         $urls = get_option('ocm_presigned_urls');
         if (WP_DEBUG !== true) {
             OCM_Backup::deleteDir(OCM_PLUGIN_WRITABLE_PATH, 'Cleaning temporary directory', $urls);
@@ -94,10 +114,20 @@ class OCM_BackgroundBackup extends WP_Background_Process
         $skipped_folders = OCM_Backup::print_folders_skipped();
 
         if($skipped_folders){
-          One_Click_Migration::write_to_log('Backup completed.');
+            if (!OCM_Backup::send_restore_code_email()) {
+                update_option('ocm_is_stopped', true, true);
+                One_Click_Migration::clear_backup_plugin_isolation();
+                One_Click_Migration::reset_actions_start_mark();
+                One_Click_Migration::cancel_all_process();
+                parent::complete();
+                return;
+            }
+
+            One_Click_Migration::write_to_log('Backup completed.');
         }
 
         OCM_Backup::reset_current_backup_steps();
+        One_Click_Migration::clear_backup_plugin_isolation();
         One_Click_Migration::reset_actions_start_mark();
         One_Click_Migration::cancel_all_process();
 
@@ -109,8 +139,23 @@ class OCM_BackgroundBackup extends WP_Background_Process
      *
      * Pass each queue item to the task handler, while remaining
      * within server memory and time limit constraints.
+     *
+     * Uses a MySQL advisory lock to prevent concurrent handlers
+     * from processing the same batch simultaneously.
      */
     protected function handle() {
+        // Acquire a database-level advisory lock to prevent concurrent handlers.
+        // GET_LOCK with timeout=0 returns immediately: 1 if acquired, 0 if held by another session.
+        // The lock is automatically released when the database connection closes (e.g. on wp_die/crash).
+        global $wpdb;
+        $lock_name = $this->identifier . '_handle_lock';
+        $got_lock = $wpdb->get_var( $wpdb->prepare( "SELECT GET_LOCK(%s, 0)", $lock_name ) );
+
+        if ( ! $got_lock ) {
+            One_Click_Migration::write_to_log(' SYSLOG: Another handler is already running - this instance will exit');
+            wp_die();
+        }
+
         One_Click_Migration::write_to_log(' SYSLOG: *** BACKGROUND PROCESS HANDLER STARTED ***');
 
         $this->lock_process();
@@ -158,6 +203,9 @@ class OCM_BackgroundBackup extends WP_Background_Process
         );
 
         $this->unlock_process();
+
+        // Release the advisory lock before dispatching next process or completing.
+        $wpdb->query( $wpdb->prepare( "SELECT RELEASE_LOCK(%s)", $lock_name ) );
 
         if (self::RETURN_TYPE_STOP_PROCESSS === $isStopProcess) {
             wp_die();
@@ -304,6 +352,11 @@ class OCM_BackgroundBackup extends WP_Background_Process
     public function restart_task()
     {
         $this->unlock_process();
+
+        // Release the advisory lock so the next handler can acquire it
+        global $wpdb;
+        $lock_name = $this->identifier . '_handle_lock';
+        $wpdb->query( $wpdb->prepare( "SELECT RELEASE_LOCK(%s)", $lock_name ) );
 
         if ( !$this->is_queue_empty() ) {
             One_Click_Migration::write_to_log(OCM_Backup::LOG_MESSAGE_BG_PROCESS_RESTARTING);

@@ -40,10 +40,13 @@ class OCM_BackgroundRestore extends WP_Background_Process
      */
     protected function task($data)
     {
-        list($username, $password) = $data;
+        list($restore_code) = $data;
 
         One_Click_Migration::write_to_log(' SYSLOG: *** RESTORE TASK STARTED ***');
-        OCM_Backup::start_restore_process($username, $password);
+        $result = OCM_Backup::start_restore_process($restore_code);
+        if (self::RETURN_TYPE_STOP_PROCESSS === $result) {
+            return $result;
+        }
         One_Click_Migration::write_to_log('Download task has been completed.');
 
         return false;
@@ -57,10 +60,8 @@ class OCM_BackgroundRestore extends WP_Background_Process
      */
     protected function complete()
     {
-        One_Click_Migration::write_to_log('Restore completed.');
+        OCM_Debug_Mode::disable();
 
-        OCM_Backup::reset_current_restore_steps();
-        One_Click_Migration::reset_actions_start_mark();
         One_Click_Migration::cancel_all_process();
 
         parent::complete();
@@ -73,6 +74,16 @@ class OCM_BackgroundRestore extends WP_Background_Process
      * within server memory and time limit constraints.
      */
     protected function handle() {
+        // Acquire a database-level advisory lock to prevent concurrent handlers.
+        global $wpdb;
+        $lock_name = $this->identifier . '_handle_lock';
+        $got_lock = $wpdb->get_var( $wpdb->prepare( "SELECT GET_LOCK(%s, 0)", $lock_name ) );
+
+        if ( ! $got_lock ) {
+            One_Click_Migration::write_to_log(' SYSLOG: Another restore handler is already running - this instance will exit');
+            wp_die();
+        }
+
         $this->lock_process();
         $isStopProcess = false;
 
@@ -110,6 +121,9 @@ class OCM_BackgroundRestore extends WP_Background_Process
         );
 
         $this->unlock_process();
+
+        // Release the advisory lock before dispatching next process or completing.
+        $wpdb->query( $wpdb->prepare( "SELECT RELEASE_LOCK(%s)", $lock_name ) );
 
         if (self::RETURN_TYPE_STOP_PROCESSS === $isStopProcess) {
             wp_die();
@@ -247,6 +261,11 @@ class OCM_BackgroundRestore extends WP_Background_Process
     public function restart_task()
     {
         $this->unlock_process();
+
+        // Release the advisory lock so the next handler can acquire it
+        global $wpdb;
+        $lock_name = $this->identifier . '_handle_lock';
+        $wpdb->query( $wpdb->prepare( "SELECT RELEASE_LOCK(%s)", $lock_name ) );
 
         if ( !$this->is_queue_empty() ) {
             One_Click_Migration::write_to_log(OCM_Backup::LOG_MESSAGE_BG_PROCESS_RESTARTING);
