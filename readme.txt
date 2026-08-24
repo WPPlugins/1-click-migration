@@ -4,7 +4,7 @@ Tags: wordpress migration, wordpress backup, clone wordpress, wordpress restore,
 Requires at least: 4.0
 Tested up to: 7.1
 Requires PHP: 7.4
-Stable tag: 3.1.7
+Stable tag: 3.1.8
 Author URI: https://1clickmigration.com
 License: GPLv3 or later
 License URI: http://www.gnu.org/licenses/gpl-3.0.html
@@ -119,6 +119,9 @@ All of them! Migrate WordPress sites between any hosting providers: Bluehost, Si
 3. Restore Completed
 
 == Changelog ==
+= 3.1.8 =
+* **Restore Reliability**: Fixed a false siteurl/home failure during database restore when leftover foreign-prefix `*_options` tables (or custom table prefixes) were present on the destination. The gate now verifies `siteurl` and `home` only on the just-imported `{base_prefix}options` table, using the exact `{source_prefix}options.sql` dump — not other `*options.sql` files.
+
 = 3.1.7 =
 * **Restore Success UX**: When a restore finishes, you are taken back to the 1-Click Migration admin page and shown a clear restore-complete success dialog. A large Review button (WordPress.org reviews/#new-post, no rating filter, no incentive copy) appears only after a 2nd+ clean restore on that site — never on warned/missing-parts runs — and is permanently dismissible.
 

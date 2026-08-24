@@ -3595,6 +3595,17 @@ class OCM_Backup
           }
         }
 
+        // Detect source table prefix from backup SQL filenames (via usermeta.sql).
+        $source_prefix = is_dir($dbfiles)
+            ? OCM_SQL_Utils::get_table_prefix($dbfiles . 'dummy.sql')
+            : 'wp_';
+        One_Click_Migration::write_to_log(sprintf(
+            'Detected source_prefix="%s" dest_base_prefix="%s" dest_prefix="%s"',
+            $source_prefix,
+            $wpdb->base_prefix,
+            $wpdb->prefix
+        ));
+
         // Only drop tables that match the destination prefix.
         // Each SQL file already contains DROP TABLE IF EXISTS for its own table,
         // so we only need to clean up destination-prefix tables that might not
@@ -3607,6 +3618,28 @@ class OCM_Backup
                     $wpdb->query('DROP TABLE IF EXISTS `' . esc_sql($table_name) . '`');
                 }
             }
+        }
+
+        // DROP only removes dest base_prefix tables; foreign-prefix leftovers (e.g.
+        // ktv_options, nst_options) remain. Never use them for the siteurl/home gate.
+        $leftover_foreign_options = 0;
+        $tables_after_drop = $wpdb->get_results('SHOW TABLES');
+        foreach ($tables_after_drop as $table) {
+            foreach ($table as $table_name) {
+                if (
+                    substr($table_name, -8) === '_options'
+                    && strpos($table_name, $wpdb->base_prefix) !== 0
+                ) {
+                    $leftover_foreign_options++;
+                }
+            }
+        }
+        if ($leftover_foreign_options > 0) {
+            One_Click_Migration::write_to_log(sprintf(
+                'Notice: Found %d leftover foreign-prefix *_options table(s) on destination; siteurl/home gate will use "%soptions" only.',
+                $leftover_foreign_options,
+                $wpdb->base_prefix
+            ));
         }
 
         $dir = new DirectoryIterator($dbfiles);
@@ -3649,17 +3682,38 @@ class OCM_Backup
                 return false;
             }
 
-            if (strpos($filepath, 'options.sql') !== false) {
-                $db_url = $wpdb->get_results("SELECT option_value FROM {$wpdb->prefix}options WHERE option_name = 'siteurl'");
+            // Gate siteurl/home rewrite only on the main options dump (exact basename).
+            // Other *options.sql files (plugin tables like ktv_options, multisite
+            // {base}{id}_options) must import without this check.
+            if (basename($filepath) === $source_prefix . 'options.sql') {
+                $table_name = $wpdb->base_prefix . 'options';
 
-                $table_name = "{$wpdb->prefix}options";
+                $db_url = $wpdb->get_results("SELECT option_value FROM {$table_name} WHERE option_name = 'siteurl'");
+                $db_home = $wpdb->get_results("SELECT option_value FROM {$table_name} WHERE option_name = 'home'");
 
-                if (empty($db_url) || empty($db_url[0]->option_value)) {
-                    One_Click_Migration::write_to_log(sprintf('Error: Database restore failed because table "%s" does not contain the siteurl option.', $table_name));
+                if (
+                    empty($db_url) || empty($db_url[0]->option_value)
+                    || empty($db_home) || empty($db_home[0]->option_value)
+                ) {
+                    One_Click_Migration::write_to_log(sprintf(
+                        'Error: Database restore failed: main options table "%s" is incomplete or wrong-prefix (missing siteurl and/or home). source_prefix="%s" dest_base_prefix="%s" dest_prefix="%s".',
+                        $table_name,
+                        $source_prefix,
+                        $wpdb->base_prefix,
+                        $wpdb->prefix
+                    ));
                     return false;
                 }
 
                 self::$restore_site_url = $db_url[0]->option_value;
+
+                One_Click_Migration::write_to_log(sprintf(
+                    'Main options verified on table "%s" (source_prefix="%s" dest_base_prefix="%s" dest_prefix="%s").',
+                    $table_name,
+                    $source_prefix,
+                    $wpdb->base_prefix,
+                    $wpdb->prefix
+                ));
 
                 if ($current_url !== self::$restore_site_url) {
                     $wpdb->update(

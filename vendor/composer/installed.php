@@ -5,7 +5,7 @@
         'type' => 'library',
         'install_path' => __DIR__ . '/../../',
         'aliases' => array(),
-        'reference' => '4ffd4aa18f4673c0703b42d44ff835cd78d82e17',
+        'reference' => 'b6346c63ca198f5147f8b5ca5d025fe4ec168412',
         'name' => 'oneclickmigration/1-click-migration',
         'dev' => false,
     ),
@@ -61,7 +61,7 @@
             'type' => 'library',
             'install_path' => __DIR__ . '/../../',
             'aliases' => array(),
-            'reference' => '4ffd4aa18f4673c0703b42d44ff835cd78d82e17',
+            'reference' => 'b6346c63ca198f5147f8b5ca5d025fe4ec168412',
             'dev_requirement' => false,
         ),
         'paragonie/random_compat' => array(
