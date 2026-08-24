@@ -4,7 +4,7 @@
  * Plugin Name: 1 Click Migration
  * Plugin URI: https://wordpress.org/plugins/1-click-migration/
  * Description: Migrate, copy, or clone your entire site with 1 click. <strong>Any host, no size limitation, no premium versions.</strong>
- * Version: 3.1.5
+ * Version: 3.1.6
  * Author: 1ClickMigration
  * Author URI: https://1clickmigration.com/
  * Text Domain: 1-click-migration
@@ -322,6 +322,13 @@ class One_Click_Migration
       delete_option('ocm_restore_completed_steps');
       delete_option('ocm_maintenance_mode');
 
+      delete_option('ocm_worker_heartbeat');
+      delete_option('ocm_worker_watchdog_last');
+      delete_option('ocm_worker_revival_count');
+      delete_option('ocm_dispatch_blocked');
+      delete_option('ocm_backup_missing_parts');
+      delete_option('ocm_backup_parts_known');
+
     }
 
 
@@ -616,6 +623,12 @@ PHP;
     {
         update_option('ocm_action_start_backup', false);
         update_option('ocm_action_start_restore', false);
+
+        // Reset watchdog state so the next run starts with a fresh clock
+        // instead of inheriting a stale heartbeat from this one.
+        delete_option('ocm_worker_heartbeat');
+        delete_option('ocm_worker_watchdog_last');
+        delete_option('ocm_worker_revival_count');
     }
 
     public static function cancel_all_process()
@@ -747,6 +760,7 @@ PHP;
                 update_option('ocm_log_merged_bucket', $bucket_id, false);
                 return;
             }
+            self::extract_missing_parts_from_backup_log($remote, $bucket_id);
             $file = OCM_DEBUG_LOG_FILE;
             $local = file_exists($file) ? (string) @file_get_contents($file) : '';
             $combined = rtrim($remote, "\r\n") . PHP_EOL . $local;
@@ -755,6 +769,49 @@ PHP;
         } catch (Exception $e) {
             error_log('[1-Click Migration] merge_backup_log_from_s3 failed: ' . $e->getMessage());
         }
+    }
+
+    /**
+     * Detect parts the backup itself could not include and persist them for the
+     * restore flow. Prefers the structured BACKUP_PARTS marker; falls back to the
+     * skip notices for backups made by older plugin versions. Only the remote
+     * (backup-side) log is inspected so this site's own older runs cannot leak in.
+     */
+    public static function extract_missing_parts_from_backup_log($remote_log, $bucket_id)
+    {
+        $missing = array();
+        $structured = false;
+
+        if (preg_match_all('/BACKUP_PARTS bucket=' . preg_quote($bucket_id, '/') . ' ([a-z_= ]+)/', $remote_log, $matches)) {
+            $structured = true;
+            $line = end($matches[1]);
+            foreach (explode(' ', trim($line)) as $pair) {
+                $kv = explode('=', $pair, 2);
+                if (count($kv) === 2 && 'skipped' === $kv[1]) {
+                    $missing[] = $kv[0];
+                }
+            }
+        } elseif (preg_match_all('/Notice: File (\w+) was skipped due to timeout/i', $remote_log, $matches)) {
+            foreach ($matches[1] as $part) {
+                $missing[] = strtolower($part);
+            }
+        }
+
+        $missing = array_values(array_unique($missing));
+        update_option('ocm_backup_missing_parts', $missing, false);
+        update_option('ocm_backup_parts_known', $structured ? 1 : 0, false);
+
+        return $missing;
+    }
+
+    /**
+     * Record that a background worker is alive. The progress poller treats a
+     * stale heartbeat as a stalled worker and resumes it inline, so every worker
+     * entry point must refresh this.
+     */
+    public static function worker_heartbeat()
+    {
+        update_option('ocm_worker_heartbeat', time(), false);
     }
 
     /**

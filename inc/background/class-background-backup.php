@@ -110,19 +110,25 @@ class OCM_BackgroundBackup extends WP_Background_Process
             OCM_Backup::deleteDir(OCM_PLUGIN_WRITABLE_PATH, 'Cleaning temporary directory', $urls);
         }
 
+        OCM_Backup::print_folders_skipped();
 
-        $skipped_folders = OCM_Backup::print_folders_skipped();
+        // Publish per-part status into the log (which is mirrored to S3) so the
+        // restore side knows up front which parts this backup does not contain.
+        $missing_parts = OCM_Backup::get_backup_missing_parts();
+        OCM_Backup::log_backup_parts_manifest($missing_parts);
 
-        if($skipped_folders){
-            if (!OCM_Backup::send_restore_code_email()) {
-                update_option('ocm_is_stopped', true, true);
-                One_Click_Migration::clear_backup_plugin_isolation();
-                One_Click_Migration::reset_actions_start_mark();
-                One_Click_Migration::cancel_all_process();
-                parent::complete();
-                return;
-            }
+        if (!OCM_Backup::send_restore_code_email($missing_parts)) {
+            update_option('ocm_is_stopped', true, true);
+            One_Click_Migration::clear_backup_plugin_isolation();
+            One_Click_Migration::reset_actions_start_mark();
+            One_Click_Migration::cancel_all_process();
+            parent::complete();
+            return;
+        }
 
+        if ($missing_parts) {
+            One_Click_Migration::write_to_log('Backup completed with missing parts: ' . implode(', ', $missing_parts));
+        } else {
             One_Click_Migration::write_to_log('Backup completed.');
         }
 
@@ -157,6 +163,7 @@ class OCM_BackgroundBackup extends WP_Background_Process
         }
 
         One_Click_Migration::write_to_log(' SYSLOG: *** BACKGROUND PROCESS HANDLER STARTED ***');
+        One_Click_Migration::worker_heartbeat();
 
         $this->lock_process();
         $isStopProcess = false;
@@ -169,6 +176,7 @@ class OCM_BackgroundBackup extends WP_Background_Process
             foreach ( $batch->data as $key => $value ) {
                 $isStopProcess = false;
                 $isEndProcess = false;
+                One_Click_Migration::worker_heartbeat();
                 $task = $this->task( $value );
 
                 if ( self::RETURN_TYPE_STOP_PROCESSS === $task ) {
@@ -361,6 +369,7 @@ class OCM_BackgroundBackup extends WP_Background_Process
         if ( !$this->is_queue_empty() ) {
             One_Click_Migration::write_to_log(OCM_Backup::LOG_MESSAGE_BG_PROCESS_RESTARTING);
             One_Click_Migration::write_to_log(OCM_Backup::LOG_MESSAGE_BG_PROCESS_RESTARTING_LOG);
+            One_Click_Migration::worker_heartbeat();
             sleep(1);
 
             // Start next batch

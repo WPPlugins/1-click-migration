@@ -267,10 +267,7 @@ class OCM_Backup
         ['SYSLOG: "[PHP ERR][FATAL]', '0%'],
         ['Stop & Reset Finished', '0%'],
         ['Maximum execution time', '0%'],
-        ['Notice: File themes was skipped due to timeout', '100%'],
-        ['Notice: File plugins was skipped due to timeout', '100%'],
-        ['Notice: File uploads was skipped due to timeout', '100%'],
-        ['Notice: File db was skipped due to timeout', '100%'],
+        ['Backup completed with missing parts', '100%'],
         ['Notice: File uploads.zip.crypt was not found on the remote server. Please try to back it up again.', '100%'],
         ['Notice: File db.zip.crypt was not found on the remote server. Please try to back it up again.', '100%'],
         ['Notice: File plugins.zip.crypt was not found on the remote server. Please try to back it up again.', '100%'],
@@ -407,6 +404,19 @@ class OCM_Backup
         update_option('ocm_presigned_urls', $presigned_urls, true);
         update_option('ocm_restore_code_plain', $restore_code, false);
 
+        // Publish the uncompressed part sizes into the log. The log is uploaded to
+        // S3 with the backup and merged back on the restore side before its disk
+        // preflight, which uses these numbers instead of guessing from zip sizes.
+        if (!empty($disk['sizes'])) {
+            $size_pairs = [];
+            foreach ($disk['sizes'] as $part => $bytes) {
+                $size_pairs[] = $part . '=' . (int) $bytes;
+            }
+            One_Click_Migration::write_to_log(
+                ' SYSLOG: BACKUP_UNCOMPRESSED_SIZES bucket=' . $bucket_id . ' ' . implode(' ', $size_pairs)
+            );
+        }
+
         if (!self::check_is_complete_backup_step('init', self::STEP_BACKUP_CHILD_INITIATE)) {
 
             One_Click_Migration::write_to_log('Backup started');
@@ -496,7 +506,16 @@ class OCM_Backup
 
     private static function dispatch_backup_worker_with_diagnostics()
     {
-        self::log_admin_ajax_loopback_check();
+        if (!self::admin_ajax_loopback_check_passed()) {
+            // Async dispatch would be sent into the void; run the worker inline
+            // instead (the same "maximum compatibility" path restore uses).
+            update_option('ocm_dispatch_blocked', 1, false);
+            One_Click_Migration::write_to_log('Notice: This host blocks loopback requests to admin-ajax.php; running the backup in direct processing mode.');
+            One_Click_Migration::$process_backup_single->trigger_processing();
+            return;
+        }
+
+        delete_option('ocm_dispatch_blocked');
 
         One_Click_Migration::write_to_log(' SYSLOG: Dispatching backup worker');
         $response = One_Click_Migration::$process_backup_single->dispatch();
@@ -508,7 +527,7 @@ class OCM_Backup
         }
     }
 
-    private static function log_admin_ajax_loopback_check()
+    private static function admin_ajax_loopback_check_passed()
     {
         $url = add_query_arg(
             array(
@@ -531,7 +550,7 @@ class OCM_Backup
                 ' SYSLOG: admin-ajax loopback check failed before backup worker dispatch: %s',
                 $response->get_error_message()
             ));
-            return;
+            return false;
         }
 
         $code = (int) wp_remote_retrieve_response_code($response);
@@ -546,7 +565,7 @@ class OCM_Backup
                 $message,
                 $body_preview
             ));
-            return;
+            return false;
         }
 
         One_Click_Migration::write_to_log(sprintf(
@@ -554,6 +573,7 @@ class OCM_Backup
             $code,
             $message
         ));
+        return true;
     }
 
     private static function log_backup_worker_dispatch_response($response)
@@ -573,6 +593,13 @@ class OCM_Backup
 
         $code = (int) wp_remote_retrieve_response_code($response);
         $message = wp_remote_retrieve_response_message($response);
+
+        if (0 === $code) {
+            // The dispatch is a fire-and-forget request, so 0 just means "sent".
+            // Whether the worker actually started is confirmed by its heartbeat.
+            One_Click_Migration::write_to_log(' SYSLOG: Backup worker dispatch request sent (async)');
+            return;
+        }
 
         One_Click_Migration::write_to_log(sprintf(
             ' SYSLOG: Backup worker dispatch HTTP response: %d %s',
@@ -676,6 +703,14 @@ class OCM_Backup
             // Pull backup-side log from S3 and prepend to whatever the restore worker
             // has already written locally (e.g. "*** RESTORE TASK STARTED ***").
             One_Click_Migration::merge_backup_log_from_s3();
+
+            $backup_missing_parts = get_option('ocm_backup_missing_parts', []);
+            if (is_array($backup_missing_parts) && $backup_missing_parts) {
+                One_Click_Migration::write_to_log(sprintf(
+                    'Notice: This backup does not include: %s. These parts were skipped when the backup was created, so the restored site will be missing them.',
+                    implode(', ', $backup_missing_parts)
+                ));
+            }
 
             $excluded_for_check = self::get_excluded_folders();
             $disk = self::check_restore_disk_space($presigned_urls, $excluded_for_check);
@@ -802,12 +837,27 @@ class OCM_Backup
                       $error_message = $downloadTmpPathFile->get_error_message();
                       if($error_message === 'Not Found'){
 
+                        $backup_missing_parts = get_option('ocm_backup_missing_parts', []);
+                        $backup_missing_parts = is_array($backup_missing_parts) ? $backup_missing_parts : [];
+
+                        if (in_array($key, $backup_missing_parts, true)) {
+                            One_Click_Migration::write_to_log("Notice: $key was not included in this backup (skipped while the backup was created); continuing without it.");
+                        } elseif (get_option('ocm_backup_parts_known')) {
+                            // The backup manifest says this part was uploaded, so its
+                            // absence means the stored backup is damaged or expired.
+                            return self::fail_restore(sprintf(
+                                'Error: Restore failed because "%s" should exist in this backup but is missing from storage. Create a fresh backup and restore with the new code.',
+                                $keyZipCrypt
+                            ));
+                        } else {
+                            One_Click_Migration::write_to_log("Notice: file $keyZipCrypt not found");
+                        }
+
                         array_push($excluded_restore_files, $key);
                         $excluded_restore_files = array_unique($excluded_restore_files);
 
                         update_option( 'ocm_excluded_folders', $excluded_restore_files);
                         self::capture_failed_folder($eexcluded_restore_files, $key, 'ocm_eexcluded_folders');
-                        One_Click_Migration::write_to_log("Notice: file $keyZipCrypt not found");
 
                         continue;
                       }
@@ -934,6 +984,13 @@ class OCM_Backup
 
                       self::set_complete_restore_step($key, self::STEP_RESTORE_CHILD_UNENCRYPTED_ZIP, $unencrypted_zip);
                       self::set_complete_restore_step($key, self::STEP_RESTORE_CHILD_DECRYPT);
+
+                      // Later steps only need the decrypted zip; drop the encrypted copy
+                      // now so the part never occupies 3x its size on disk at once.
+                      @unlink($file_path);
+                      if (is_string($downloadTmpPathFile) && $downloadTmpPathFile !== $file_path && file_exists($downloadTmpPathFile)) {
+                          @unlink($downloadTmpPathFile);
+                      }
                   }
                 }
               }
@@ -993,6 +1050,24 @@ class OCM_Backup
                       ));
                   }
 
+                  $zip_uncompressed = 0;
+                  for ($i = 0; $i < $zip->numFiles; $i++) {
+                      $stat = $zip->statIndex($i);
+                      if ($stat !== false) {
+                          $zip_uncompressed += (int) $stat['size'];
+                      }
+                  }
+                  $free_before_extract = self::get_free_disk_space($content_dir);
+                  if ($free_before_extract > 0 && $zip_uncompressed > 0 && $free_before_extract < $zip_uncompressed) {
+                      $zip->close();
+                      return self::fail_restore(sprintf(
+                          'Error: Not enough disk space to extract "%s.zip": need %s free, only %s available. Free space or increase the hosting account quota, then run the restore again.',
+                          $key,
+                          self::convertToReadableSize($zip_uncompressed),
+                          self::convertToReadableSize($free_before_extract)
+                      ));
+                  }
+
                   $extract_result = $zip->extractTo($extract_path);
                   $zip->close();
 
@@ -1026,6 +1101,10 @@ class OCM_Backup
 
 
                     self::set_complete_restore_step($key, self::STEP_RESTORE_CHILD_EXTRACT);
+
+                    // Extraction succeeded, so the zip is no longer needed; free its
+                    // space before the next part starts downloading.
+                    @unlink($unencrypted_zip['filename']);
                   }
                 }
 
@@ -1175,6 +1254,11 @@ class OCM_Backup
         }
         self::print_folders_skipped();
         self::print_folders_not_found();
+
+        $backup_missing_parts = get_option('ocm_backup_missing_parts', []);
+        if (is_array($backup_missing_parts) && $backup_missing_parts) {
+            One_Click_Migration::write_to_log('Notice: Restore finished without: ' . implode(', ', $backup_missing_parts) . ' (these were not included in the backup).');
+        }
 
         One_Click_Migration::disable_maintenance_mode();
         OCM_Debug_Mode::disable();
@@ -1354,6 +1438,11 @@ class OCM_Backup
             self::set_complete_backup_step('db', self::STEP_BACKUP_CHILD_COMPRESS);
             self::set_complete_backup_step('db', self::STEP_BACKUP_CHILD_ENCRYPT);
             self::set_complete_backup_step('db', self::STEP_BACKUP_CHILD_ZIP_FILE_PATH, $zip_filepath);
+
+            // Only the encrypted zip is uploaded; drop the per-table SQL dumps and
+            // the plain zip now so they don't stack under later parts' disk needs.
+            self::deleteDirectoryBestEffort(OCM_PLUGIN_WRITABLE_PATH . 'db/');
+            @unlink(OCM_PLUGIN_WRITABLE_PATH . 'db.zip');
           }
 
 
@@ -1425,6 +1514,9 @@ class OCM_Backup
 
           if (!One_Click_Migration::$process_backup_single->time_exceeded()) {
             self::set_complete_backup_step('db', self::STEP_BACKUP_CHILD_UPLOAD);
+            if (is_string($zip_filepath)) {
+                @unlink($zip_filepath);
+            }
             return false;
           }
 
@@ -1751,6 +1843,8 @@ class OCM_Backup
             if (!One_Click_Migration::$process_backup_single->time_exceeded()) {
               self::set_complete_backup_step($folder_name, self::STEP_BACKUP_CHILD_ENCRYPT);
               One_Click_Migration::write_to_log(sprintf('%s ZIP has been encrypted.', $folder_name));
+              // The upload only needs the encrypted copy.
+              @unlink($filename);
             }
 
             if (One_Click_Migration::$process_backup_single->time_exceeded()) {
@@ -1823,6 +1917,9 @@ class OCM_Backup
 
             if (!One_Click_Migration::$process_backup_single->time_exceeded()) {
               self::set_complete_backup_step($folder_name, self::STEP_BACKUP_CHILD_UPLOAD);
+              if (is_string($zip_filepath)) {
+                  @unlink($zip_filepath);
+              }
 
               error_reporting($old_error_reporting);
               return false;
@@ -2275,6 +2372,78 @@ class OCM_Backup
         );
     }
 
+    /**
+     * Revive a stalled background worker from the progress poller. The poller is
+     * the only request guaranteed to keep running during a migration on hosts
+     * that block loopback requests, so it doubles as the watchdog: when a run is
+     * in flight but the worker heartbeat has gone stale, resume it inline.
+     *
+     * Only runs in REST/ajax context — trigger_processing() ends its request with
+     * wp_die(), which is fine for a poll but would blank an admin page render.
+     */
+    private static function maybe_revive_stalled_worker($is_stopped)
+    {
+        if ($is_stopped) {
+            return;
+        }
+
+        if (!(defined('REST_REQUEST') && REST_REQUEST) && !wp_doing_ajax()) {
+            return;
+        }
+
+        $backup_active  = (bool) get_option('ocm_action_start_backup');
+        $restore_active = (bool) get_option('ocm_action_start_restore');
+        if (!$backup_active && !$restore_active) {
+            return;
+        }
+
+        $process = $restore_active
+            ? One_Click_Migration::$process_restore_single
+            : One_Click_Migration::$process_backup_single;
+        if (!is_object($process) || !method_exists($process, 'trigger_processing')) {
+            return;
+        }
+
+        $now = time();
+        // On hosts where the loopback gate already failed there is no healthy
+        // dispatch chain to wait for, so stale means stalled much sooner.
+        $threshold = get_option('ocm_dispatch_blocked') ? 25 : 45;
+
+        $heartbeat = (int) get_option('ocm_worker_heartbeat', 0);
+        if (0 === $heartbeat) {
+            // First sighting of this run: start the clock instead of assuming a stall.
+            One_Click_Migration::worker_heartbeat();
+            return;
+        }
+        if (($now - $heartbeat) <= $threshold) {
+            return;
+        }
+
+        // Throttle so a burst of concurrent polls produces a single pump.
+        $last_pump = (int) get_option('ocm_worker_watchdog_last', 0);
+        if (($now - $last_pump) <= 20) {
+            return;
+        }
+        update_option('ocm_worker_watchdog_last', $now, false);
+
+        $revivals = (int) get_option('ocm_worker_revival_count', 0) + 1;
+        update_option('ocm_worker_revival_count', $revivals, false);
+
+        One_Click_Migration::write_to_log(sprintf(
+            ' SYSLOG: Worker heartbeat is %d seconds old; resuming via direct processing (revival #%d)',
+            $now - $heartbeat,
+            $revivals
+        ));
+
+        if (3 === $revivals) {
+            One_Click_Migration::write_to_log('Notice: Background dispatch appears blocked on this host; the process continues in direct mode and may take longer than usual.');
+        }
+
+        // trigger_processing() no-ops behind the process-lock transient and the
+        // MySQL advisory lock, so a false-positive pump cannot double-process.
+        $process->trigger_processing();
+    }
+
     public static function get_progress()
     {
         $log_url = OCM_DEBUG_LOG_FILE_URL;
@@ -2287,6 +2456,8 @@ class OCM_Backup
         if ($isStopped) { // cancel all bg process
             One_Click_Migration::cancel_all_process();
         }
+
+        self::maybe_revive_stalled_worker($isStopped);
 
         if ($lastLog && $lastLotNoSkip === self::LOG_MESSAGE_BG_PROCESS_RESTARTING_LOG) {
 
@@ -2404,6 +2575,16 @@ class OCM_Backup
                         : '';
                     $progress_item_text['topBanner'] = '<strong>Check your email</strong> for the restore code from <strong>pr@1clickmigration.com</strong>. If you don\'t see it within a few minutes, check your <strong>spam/junk folder</strong> and mark messages from <code>pr@1clickmigration.com</code> as not spam so future restore codes arrive in your inbox.'
                         . $bucket_line;
+                } elseif (strpos($lastLog, 'Backup completed with missing parts') === 0) {
+                    $bucket_id = (string) get_option('ocm_bucket_id', '');
+                    $bucket_line = $bucket_id !== ''
+                        ? '<br>Backup ID: <code>' . esc_html($bucket_id) . '</code>'
+                        : '';
+                    $missing_label = esc_html(trim((string) substr($lastLog, strlen('Backup completed with missing parts:'))));
+                    $progress_item_text['topBanner'] = '<strong>Backup finished, but it is INCOMPLETE.</strong> These parts could not be backed up and will NOT be restored: <strong>' . $missing_label . '</strong>.'
+                        . '<br>A restore code was still emailed from <strong>pr@1clickmigration.com</strong> in case you want to migrate the rest.'
+                        . '<br>To get a complete backup, ask your host to raise the PHP <code>max_execution_time</code>, then run the backup again.'
+                        . $bucket_line;
                 }
                 $recovery_hint = self::get_recovery_hint_for_log($lastLog);
                 if ($recovery_hint !== '') {
@@ -2442,8 +2623,12 @@ class OCM_Backup
             return 'The database import failed on a SQL file. If <code>proc_open</code> is disabled, ask the host to enable it so the restore can use the MySQL CLI path. If that is not possible, export a new backup after cleaning invalid or binary data stored in options by third-party plugins.';
         }
 
-        if (strpos($log, 'Backup worker dispatch failed') !== false || strpos($log, 'admin-ajax loopback check failed') !== false) {
+        if (strpos($log, 'Backup worker dispatch failed') !== false || strpos($log, 'admin-ajax loopback check failed') !== false || strpos($log, 'blocks loopback requests') !== false) {
             return 'Ask the host to allow WordPress loopback requests to <code>wp-admin/admin-ajax.php</code>. Security plugins, WAF rules, basic auth, or firewall settings can block the background worker.';
+        }
+
+        if (strpos($log, 'was skipped due to timeout') !== false || strpos($log, 'Backup completed with missing parts') !== false) {
+            return 'Parts get skipped when the host repeatedly hits its PHP execution time limit. Ask the host to raise <code>max_execution_time</code> (or temporarily reduce the folder size), then run the backup again so every part is included.';
         }
 
         if (strpos($log, 'Could not register backup') !== false || strpos($log, 'endpoint') !== false) {
@@ -2539,16 +2724,21 @@ class OCM_Backup
      *   - DB: ~2x DB engine size (SQL dumps + zip), matches the in-flow check.
      *   - Each folder: ~1.5x folder size (zip + encrypted copy).
      *
-     * @return array{ok:bool, required:int, free:int, peak_label:string}
+     * Also returns the raw per-part sizes so the caller can publish them (via the
+     * log that gets uploaded to S3) for the restore-side disk preflight.
+     *
+     * @return array{ok:bool, required:int, free:int, peak_label:string, sizes:array<string,int>}
      */
     private static function check_backup_disk_space($excluded_folders)
     {
         $excluded = is_array($excluded_folders) ? $excluded_folders : [];
         $peak_bytes = 0;
         $peak_label = '';
+        $sizes = [];
 
         if (!in_array('db', $excluded, true)) {
             $db_bytes = (int) ((float) self::DBSize() * 1024 * 1024);
+            $sizes['db'] = $db_bytes;
             $need = (int) ($db_bytes * 2);
             if ($need > $peak_bytes) { $peak_bytes = $need; $peak_label = 'db'; }
         }
@@ -2556,7 +2746,9 @@ class OCM_Backup
             if (in_array($folder, $excluded, true)) continue;
             $path = WP_CONTENT_DIR . '/' . $folder;
             if (!is_dir($path)) continue;
-            $need = (int) (self::folderSize($path) * 1.5);
+            $folder_bytes = (int) self::folderSize($path);
+            $sizes[$folder] = $folder_bytes;
+            $need = (int) ($folder_bytes * 1.5);
             if ($need > $peak_bytes) { $peak_bytes = $need; $peak_label = $folder; }
         }
 
@@ -2567,17 +2759,21 @@ class OCM_Backup
             'required'   => $peak_bytes,
             'free'       => $free,
             'peak_label' => $peak_label,
+            'sizes'      => $sizes,
         ];
     }
 
     /**
      * Check disk space for restore. Each part is downloaded (encrypted zip),
-     * decrypted (briefly 2x zip on disk), then extracted into ocm_restore/.
-     * Extracted content from earlier parts persists until the final move step,
-     * so peak ≈ sum(unzipped_sizes) + one part's encrypted + decrypted zip.
-     * Without unzipped sizes, approximate as 1.6x sum(zip_sizes) — typical mixed
-     * content (DB SQL compresses well, uploads barely compress at all) lands
-     * around there. The in-flow extract step will catch the rare overshoot.
+     * decrypted (crypt deleted right after), extracted into ocm_restore/ (zip
+     * deleted right after), and db/plugins content stays staged until the final
+     * phases, so peak ≈ sum(unzipped_sizes) + one part's zip in flight.
+     *
+     * When the backup published its uncompressed part sizes (BACKUP_UNCOMPRESSED_SIZES
+     * line in the merged S3 log), use those: sum(uncompressed) + largest zip, +10%.
+     * Otherwise fall back to 1.6x sum(zip_sizes) — typical mixed content (DB SQL
+     * compresses well, uploads barely compress at all) lands around there. The
+     * in-flow download/extract checks catch any overshoot.
      *
      * @return array{ok:bool, required:int, free:int, total:int, reason:string}
      */
@@ -2585,24 +2781,40 @@ class OCM_Backup
     {
         $excluded = is_array($excluded_folders) ? $excluded_folders : [];
         $total_bytes = 0;
+        $largest_zip = 0;
         $write_probe_ok = self::probe_restore_workspace_write();
 
         if (is_array($presigned_urls) || is_object($presigned_urls)) {
             foreach ((array) $presigned_urls as $key => $url) {
                 if (in_array($key, $excluded, true)) continue;
+                if (in_array($key, array('log', 'log_download'), true)) continue;
                 if (!is_string($url) || $url === '') continue;
                 $resp = wp_remote_head($url, ['timeout' => 8, 'redirection' => 3]);
                 if (is_wp_error($resp)) continue;
                 $len = wp_remote_retrieve_header($resp, 'content-length');
                 if ($len !== '' && is_numeric($len)) {
                     $total_bytes += (int) $len;
+                    $largest_zip = max($largest_zip, (int) $len);
                 }
             }
         }
 
-        $required = (int) ($total_bytes * 1.6);
+        $manifest = self::get_backup_size_manifest();
+        $uncompressed_total = 0;
+        foreach ($manifest as $part => $bytes) {
+            if (in_array($part, $excluded, true)) continue;
+            if (!array_key_exists($part, (array) $presigned_urls)) continue;
+            $uncompressed_total += $bytes;
+        }
+
+        if ($uncompressed_total > 0) {
+            $required = (int) (($uncompressed_total + $largest_zip) * 1.1);
+        } else {
+            $required = (int) ($total_bytes * 1.6);
+        }
+
         $free = self::get_free_disk_space(OCM_PLUGIN_WRITABLE_PATH);
-        $space_ok = ($free === 0 || $total_bytes === 0) ? true : ($free >= $required);
+        $space_ok = ($free === 0 || $required === 0) ? true : ($free >= $required);
 
         return [
             'ok'       => $write_probe_ok && $space_ok,
@@ -2611,6 +2823,39 @@ class OCM_Backup
             'total'    => $total_bytes,
             'reason'   => $write_probe_ok ? ($space_ok ? '' : 'insufficient_space') : 'write_probe_failed',
         ];
+    }
+
+    /**
+     * Parse the uncompressed part sizes the backup published into its log
+     * (merged from S3 before the restore disk check). Matched by bucket_id so a
+     * stale line from an earlier migration on this site cannot be picked up.
+     *
+     * @return array<string,int> part => bytes, empty when unavailable.
+     */
+    private static function get_backup_size_manifest()
+    {
+        $bucket_id = (string) get_option('ocm_bucket_id', '');
+        if ($bucket_id === '' || !defined('OCM_DEBUG_LOG_FILE') || !file_exists(OCM_DEBUG_LOG_FILE)) {
+            return [];
+        }
+
+        $contents = (string) @file_get_contents(OCM_DEBUG_LOG_FILE);
+        if ($contents === '') {
+            return [];
+        }
+
+        $pattern = '/BACKUP_UNCOMPRESSED_SIZES bucket=' . preg_quote($bucket_id, '/') . ' ([a-z_]+=\d+(?: [a-z_]+=\d+)*)/';
+        if (!preg_match_all($pattern, $contents, $matches) || empty($matches[1])) {
+            return [];
+        }
+
+        $sizes = [];
+        foreach (explode(' ', end($matches[1])) as $pair) {
+            list($part, $bytes) = explode('=', $pair, 2);
+            $sizes[$part] = (int) $bytes;
+        }
+
+        return $sizes;
     }
 
     private static function get_free_disk_space($preferred_path)
@@ -2773,6 +3018,16 @@ class OCM_Backup
             return new WP_Error('http_404', 'Not Found');
         }
 
+        if ($errno === 23) {
+            // CURLE_WRITE_ERROR: writing the downloaded bytes to disk failed, which
+            // means a full disk or quota — retrying cannot succeed until space is freed.
+            return new WP_Error('ocm_disk_full', sprintf(
+                'Not enough disk space while downloading "%s.zip.crypt" (%s free). Free space or increase the hosting account quota, then run the restore again.',
+                $key,
+                self::convertToReadableSize(self::get_free_disk_space(dirname($target_path)))
+            ));
+        }
+
         $downloaded = file_exists($partial_path) ? (int) filesize($partial_path) : 0;
         if ($offset > 0 && $http_code === 200) {
             @unlink($partial_path);
@@ -2875,7 +3130,7 @@ class OCM_Backup
 
     }
 
-    public static function send_restore_code_email()
+    public static function send_restore_code_email($missing_parts = array())
     {
         $email        = get_option('ocm_user_email');
         $bucket_id    = get_option('ocm_bucket_id');
@@ -2887,7 +3142,7 @@ class OCM_Backup
         }
 
         for ($attempt = 1; $attempt <= 3; $attempt++) {
-            if (OCM_S3::send_restore_code_email($email, $bucket_id, $restore_code, get_site_url())) {
+            if (OCM_S3::send_restore_code_email($email, $bucket_id, $restore_code, get_site_url(), $missing_parts)) {
                 delete_option('ocm_restore_code_plain');
                 return true;
             }
@@ -3595,6 +3850,56 @@ class OCM_Backup
 
       return true;
 
+    }
+
+    /**
+     * Parts the just-finished backup does not contain (skipped after retry
+     * exhaustion). Normalized, deduped, sorted.
+     *
+     * @return string[]
+     */
+    public static function get_backup_missing_parts()
+    {
+        $skipped = get_option('ocm_skipped_folders', []);
+        $missing = array();
+        foreach ((is_array($skipped) ? $skipped : array()) as $part) {
+            if (is_string($part) && $part !== '') {
+                $missing[] = strtolower($part);
+            }
+        }
+        $missing = array_values(array_unique($missing));
+        sort($missing);
+        return $missing;
+    }
+
+    /**
+     * Write the per-part status marker into the log. write_to_log mirrors the
+     * whole log to S3, so the restore side can read this back before it starts
+     * downloading (see One_Click_Migration::extract_missing_parts_from_backup_log).
+     */
+    public static function log_backup_parts_manifest($missing_parts)
+    {
+        $bucket_id = (string) get_option('ocm_bucket_id', '');
+        if ('' === $bucket_id) {
+            return;
+        }
+
+        $excluded = get_option('ocm_excluded_folders', []);
+        $excluded = is_array($excluded) ? $excluded : array();
+        $missing_parts = is_array($missing_parts) ? $missing_parts : array();
+
+        $pairs = array();
+        foreach (array('db', 'themes', 'plugins', 'uploads') as $part) {
+            if (in_array($part, $excluded, true)) {
+                $pairs[] = $part . '=excluded';
+            } elseif (in_array($part, $missing_parts, true)) {
+                $pairs[] = $part . '=skipped';
+            } else {
+                $pairs[] = $part . '=ok';
+            }
+        }
+
+        One_Click_Migration::write_to_log(' SYSLOG: BACKUP_PARTS bucket=' . $bucket_id . ' ' . implode(' ', $pairs));
     }
 
     /**

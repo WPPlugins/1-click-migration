@@ -64,7 +64,7 @@ class OCM_S3
      *
      * @return bool
      */
-    public static function send_restore_code_email($email, $bucket_id, $code, $site_url)
+    public static function send_restore_code_email($email, $bucket_id, $code, $site_url, $missing_parts = array())
     {
         $payload = [
             'action'    => 'send_restore_code',
@@ -73,6 +73,10 @@ class OCM_S3
             'code'      => $code,
             'site_url'  => $site_url,
         ];
+
+        if (is_array($missing_parts) && $missing_parts) {
+            $payload['missing_parts'] = array_values($missing_parts);
+        }
 
         $response = wp_remote_post(self::REGISTER_BACKUP_ENDPOINT, [
             'headers'     => ['Content-Type' => 'application/json; charset=utf-8'],

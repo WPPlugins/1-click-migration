@@ -2,9 +2,9 @@
 Contributors: 1clickmigration
 Tags: wordpress migration, wordpress backup, clone wordpress, wordpress restore, wordpress site transfer, free wordpress migration plugin, wordpress staging, zero downtime migration, move wordpress site
 Requires at least: 4.0
-Tested up to: 7.0
+Tested up to: 7.1
 Requires PHP: 7.4
-Stable tag: 3.1.5
+Stable tag: 3.1.6
 Author URI: https://1clickmigration.com
 License: GPLv3 or later
 License URI: http://www.gnu.org/licenses/gpl-3.0.html
@@ -119,6 +119,14 @@ All of them! Migrate WordPress sites between any hosting providers: Bluehost, Si
 3. Restore Completed
 
 == Changelog ==
+= 3.1.6 =
+* **Partial Backup Honesty**: Backups that skip a part (e.g. uploads after repeated timeouts) now finish with a clear "completed with missing parts" status, an incomplete-backup warning banner, and a restore-code email that lists what's missing instead of reporting a normal completion.
+* **Restore Awareness**: Restores now read the backup's part manifest up front, warn which parts the backup does not contain, and fail clearly when a part that should exist is missing from storage.
+* **Background Worker Watchdog**: Backup and restore workers now write a heartbeat, and the progress poller automatically resumes a stalled worker — fixing silent hangs on hosts that block admin-ajax loopback requests (basic auth, WAF, firewalls).
+* **Loopback Handling**: When the pre-dispatch loopback check fails, the backup now runs in direct processing mode immediately instead of dispatching a background worker that never starts.
+* **Disk Space**: Restores delete encrypted and intermediate archives as soon as each step completes, check free space before every extraction, and use real uncompressed sizes from the backup for the up-front disk check. Backups likewise clean up each part's temp files right after upload, so peak disk usage is much lower on both sides.
+* **Clearer Failures**: Running out of disk space during a download or extraction now stops the restore immediately with an actionable message instead of retrying into a full disk.
+
 = 3.1.5 =
 * **Backup Reliability**: Added multipart uploads for large backup archives to reduce S3 timeout failures on slower hosts.
 * **Restore Reliability**: Added resumable downloads and stronger ZIP state validation so large restores can recover from interrupted transfers.
@@ -255,6 +263,9 @@ All of them! Migrate WordPress sites between any hosting providers: Bluehost, Si
 * Initial release & dependency updates
 
 == Upgrade Notice ==
+
+= 3.1.6 =
+Partial backups are now clearly flagged in the UI and restore-code email, stalled background workers auto-recover on hosts that block loopback requests, and disk usage during backup/restore is significantly reduced.
 
 = 3.1.5 =
 Improves large backup/restore reliability with multipart uploads, resumable downloads, and removes pre-3.0 legacy endpoint handling.

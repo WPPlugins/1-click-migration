@@ -84,6 +84,7 @@ class OCM_BackgroundRestore extends WP_Background_Process
             wp_die();
         }
 
+        One_Click_Migration::worker_heartbeat();
         $this->lock_process();
         $isStopProcess = false;
 
@@ -91,6 +92,7 @@ class OCM_BackgroundRestore extends WP_Background_Process
             $batch = $this->get_batch();
 
             foreach ( $batch->data as $key => $value ) {
+                One_Click_Migration::worker_heartbeat();
                 $task = $this->task( $value );
 
                 if ( self::RETURN_TYPE_STOP_PROCESSS === $task ) {
@@ -270,6 +272,7 @@ class OCM_BackgroundRestore extends WP_Background_Process
         if ( !$this->is_queue_empty() ) {
             One_Click_Migration::write_to_log(OCM_Backup::LOG_MESSAGE_BG_PROCESS_RESTARTING);
             One_Click_Migration::write_to_log(OCM_Backup::LOG_MESSAGE_BG_PROCESS_RESTARTING_LOG);
+            One_Click_Migration::worker_heartbeat();
             sleep(1);
 
             // Start next batch
