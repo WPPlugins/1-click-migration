@@ -1,21 +1,23 @@
-===1 Click Migration & Backup: Free WordPress Migration Plugin with Zero Downtime & Easy Clone===
+===1-Click Backup & Migration===
 Contributors: 1clickmigration
-Tags: wordpress migration, wordpress backup, clone wordpress, wordpress restore, wordpress site transfer, free wordpress migration plugin, wordpress staging, zero downtime migration, move wordpress site
+Tags: backup, migration, migrate, restore, clone
 Requires at least: 4.0
 Tested up to: 7.1
 Requires PHP: 7.4
-Stable tag: 3.1.8
+Stable tag: 3.1.9
 Author URI: https://1clickmigration.com
 License: GPLv3 or later
 License URI: http://www.gnu.org/licenses/gpl-3.0.html
 
-Free WordPress migration plugin for backup, restore, clone, and site transfer with zero downtime. Migrate WordPress site easily.
+Backup, restore, and migrate a WordPress site in one click. Get a restore code by email and move hosts without a 4GB zip cap.
 
 == Description ==
 
-### 1-Click Migration: Your Ultimate Free WordPress Migration Plugin & Backup Solution ###
+### Backup, restore, and migrate in one click ###
 
-Discover the ultimate free WordPress migration plugin for effortless WordPress backup and restore. 1-Click Migration empowers you to migrate WordPress site, clone WordPress site, or perform a WordPress site transfer between hosts or domains with guaranteed zero downtime WordPress migration. It's the ideal WordPress staging plugin and a complete solution for robust WordPress backup and restore.
+1-Click Migration backs up a WordPress site, emails you an 8-character restore code, and restores it on a new host or domain. URLs and serialized data update automatically. The live site stays up during backup.
+
+https://vimeo.com/1220910737
 
 **Why Choose 1-Click Migration for WordPress Backup & Migration?**
 
@@ -27,7 +29,7 @@ Discover the ultimate free WordPress migration plugin for effortless WordPress b
 ✅ **Automatic URL & Data Replacement** – All URLs and serialized data update automatically when you move WordPress site to a new domain.
 ✅ **Secure Encrypted WordPress Backups** – Keep your WordPress backups safe with password protection and military-grade encryption.
 ✅ **Direct WordPress Site Transfer** – Perform a swift WordPress site transfer directly server-to-server, avoiding large downloads or uploads.
-✅ **No Size Limits for WordPress Migration** – Backup and migrate WordPress site of any size, 100% free, unlike other free WordPress migration plugins.
+✅ **No 4GB zip cap** – Free backups are not limited to a 4GB download. Very large databases may need a higher PHP memory_limit; use selective backup (database / plugins / uploads / themes) when a host is tight on memory.
 ✅ **Easy WordPress Migration for All** – Enjoy an intuitive and easy WordPress migration plugin experience for beginners and professionals alike.
 
 Perfect for: Migrate WordPress site, complete WordPress backup and restore, create WordPress staging plugin environments, clone WordPress site for development, seamless WordPress site transfer between hosts, or to move WordPress site to a new domain. Your all-in-one free WordPress migration plugin!
@@ -102,7 +104,7 @@ Yes! 1-Click Migration automatically updates all database entries including seri
 WordPress backups are available for 48 hours after creation. You can create a new backup anytime if you miss the restoration window.
 
 = Is there a limit on WordPress site size for backup and migration? =
-No! Unlike other WordPress migration plugins, 1-Click Migration handles sites of any size completely free. Large sites over 1GB can use selective restore options.
+There is no 4GB zip-download cap. Large sites can use selective backup and restore. Very large databases may need a higher PHP memory_limit on the source host.
 
 = Can I use this for WordPress staging site setup? =
 Absolutely! Clone your live WordPress site to create staging environments for testing updates, themes, or plugins safely.
@@ -114,11 +116,14 @@ No. Your live WordPress site remains fully operational during the entire backup 
 All of them! Migrate WordPress sites between any hosting providers: Bluehost, SiteGround, WP Engine, Kinsta, GoDaddy, HostGator, DreamHost, and all others.
 
 == Screenshots ==
-1. One-click WordPress backup & migration dashboard
-2. Advanced Options
-3. Restore Completed
+1. One-click backup dashboard
+2. Selective backup options
+3. Restore-complete success
 
 == Changelog ==
+= 3.1.9 =
+* **Restore Reliability**: Restore now swaps the destination directory aside (`dest.ocm_bak`) and only deletes it after the new tree is in place, so a kill mid-replace leaves the old or new tree, never an empty folder. Restore logs the actual destination `$directory` path.
+
 = 3.1.8 =
 * **Restore Reliability**: Fixed a false siteurl/home failure during database restore when leftover foreign-prefix `*_options` tables (or custom table prefixes) were present on the destination. The gate now verifies `siteurl` and `home` only on the just-imported `{base_prefix}options` table, using the exact `{source_prefix}options.sql` dump — not other `*options.sql` files.
 

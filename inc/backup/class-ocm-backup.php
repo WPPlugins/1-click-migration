@@ -1138,7 +1138,7 @@ class OCM_Backup
 
                         $directory = WP_CONTENT_DIR . '/' . $key;
 
-                        One_Click_Migration::write_to_log(sprintf('Restoring "%s" to directory "%s"', ucfirst($key), WP_CONTENT_DIR));
+                        One_Click_Migration::write_to_log(sprintf('Restoring "%s" to directory "%s"', ucfirst($key), $directory));
 
                         if (!self::replaceDirectoryFromExtract($extract_path, $directory, $key)) {
                             One_Click_Migration::write_to_log(sprintf(
@@ -2049,18 +2049,50 @@ class OCM_Backup
             return false;
         }
 
-        if (is_dir($directory)) {
-            $deleted = self::deleteDirectoryBestEffort($directory);
-            if (!$deleted || is_dir($directory)) {
+        $bak = rtrim($directory, '/\\') . '.ocm_bak';
+
+        // Recover a previous interrupted swap: dest missing, bak still present.
+        if (!is_dir($directory) && is_dir($bak)) {
+            @rename($bak, $directory);
+        }
+
+        $had_dest = is_dir($directory);
+        if ($had_dest) {
+            if (is_dir($bak)) {
+                self::deleteDirectoryBestEffort($bak);
+            }
+            if (!@rename($directory, $bak)) {
                 One_Click_Migration::write_to_log(sprintf(
-                    'Notice: Could not fully remove old %s directory; merging restored files over the existing directory.',
-                    $key
+                    'Notice: Could not rename "%s" aside; merging restored files over the existing directory.',
+                    $directory
                 ));
+                if (!self::copyDirectory($extract_path, $directory)) {
+                    return false;
+                }
+                self::deleteDirectoryBestEffort($extract_path);
+                return true;
             }
         }
 
-        if (!is_dir($directory) && @rename($extract_path, $directory)) {
+        if (@rename($extract_path, $directory)) {
+            if ($had_dest && is_dir($bak)) {
+                self::deleteDirectoryBestEffort($bak);
+            }
             return true;
+        }
+
+        // New tree failed to take dest's place — put the old tree back first.
+        if ($had_dest && is_dir($bak) && !is_dir($directory)) {
+            @rename($bak, $directory);
+        }
+
+        One_Click_Migration::write_to_log(sprintf(
+            'Notice: Could not rename extract into "%s"; copying instead.',
+            $directory
+        ));
+
+        if (!is_dir($directory) && !@mkdir($directory, 0755, true) && !is_dir($directory)) {
+            return false;
         }
 
         if (!self::copyDirectory($extract_path, $directory)) {
@@ -2068,6 +2100,9 @@ class OCM_Backup
         }
 
         self::deleteDirectoryBestEffort($extract_path);
+        if ($had_dest && is_dir($bak)) {
+            self::deleteDirectoryBestEffort($bak);
+        }
         return true;
     }
 
