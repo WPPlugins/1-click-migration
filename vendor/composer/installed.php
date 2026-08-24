@@ -1,11 +1,11 @@
 <?php return array(
     'root' => array(
-        'pretty_version' => '1.0.0+no-version-set',
-        'version' => '1.0.0.0',
+        'pretty_version' => 'dev-master',
+        'version' => 'dev-master',
         'type' => 'library',
         'install_path' => __DIR__ . '/../../',
         'aliases' => array(),
-        'reference' => NULL,
+        'reference' => '4ffd4aa18f4673c0703b42d44ff835cd78d82e17',
         'name' => 'oneclickmigration/1-click-migration',
         'dev' => false,
     ),
@@ -56,12 +56,12 @@
             'dev_requirement' => false,
         ),
         'oneclickmigration/1-click-migration' => array(
-            'pretty_version' => '1.0.0+no-version-set',
-            'version' => '1.0.0.0',
+            'pretty_version' => 'dev-master',
+            'version' => 'dev-master',
             'type' => 'library',
             'install_path' => __DIR__ . '/../../',
             'aliases' => array(),
-            'reference' => NULL,
+            'reference' => '4ffd4aa18f4673c0703b42d44ff835cd78d82e17',
             'dev_requirement' => false,
         ),
         'paragonie/random_compat' => array(

@@ -1263,6 +1263,21 @@ class OCM_Backup
         One_Click_Migration::disable_maintenance_mode();
         OCM_Debug_Mode::disable();
         One_Click_Migration::write_to_log('Restore completed.');
+        // Durable flag so the admin UI can show the success modal after
+        // post-restore logout / re-login (session cookies often invalidate).
+        $missing_parts = get_option('ocm_backup_missing_parts', []);
+        $is_warned = is_array($missing_parts) && !empty($missing_parts);
+        update_option('ocm_show_restore_success', time(), false);
+        if ($is_warned) {
+            // Success UI ok; never offer Review CTA on warned / missing-parts runs.
+            update_option('ocm_show_review_cta', 0, false);
+        } else {
+            $clean_count = (int) get_option('ocm_clean_restore_count', 0) + 1;
+            update_option('ocm_clean_restore_count', $clean_count, false);
+            $dismissed = (bool) get_option('ocm_review_ask_dismissed', false);
+            // Review CTA only on 2nd+ clean success for this site, unless permanently dismissed.
+            update_option('ocm_show_review_cta', (!$dismissed && $clean_count >= 2) ? 1 : 0, false);
+        }
         One_Click_Migration::reset_actions_start_mark();
         self::reset_current_restore_steps();
         update_option('ocm_is_stopped', true, true);
@@ -2567,7 +2582,8 @@ class OCM_Backup
                 } elseif ($lastLog === 'Plugins have been restored') {
                     $progress_item_text['text'] .= '</br></br>Around this step you might get logged out. Log back in using your old WordPress credentials and refresh this page for progress updates.';
                 } elseif ($lastLog === 'Restore completed.') {
-                    $progress_item_text['text'] .= '</br></br>Please check you website. If you have any issues please check our <a target="_blank" href="https://1clickmigration.com/faq/">FAQ page</a> or contact use via <a target="_blank" href="https://1clickmigration.com/contact-us/">this Contact Form</a>.</br>If you like this plugin please leave us a <a target="_blank" href="https://wordpress.org/plugins/1-click-migration/#reviews">review</a>.';
+                    $progress_item_text['text'] .= '</br></br>Please check your website. If you have any issues please check our <a target="_blank" href="https://1clickmigration.com/faq/">FAQ page</a> or contact us via <a target="_blank" href="https://1clickmigration.com/contact-us/">this Contact Form</a>.';
+                    $progress_item_text['restoreCompleted'] = true;
                 } elseif ($lastLog === 'Backup completed.') {
                     $bucket_id = (string) get_option('ocm_bucket_id', '');
                     $bucket_line = $bucket_id !== ''

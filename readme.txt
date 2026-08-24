@@ -4,7 +4,7 @@ Tags: wordpress migration, wordpress backup, clone wordpress, wordpress restore,
 Requires at least: 4.0
 Tested up to: 7.1
 Requires PHP: 7.4
-Stable tag: 3.1.6
+Stable tag: 3.1.7
 Author URI: https://1clickmigration.com
 License: GPLv3 or later
 License URI: http://www.gnu.org/licenses/gpl-3.0.html
@@ -119,6 +119,9 @@ All of them! Migrate WordPress sites between any hosting providers: Bluehost, Si
 3. Restore Completed
 
 == Changelog ==
+= 3.1.7 =
+* **Restore Success UX**: When a restore finishes, you are taken back to the 1-Click Migration admin page and shown a clear restore-complete success dialog. A large Review button (WordPress.org reviews/#new-post, no rating filter, no incentive copy) appears only after a 2nd+ clean restore on that site — never on warned/missing-parts runs — and is permanently dismissible.
+
 = 3.1.6 =
 * **Partial Backup Honesty**: Backups that skip a part (e.g. uploads after repeated timeouts) now finish with a clear "completed with missing parts" status, an incomplete-backup warning banner, and a restore-code email that lists what's missing instead of reporting a normal completion.
 * **Restore Awareness**: Restores now read the backup's part manifest up front, warn which parts the backup does not contain, and fail clearly when a part that should exist is missing from storage.

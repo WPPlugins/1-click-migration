@@ -4,7 +4,7 @@
  * Plugin Name: 1 Click Migration
  * Plugin URI: https://wordpress.org/plugins/1-click-migration/
  * Description: Migrate, copy, or clone your entire site with 1 click. <strong>Any host, no size limitation, no premium versions.</strong>
- * Version: 3.1.6
+ * Version: 3.1.7
  * Author: 1ClickMigration
  * Author URI: https://1clickmigration.com/
  * Text Domain: 1-click-migration
@@ -181,6 +181,34 @@ class One_Click_Migration
             }
         }
 
+        // Permanent dismiss of the in-plugin Review ask (never ask again on this site).
+        if (!empty($_GET['ocm_dismiss_review']) && !empty($_GET['_wpnonce']) // phpcs:ignore WordPress.Security.NonceVerification.Recommended
+            && wp_verify_nonce(sanitize_text_field(wp_unslash($_GET['_wpnonce'])), 'ocm_dismiss_review') // phpcs:ignore WordPress.Security.NonceVerification.Recommended
+        ) {
+            update_option('ocm_review_ask_dismissed', 1, false);
+            update_option('ocm_show_review_cta', 0, false);
+        }
+
+        $show_restore_success = false;
+        $show_review_cta = false;
+        $flag = (int) get_option('ocm_show_restore_success', 0);
+        if ($flag > 0 && (time() - $flag) < DAY_IN_SECONDS * 2) {
+            $show_restore_success = true;
+            $show_review_cta = (bool) get_option('ocm_show_review_cta', false);
+            delete_option('ocm_show_restore_success');
+            delete_option('ocm_show_review_cta');
+        } elseif (!empty($_GET['ocm_restore_done'])) { // phpcs:ignore WordPress.Security.NonceVerification.Recommended
+            $show_restore_success = true;
+            // Query-param smoke path: honor stored CTA flag if present, else no Review ask.
+            $show_review_cta = (bool) get_option('ocm_show_review_cta', false);
+            delete_option('ocm_show_restore_success');
+            delete_option('ocm_show_review_cta');
+        }
+        // Never show Review CTA if permanently dismissed.
+        if ((bool) get_option('ocm_review_ask_dismissed', false)) {
+            $show_review_cta = false;
+        }
+
         wp_localize_script('custom_ocm_admin_js', 'siteData', array(
             'progressUrl' => get_rest_url(null, 'ocm/v1/progress'),
             'userEmail' => $user_email,
@@ -191,7 +219,12 @@ class One_Click_Migration
             'restNonce' => wp_create_nonce('wp_rest'),
             'backupNonce' => wp_create_nonce('one_click_migration_start_backup'),
             'restoreNonce' => wp_create_nonce('one_click_migration_start_restore'),
-            'otherPluginsActive' => $other_active_count
+            'otherPluginsActive' => $other_active_count,
+            'pluginPageUrl' => admin_url('tools.php?page=one-click-migration'),
+            'showRestoreSuccess' => $show_restore_success ? 1 : 0,
+            'showReviewCta' => $show_review_cta ? 1 : 0,
+            'dismissReviewUrl' => wp_nonce_url(admin_url('tools.php?page=one-click-migration&ocm_dismiss_review=1'), 'ocm_dismiss_review'),
+            'reviewUrl' => 'https://wordpress.org/support/plugin/1-click-migration/reviews/#new-post',
         ));
     }
 
@@ -213,6 +246,10 @@ class One_Click_Migration
             'ocm_action_start_backup',
             'ocm_action_start_restore',
             'ocm_is_stopped',
+            'ocm_show_restore_success',
+            'ocm_show_review_cta',
+            'ocm_clean_restore_count',
+            'ocm_review_ask_dismissed',
             'ocm_user_email',
             'ocm_user_password',
             'backup_steps',

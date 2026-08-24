@@ -102,6 +102,9 @@
                             if (responseText.indexOf('Backup completed') !== -1 || responseText.indexOf('Restore completed') !== -1) {
                                 clearInterval(intervalId);
                                 clearTimeout(timeoutId);
+                                if (responseText.indexOf('Restore completed') !== -1 || response.restoreCompleted) {
+                                    redirectToPluginPageAfterRestore();
+                                }
                             }
                         }
 
@@ -209,6 +212,78 @@
         });
     }
 
+
+    function ocmFlagOn(v) {
+        return v === true || v === 1 || v === '1';
+    }
+
+    // -------- restore success modal --------
+    function ensureRestoreSuccessModal(withReviewCta) {
+        $('#ocm-restore-success-modal').remove();
+        var reviewUrl = (typeof siteData !== 'undefined' && siteData.reviewUrl)
+            ? siteData.reviewUrl
+            : 'https://wordpress.org/support/plugin/1-click-migration/reviews/#new-post';
+        var dismissUrl = (typeof siteData !== 'undefined' && siteData.dismissReviewUrl)
+            ? siteData.dismissReviewUrl
+            : '';
+        var bodyText = withReviewCta
+            ? 'Your site was restored successfully. If this plugin helped, leave a quick review on WordPress.org.'
+            : 'Your site was restored successfully.';
+        var reviewBlock = '';
+        if (withReviewCta) {
+            reviewBlock = ''
+                + '    <a class="ocm-btn ocm-btn-primary ocm-modal-review" id="ocm-review-btn" href="' + reviewUrl + '" target="_blank" rel="noopener noreferrer">Leave a review</a>'
+                + (dismissUrl
+                    ? '    <a class="ocm-btn-link ocm-modal-never" id="ocm-dismiss-review" href="' + dismissUrl + '">Don\'t ask again</a>'
+                    : '');
+        }
+        var html = ''
+            + '<div id="ocm-restore-success-modal" class="ocm-modal" role="dialog" aria-modal="true" aria-labelledby="ocm-restore-success-title" hidden>'
+            + '  <div class="ocm-modal-backdrop" data-ocm-modal-close></div>'
+            + '  <div class="ocm-modal-card">'
+            + '    <button type="button" class="ocm-modal-close" data-ocm-modal-close aria-label="Close">&times;</button>'
+            + '    <div class="ocm-modal-icon" aria-hidden="true">✓</div>'
+            + '    <h2 id="ocm-restore-success-title" class="ocm-modal-title">Restore complete</h2>'
+            + '    <p class="ocm-modal-body">' + bodyText + '</p>'
+            + reviewBlock
+            + '    <button type="button" class="ocm-btn ocm-btn-ghost ocm-modal-dismiss" data-ocm-modal-close>Close</button>'
+            + '  </div>'
+            + '</div>';
+        $('body').append(html);
+        $('#ocm-restore-success-modal').on('click', '[data-ocm-modal-close]', function () {
+            hideRestoreSuccessModal();
+        });
+        $(document).on('keydown.ocmRestoreModal', function (e) {
+            if (e.key === 'Escape') hideRestoreSuccessModal();
+        });
+    }
+
+    function showRestoreSuccessModal(withReviewCta) {
+        ensureRestoreSuccessModal(!!withReviewCta);
+        var $m = $('#ocm-restore-success-modal');
+        $m.prop('hidden', false).attr('aria-hidden', 'false').addClass('open');
+        $('body').addClass('ocm-modal-open');
+        setTimeout(function () {
+            var $focus = withReviewCta ? $('#ocm-review-btn') : $m.find('[data-ocm-modal-close]').first();
+            $focus.trigger('focus');
+        }, 50);
+    }
+
+    function hideRestoreSuccessModal() {
+        var $m = $('#ocm-restore-success-modal');
+        if (!$m.length) return;
+        $m.prop('hidden', true).attr('aria-hidden', 'true').removeClass('open');
+        $('body').removeClass('ocm-modal-open');
+        $(document).off('keydown.ocmRestoreModal');
+    }
+
+    function redirectToPluginPageAfterRestore() {
+        if (typeof siteData === 'undefined' || !siteData.pluginPageUrl) return;
+        var url = siteData.pluginPageUrl;
+        url += (url.indexOf('?') === -1 ? '?' : '&') + 'ocm_restore_done=1';
+        window.location.href = url;
+    }
+
     // -------- DOMReady --------
     $(function () {
         var startAction = $('#ocmStartAction').val();
@@ -269,6 +344,21 @@
         if (startAction === 'backup' || startAction === 'restore') {
             setActiveTab(startAction);
             displayProgressBar();
+        }
+
+        // Post-restore success modal (flag from PHP option or ?ocm_restore_done=1)
+        if (typeof siteData !== 'undefined' && ocmFlagOn(siteData.showRestoreSuccess)) {
+            showRestoreSuccessModal(ocmFlagOn(siteData.showReviewCta));
+            // Clean the query arg so refresh does not re-open forever if option already cleared
+            if (window.history && window.history.replaceState) {
+                try {
+                    var u = new URL(window.location.href);
+                    if (u.searchParams.has('ocm_restore_done')) {
+                        u.searchParams.delete('ocm_restore_done');
+                        window.history.replaceState({}, '', u.pathname + u.search + u.hash);
+                    }
+                } catch (e) { /* ignore */ }
+            }
         }
     });
 })(jQuery);
