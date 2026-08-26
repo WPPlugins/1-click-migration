@@ -1,15 +1,15 @@
-===1-Click Backup & Migration===
+===1-Click Backup Migration===
 Contributors: 1clickmigration
-Tags: backup, migration, migrate, restore, clone
+Tags: backup, migration, migrate, restore, transfer
 Requires at least: 4.0
 Tested up to: 7.1
 Requires PHP: 7.4
-Stable tag: 3.1.9
+Stable tag: 3.1.10
 Author URI: https://1clickmigration.com
 License: GPLv3 or later
 License URI: http://www.gnu.org/licenses/gpl-3.0.html
 
-Backup, restore, and migrate a WordPress site in one click. Get a restore code by email and move hosts without a 4GB zip cap.
+Backup, restore, and migrate a WordPress site in one click. Transfer hosts with a restore code, no 4GB zip cap.
 
 == Description ==
 
@@ -121,6 +121,10 @@ All of them! Migrate WordPress sites between any hosting providers: Bluehost, Si
 3. Restore-complete success
 
 == Changelog ==
+= 3.1.10 =
+* **Large-database dumps**: SQL dumps now stream to disk in chunks instead of building the dump in PHP memory, with a preflight that logs DB size vs `memory_limit` and forces the streamed path when an in-memory dump would OOM. Low-memory warnings are written to the plugin log.
+* **Partial-backup honesty**: Skipping a part after the upload retry cap (e.g. `Skipping uploads Uploading`) now records that part as skipped in `BACKUP_PARTS` and finishes as completed-with-missing-parts — never `uploads=ok`.
+
 = 3.1.9 =
 * **Restore Reliability**: Restore now swaps the destination directory aside (`dest.ocm_bak`) and only deletes it after the new tree is in place, so a kill mid-replace leaves the old or new tree, never an empty folder. Restore logs the actual destination `$directory` path.
 

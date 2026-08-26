@@ -6,7 +6,13 @@ use wpdb;
 
 class OCM_SQL_Utils
 {
-    protected static $sql_line = '';
+    protected static $sql_line = ''; // unused; dump is streamed to disk
+    /** @var resource|null Handle for streamed SQL dump writes. */
+    protected static $sql_fh = null;
+    /** @var string Bounded buffer flushed to $sql_fh in chunks. */
+    protected static $sql_buffer = '';
+    const SQL_STREAM_FLUSH_BYTES = 524288; // 512 KiB
+    const SQL_STREAM_READ_BYTES = 1048576; // 1 MiB
     protected static $mysqldump_support_logged = false;
     protected static $db_backup_progress_logged = false;
     protected static $windows_logged = false;
@@ -261,10 +267,8 @@ class OCM_SQL_Utils
     public static function sql_fix($filepath)
     {
         if (preg_match('/users|comments|links|posts/', $filepath)) {
-            // DATETIME fix
-            $sql_code = file_get_contents($filepath);
-            $sql_code = preg_replace('/0000-00-00 00:00:00/', '1000-01-01 00:00:00', $sql_code);
-            file_put_contents($filepath, $sql_code);
+            // DATETIME fix — streamed so large posts/users dumps never sit in RAM
+            self::stream_str_replace($filepath, '0000-00-00 00:00:00', '1000-01-01 00:00:00');
         }
 
         return $filepath;
@@ -282,47 +286,127 @@ class OCM_SQL_Utils
 	        /** @var wpdb $wpdb */
 	        global $wpdb,$EZSQL_ERROR;
 
-	        $sql_code = file_get_contents($result_file);
-	        $queries = self::split_sql_file($sql_code);
 	        $has_check_current_query = property_exists($wpdb, 'check_current_query');
 	        $previous_check_current_query = $has_check_current_query ? $wpdb->check_current_query : null;
 
+	        $handle = @fopen($result_file, 'rb');
+	        if (!$handle) {
+	            One_Click_Migration::write_to_log(sprintf('Error: Could not open SQL file "%s" for import.', $result_file));
+	            return false;
+	        }
+
 	        $error_count = 0;
 	        $statement_index = 0;
-	        foreach ($queries as $query) {
-	            $query = self::prepare_sql_query($query);
-            if (empty($query)) {
-                continue;
-	            }
-	            $statement_index++;
-	            $wpdb->last_error = '';
-	            if ($has_check_current_query) {
-	                $wpdb->check_current_query = false;
-	            }
-	            $wpdb->query($query);
-	            if (!empty($wpdb->last_error)) {
-	                $error_str = !empty($EZSQL_ERROR[0]['error_str']) ? $EZSQL_ERROR[0]['error_str'] : $wpdb->last_error;
-	                One_Click_Migration::write_to_log(sprintf('Error: DB Restore. Table: "%s" error_str: "%s"', $result_file, $error_str));
-	                self::log_sql_restore_failure_context($result_file, $query, $statement_index);
-                $error_count++;
+	        $buffer = '';
+	        $aborted = false;
 
-	                // Abort if a CREATE TABLE statement fails — the table won't exist
-	                if (stripos($query, 'CREATE TABLE') !== false) {
-	                    One_Click_Migration::write_to_log(sprintf('Critical: CREATE TABLE failed for "%s". Aborting import of this file.', $result_file));
-	                    if ($has_check_current_query) {
-	                        $wpdb->check_current_query = $previous_check_current_query;
-	                    }
-	                    return false;
+	        while (!$aborted && (!feof($handle) || $buffer !== '')) {
+	            if (!feof($handle)) {
+	                $chunk = fread($handle, self::SQL_STREAM_READ_BYTES);
+	                if ($chunk === false) {
+	                    break;
+	                }
+	                $buffer .= $chunk;
+	            }
+
+	            while (preg_match('/;[\s]*\n/', $buffer, $matches, PREG_OFFSET_CAPTURE)) {
+	                $pos = $matches[0][1];
+	                $len = strlen($matches[0][0]);
+	                $query = substr($buffer, 0, $pos);
+	                $buffer = substr($buffer, $pos + $len);
+	                $result = self::execute_imported_query(
+	                    $query,
+	                    $result_file,
+	                    $statement_index,
+	                    $error_count,
+	                    $has_check_current_query,
+	                    $previous_check_current_query
+	                );
+	                if ($result === false) {
+	                    $aborted = true;
+	                    break;
 	                }
 	            }
+
+	            if ($aborted) {
+	                break;
+	            }
+
+	            if (feof($handle)) {
+	                if (trim($buffer) !== '') {
+	                    $query = preg_replace('/;\s*$/', '', $buffer);
+	                    $buffer = '';
+	                    $result = self::execute_imported_query(
+	                        $query,
+	                        $result_file,
+	                        $statement_index,
+	                        $error_count,
+	                        $has_check_current_query,
+	                        $previous_check_current_query
+	                    );
+	                    if ($result === false) {
+	                        $aborted = true;
+	                    }
+	                }
+	                break;
+	            }
 	        }
+	        fclose($handle);
+
 	        if ($has_check_current_query) {
 	            $wpdb->check_current_query = $previous_check_current_query;
+	        }
+
+	        if ($aborted) {
+	            return false;
 	        }
 
 	        if ($error_count > 0) {
 	            One_Click_Migration::write_to_log(sprintf('Warning: %d error(s) during import of "%s"', $error_count, basename($result_file)));
 	            return false;
+        }
+
+        return true;
+    }
+
+    /**
+     * Run one SQL statement from a streamed dump. Returns false to abort the file.
+     *
+     * @param string $query
+     * @param string $result_file
+     * @param int    $statement_index
+     * @param int    $error_count
+     * @param bool   $has_check_current_query
+     * @param mixed  $previous_check_current_query
+     * @return bool
+     */
+    private static function execute_imported_query($query, $result_file, &$statement_index, &$error_count, $has_check_current_query, $previous_check_current_query)
+    {
+        global $wpdb, $EZSQL_ERROR;
+
+        $query = self::prepare_sql_query($query);
+        if (empty($query)) {
+            return true;
+        }
+        $statement_index++;
+        $wpdb->last_error = '';
+        if ($has_check_current_query) {
+            $wpdb->check_current_query = false;
+        }
+        $wpdb->query($query);
+        if (!empty($wpdb->last_error)) {
+            $error_str = !empty($EZSQL_ERROR[0]['error_str']) ? $EZSQL_ERROR[0]['error_str'] : $wpdb->last_error;
+            One_Click_Migration::write_to_log(sprintf('Error: DB Restore. Table: "%s" error_str: "%s"', $result_file, $error_str));
+            self::log_sql_restore_failure_context($result_file, $query, $statement_index);
+            $error_count++;
+
+            if (stripos($query, 'CREATE TABLE') !== false) {
+                One_Click_Migration::write_to_log(sprintf('Critical: CREATE TABLE failed for "%s". Aborting import of this file.', $result_file));
+                if ($has_check_current_query) {
+                    $wpdb->check_current_query = $previous_check_current_query;
+                }
+                return false;
+            }
         }
 
         return true;
@@ -446,7 +530,9 @@ class OCM_SQL_Utils
             return false;
         }
 
-        self::clear_sql_content();
+        if (!self::open_sql_dump($assoc_args['result-file'])) {
+            return false;
+        }
 
         // Add SQL statement to drop existing table
         self::add_sql_line("\n# Delete any existing table $table \n\n");
@@ -504,10 +590,9 @@ class OCM_SQL_Utils
         $row_start = 0;
         $row_inc = self::get_dynamic_row_increment($table);
 
-        // Suppress row increment logging to avoid progress bar jumping
-        // if ($row_inc < 5000) {
-        //     One_Click_Migration::write_to_log(" SYSLOG: Using row increment of {$row_inc} for table {$table}");
-        // }
+        if ($row_inc < 5000) {
+            One_Click_Migration::write_to_log(" SYSLOG: Using row increment of {$row_inc} for table {$table}");
+        }
         
         $search = array("\x00", "\x0a", "\x0d", "\x1a");
         $replace = array('\0', '\n', '\r', '\Z');
@@ -540,8 +625,8 @@ class OCM_SQL_Utils
 
                     $thisEntry .= '(' . implode(', ', $values) . ')';
 
-                    // Flush every 512KB
-                    if (strlen($thisEntry) > 524288) {
+                    // Flush often so one INSERT statement never approaches remaining RAM.
+                    if (strlen($thisEntry) > 65536) {
                         self::add_sql_line(" \n" . $entries . $thisEntry . ';');
                         $thisEntry = '';
                     }
@@ -561,7 +646,7 @@ class OCM_SQL_Utils
         // Suppress frequent SYSLOG messages that cause progress bar jumping
         // if (WP_DEBUG === true) One_Click_Migration::write_to_log(sprintf('SYSLOG: End of data contents of table "%s"', $table));
 
-        file_put_contents($assoc_args['result-file'], self::$sql_line);
+        self::close_sql_dump();
     }
 
     public static function export($args, $assoc_args)
@@ -670,20 +755,221 @@ class OCM_SQL_Utils
         global $wpdb;
 
         $old_table_prefix = self::get_table_prefix($filepath);
+        if ($old_table_prefix === '' || $old_table_prefix === $wpdb->base_prefix) {
+            return;
+        }
 
-        $file_contents = file_get_contents($filepath);
-        $file_contents = str_replace($old_table_prefix, $wpdb->base_prefix, $file_contents);
-        file_put_contents($filepath, $file_contents);
+        self::stream_str_replace($filepath, $old_table_prefix, $wpdb->base_prefix);
     }
 
     private static function clear_sql_content()
     {
         self::$sql_line = '';
+        self::$sql_buffer = '';
+    }
+
+    /**
+     * Open a dump file for chunked writes. Peak RSS stays bounded to the flush size.
+     *
+     * @param string $filepath
+     * @return bool
+     */
+    private static function open_sql_dump($filepath)
+    {
+        self::close_sql_dump();
+        self::clear_sql_content();
+        $handle = @fopen($filepath, 'wb');
+        if (!$handle) {
+            One_Click_Migration::write_to_log(sprintf('Error: Could not open SQL dump file "%s" for writing.', $filepath));
+            return false;
+        }
+        self::$sql_fh = $handle;
+        return true;
     }
 
     private static function add_sql_line($line)
     {
-        self::$sql_line .= sprintf("%s\n", $line);
+        // Write through to disk. Do not sprintf/concat into $sql_buffer — that
+        // second copy is what OOM'd at :792 when WP had already used the limit.
+        if (self::$sql_fh) {
+            if (self::$sql_buffer !== '') {
+                self::flush_sql_dump();
+            }
+            if (fwrite(self::$sql_fh, $line) === false || fwrite(self::$sql_fh, "\n") === false) {
+                One_Click_Migration::write_to_log('Error: Failed to write SQL dump chunk to disk.');
+            }
+            return;
+        }
+        self::$sql_buffer .= $line . "\n";
+        if (strlen(self::$sql_buffer) >= self::SQL_STREAM_FLUSH_BYTES) {
+            self::flush_sql_dump();
+        }
+    }
+
+    private static function flush_sql_dump()
+    {
+        if (!self::$sql_fh || self::$sql_buffer === '') {
+            return;
+        }
+        $written = fwrite(self::$sql_fh, self::$sql_buffer);
+        if ($written === false) {
+            One_Click_Migration::write_to_log('Error: Failed to write SQL dump chunk to disk.');
+        }
+        self::$sql_buffer = '';
+        self::$sql_line = '';
+    }
+
+    private static function close_sql_dump()
+    {
+        self::flush_sql_dump();
+        if (self::$sql_fh) {
+            fclose(self::$sql_fh);
+            self::$sql_fh = null;
+        }
+        self::$sql_buffer = '';
+        self::$sql_line = '';
+    }
+
+    /**
+     * Replace $search with $replace in $filepath using bounded chunks so the
+     * full dump is never held in PHP memory. Handles matches that span chunks.
+     *
+     * @param string $filepath
+     * @param string $search
+     * @param string $replace
+     * @return bool
+     */
+    private static function stream_str_replace($filepath, $search, $replace)
+    {
+        if (!is_string($search) || $search === '' || $search === $replace) {
+            return true;
+        }
+        if (!is_file($filepath) || !is_readable($filepath)) {
+            One_Click_Migration::write_to_log(sprintf('Error: Could not read SQL file "%s" for streaming replace.', $filepath));
+            return false;
+        }
+
+        $tmp = $filepath . '.ocm-stream.tmp';
+        $in = @fopen($filepath, 'rb');
+        $out = @fopen($tmp, 'wb');
+        if (!$in || !$out) {
+            if ($in) {
+                fclose($in);
+            }
+            if ($out) {
+                fclose($out);
+            }
+            One_Click_Migration::write_to_log(sprintf('Error: Could not stream-replace in SQL file "%s".', $filepath));
+            return false;
+        }
+
+        $carry = '';
+        while (!feof($in)) {
+            $chunk = fread($in, self::SQL_STREAM_READ_BYTES);
+            if ($chunk === false) {
+                break;
+            }
+            $data = $carry . $chunk;
+            if ($data === '') {
+                break;
+            }
+            if (!feof($in)) {
+                $keep = self::longest_prefix_suffix($data, $search);
+                if ($keep > 0) {
+                    $carry = substr($data, -$keep);
+                    $data = substr($data, 0, -$keep);
+                } else {
+                    $carry = '';
+                }
+            } else {
+                $carry = '';
+            }
+            fwrite($out, str_replace($search, $replace, $data));
+        }
+        if ($carry !== '') {
+            fwrite($out, str_replace($search, $replace, $carry));
+        }
+        fclose($in);
+        fclose($out);
+
+        if (!@rename($tmp, $filepath)) {
+            $copied = @copy($tmp, $filepath);
+            @unlink($tmp);
+            if (!$copied) {
+                One_Click_Migration::write_to_log(sprintf('Error: Could not finalize streamed SQL file "%s".', $filepath));
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * Longest suffix of $data that is a proper prefix of $search.
+     * Used so chunked str_replace does not split a match across a read boundary.
+     *
+     * @param string $data
+     * @param string $search
+     * @return int
+     */
+    private static function longest_prefix_suffix($data, $search)
+    {
+        $max = min(strlen($data), max(0, strlen($search) - 1));
+        for ($k = $max; $k > 0; $k--) {
+            if (substr($data, -$k) === substr($search, 0, $k)) {
+                return $k;
+            }
+        }
+        return 0;
+    }
+
+    /**
+     * Before dump/import, compare estimated DB size to memory_limit.
+     * Always forces the streamed path; warns when an in-memory dump would OOM.
+     *
+     * @param int    $db_bytes Estimated database (or SQL dump) size in bytes.
+     * @param string $context  'dump' or 'import'
+     * @return array{force_stream:bool,exceeds:bool,memory_bytes:int,db_bytes:int}
+     */
+    public static function preflight_db_memory($db_bytes, $context = 'dump')
+    {
+        $db_bytes = max(0, (int) $db_bytes);
+        $memory_limit = ini_get('memory_limit');
+        $memory_bytes = self::convert_to_bytes($memory_limit);
+        $usage = memory_get_usage(true);
+        $unlimited = ($memory_bytes <= 0);
+        $available = $unlimited ? PHP_INT_MAX : max(0, $memory_bytes - $usage);
+        // INSERT syntax inflates dumps vs InnoDB data_length; ~1.5x is conservative.
+        $estimated_dump = (int) ($db_bytes * 1.5);
+        $exceeds = !$unlimited && ($db_bytes >= $memory_bytes || $estimated_dump >= $available);
+
+        One_Click_Migration::write_to_log(sprintf(
+            'SYSLOG: DB memory preflight (%s): estimated DB %s, memory_limit %s, used %s, available %s%s',
+            $context,
+            self::format_bytes($db_bytes),
+            $unlimited ? 'unlimited' : self::format_bytes($memory_bytes),
+            self::format_bytes($usage),
+            $unlimited ? 'unlimited' : self::format_bytes($available),
+            $exceeds ? ' — forcing streamed dump/import (in-memory dump would exceed memory_limit)' : ' — using streamed dump/import'
+        ));
+
+        if ($exceeds) {
+            $notice = ($context === 'import')
+                ? 'Notice: Database is larger than PHP memory_limit; streaming import from disk.'
+                : 'Notice: Database is larger than PHP memory_limit; streaming dump to disk.';
+            One_Click_Migration::write_to_log(sprintf(
+                '%s Estimated DB %s vs memory_limit %s.',
+                $notice,
+                self::format_bytes($db_bytes),
+                $unlimited ? 'unlimited' : self::format_bytes($memory_bytes)
+            ));
+        }
+
+        return array(
+            'force_stream' => true,
+            'exceeds' => $exceeds,
+            'memory_bytes' => $memory_bytes,
+            'db_bytes' => $db_bytes,
+        );
     }
 
     private static function str_lreplace($search, $replace, $subject, $case_sensitive = true)
@@ -791,7 +1077,11 @@ class OCM_SQL_Utils
             $memory_limit = ini_get('memory_limit');
             $memory_bytes = self::convert_to_bytes($memory_limit);
             $usage_memory = memory_get_usage(true);
-            $available_memory = min($memory_bytes - $usage_memory, $memory_bytes * 0.20); // Use max 20% of total memory
+            if ($memory_bytes <= 0) {
+                $available_memory = PHP_INT_MAX;
+            } else {
+                $available_memory = min($memory_bytes - $usage_memory, $memory_bytes * 0.20); // Use max 20% of total memory
+            }
             
             // Ensure minimum memory available
             $minimum_memory = 32 * 1024 * 1024;
@@ -807,10 +1097,9 @@ class OCM_SQL_Utils
             // Clamp between reasonable bounds
             $increment = max(100, min($max_rows, 20000));
             
-            // Suppress memory calculation logging to avoid progress bar jumping
-            // if ($estimated_row_size > 2048 || $available_memory < 128 * 1024 * 1024) {
-            //     One_Click_Migration::write_to_log(" SYSLOG: Table {$table} - Calculated increment: {$increment}");
-            // }
+            if ($available_memory < 128 * 1024 * 1024) {
+                One_Click_Migration::write_to_log(" SYSLOG: Table {$table} - Calculated increment: {$increment} (low memory)");
+            }
                 
             return (int)$increment;
             
@@ -826,17 +1115,20 @@ class OCM_SQL_Utils
      * @return int
      */
     private static function convert_to_bytes($val) {
-        $val = trim($val);
+        $val = trim((string) $val);
+        if ($val === '' || $val === '-1') {
+            return 0; // unlimited / unset
+        }
         $last = strtolower($val[strlen($val)-1]);
-        $val = (int) $val;
+        $bytes = (int) $val;
 
         switch($last) {
-            case 'g': $val *= 1024;
-            case 'm': $val *= 1024;
-            case 'k': $val *= 1024;
+            case 'g': $bytes *= 1024;
+            case 'm': $bytes *= 1024;
+            case 'k': $bytes *= 1024;
         }
 
-        return $val;
+        return $bytes;
     }
 
     /**

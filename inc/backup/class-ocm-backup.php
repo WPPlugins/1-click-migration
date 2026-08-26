@@ -117,6 +117,11 @@ class OCM_Backup
         ['SYSLOG: Column statistics are supported', '40%'],
         ['SYSLOG: Table retrieved', '40%'],
         ['SYSLOG: Column statistics are not supported', '40%'],
+        ['SYSLOG: DB memory preflight (dump)', '40%'],
+        ['SYSLOG: Using row increment of', '40%'],
+        ['SYSLOG: Low memory available, using conservative increment', '40%'],
+        ['Calculated increment', '40%'],
+        ['Notice: Database is larger than PHP memory_limit; streaming dump to disk.', '40%'],
         ['DB Zip file has been encrypted.', '41%'],
         ['Encrypting db Retry 1', '41%'],
         ['Encrypting db Retry 2', '41%'],
@@ -258,8 +263,12 @@ class OCM_Backup
 
         ['Restore plugins', '75%'],
         ['Notice: Database restore in progress. Please don\'t leave the plugin page.', '80%'],
+        ['SYSLOG: DB memory preflight (import)', '80%'],
+        ['Notice: Database is larger than PHP memory_limit; streaming import from disk.', '80%'],
         ['Database has been restored', '83%'],
         ['Starting to update URLs in database', '84%'],
+        ['SYSLOG: Low memory available (', '84%'],
+        ['SYSLOG: Low memory - Page Size reduced', '84%'],
         ['Cleaning up.', '92%'],
         ['Restore completed.', '100%'],
         ['Error:', '0%'],
@@ -1345,6 +1354,9 @@ class OCM_Backup
         $db_size_mb = self::DBSize();
         One_Click_Migration::write_to_log('DB Size '. $db_size_mb.'MB');
 
+        // Pre-flight: if DB ≳ memory_limit, warn and force streamed dump (never hold the SQL in RAM).
+        OCM_SQL_Utils::preflight_db_memory((int) ((float) $db_size_mb * 1024 * 1024), 'dump');
+
         // Pre-flight disk space check: need ~2x DB size for SQL dumps + ZIP
         if (!self::ensure_temporary_directory()) {
             return OCM_BackgroundBackup::RETURN_TYPE_END_PROCESSS;
@@ -1901,6 +1913,8 @@ class OCM_Backup
 
             One_Click_Migration::write_to_log(sprintf('Skipping ' .$folder_name.  ' Uploading'));
             self::set_complete_backup_step($folder_name, self::STEP_BACKUP_CHILD_UPLOAD);
+            self::capture_failed_folder($skipped_restore_files, $folder_name, 'ocm_skipped_folders');
+            One_Click_Migration::write_to_log("Notice: File $folder_name was skipped due to timeout");
             }
           }
 
@@ -3501,6 +3515,10 @@ class OCM_Backup
             'SYSLOG: Column statistics are not supported',
             // Allow only critical memory issues, not routine operations
             'SYSLOG: Low memory available',
+            'SYSLOG: Low memory - Page Size reduced',
+            'SYSLOG: DB memory preflight',
+            'SYSLOG: Using row increment of',
+            'Calculated increment',
             'SYSLOG: Error calculating dynamic increment',
             'SYSLOG: Using direct processing',
             'SYSLOG: Dispatching backup worker',
@@ -3628,6 +3646,12 @@ class OCM_Backup
               One_Click_Migration::write_to_log(sprintf('Error: DB directory "%s" does not exist in unzipped files.', $dbfiles));
               return false;
           }
+
+          $sql_bytes = 0;
+          foreach (glob($dbfiles . '*.sql') ?: array() as $sql_file) {
+              $sql_bytes += (int) filesize($sql_file);
+          }
+          OCM_SQL_Utils::preflight_db_memory($sql_bytes, 'import');
         }
 
         // Detect source table prefix from backup SQL filenames (via usermeta.sql).
