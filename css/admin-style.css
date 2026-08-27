@@ -439,12 +439,46 @@ body.ocm-modal-open { overflow: hidden; }
 .ocm-modal-body {
     margin: 0 0 20px; color: var(--ocm-muted); font-size: 13.5px; line-height: 1.5;
 }
-.ocm-modal-review {
-    width: 100%; height: 48px; font-size: 15px; font-weight: 700;
-    margin-bottom: 10px;
+.ocm-modal-actions {
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
+    margin-top: 4px;
 }
-.ocm-modal-dismiss { width: 100%; }
-
+#ocm-restore-success-modal a.ocm-modal-review {
+    display: flex;
+    box-sizing: border-box;
+    width: 100%;
+    height: 48px;
+    margin: 0;
+    padding: 0 18px;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    font-size: 15px;
+    font-weight: 700;
+    line-height: 1;
+    letter-spacing: 0;
+    background: #0b2a5b;
+    color: #ffffff !important;
+    text-decoration: none !important;
+    border: 0;
+    border-radius: 10px;
+    box-shadow: none;
+}
+#ocm-restore-success-modal a.ocm-modal-review:hover,
+#ocm-restore-success-modal a.ocm-modal-review:focus,
+#ocm-restore-success-modal a.ocm-modal-review:visited,
+#ocm-restore-success-modal a.ocm-modal-review:active {
+    background: #143a78;
+    color: #ffffff !important;
+    text-decoration: none !important;
+}
+.ocm-modal-dismiss { width: 100%; box-sizing: border-box; }
 .ocm-modal-never {
-    display: inline-flex; margin: 0 auto 10px; font-size: 12.5px;
+    display: flex;
+    justify-content: center;
+    margin: 0;
+    font-size: 12.5px;
 }

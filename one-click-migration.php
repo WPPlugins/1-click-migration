@@ -4,7 +4,7 @@
  * Plugin Name: 1 Click Migration
  * Plugin URI: https://wordpress.org/plugins/1-click-migration/
  * Description: Migrate, copy, or clone your entire site with 1 click. <strong>Any host, no size limitation, no premium versions.</strong>
- * Version: 3.1.10
+ * Version: 3.1.11
  * Author: 1ClickMigration
  * Author URI: https://1clickmigration.com/
  * Text Domain: 1-click-migration
@@ -224,7 +224,7 @@ class One_Click_Migration
             'showRestoreSuccess' => $show_restore_success ? 1 : 0,
             'showReviewCta' => $show_review_cta ? 1 : 0,
             'dismissReviewUrl' => wp_nonce_url(admin_url('tools.php?page=one-click-migration&ocm_dismiss_review=1'), 'ocm_dismiss_review'),
-            'reviewUrl' => 'https://wordpress.org/support/plugin/1-click-migration/reviews/#new-post',
+            'reviewUrl' => 'https://wordpress.org/plugins/1-click-migration/reviews/#new-post',
         ));
     }
 
@@ -411,9 +411,46 @@ class One_Click_Migration
     }
 
 
+    /**
+     * The debug log is mirrored to S3 and consumed by JSON APIs (Lightsail
+     * get_logs/view_logs) and Mailgun alerts. A single binary/ciphertext blob
+     * in one entry used to make json_encode() of the whole log return false,
+     * so every entry must stay valid UTF-8, control-char free and short.
+     * Never pass file contents, ciphertext or credentials to write_to_log.
+     */
+    public static function sanitize_log_message($string)
+    {
+        $string = (string) $string;
+
+        // Strip control characters except tab/newline (CR normalised away).
+        $string = preg_replace('/[\x00-\x08\x0B-\x1F\x7F]/', '', $string);
+
+        // Cap runaway entries (a 2MB chunk dump is never useful in a log line).
+        $max_bytes = 2000;
+        if (strlen($string) > $max_bytes) {
+            $string = substr($string, 0, $max_bytes) . ' [log entry truncated]';
+        }
+
+        // Replace invalid UTF-8 byte sequences so JSON consumers never choke.
+        if (!preg_match('//u', $string)) {
+            if (function_exists('mb_convert_encoding')) {
+                $converted = @mb_convert_encoding($string, 'UTF-8', 'UTF-8');
+                $string = is_string($converted) ? $converted : preg_replace('/[\x80-\xFF]+/', '?', $string);
+            } elseif (function_exists('iconv')) {
+                $converted = @iconv('UTF-8', 'UTF-8//IGNORE', $string);
+                $string = is_string($converted) ? $converted : preg_replace('/[\x80-\xFF]+/', '?', $string);
+            } else {
+                $string = preg_replace('/[\x80-\xFF]+/', '?', $string);
+            }
+        }
+
+        return $string;
+    }
+
     public static function write_to_log($string)
     {
       // sleep(1);
+      $string = self::sanitize_log_message($string);
       $file = OCM_DEBUG_LOG_FILE;
       $urls = get_option('ocm_presigned_urls');
 
@@ -824,7 +861,7 @@ PHP;
             $line = end($matches[1]);
             foreach (explode(' ', trim($line)) as $pair) {
                 $kv = explode('=', $pair, 2);
-                if (count($kv) === 2 && 'skipped' === $kv[1]) {
+                if (count($kv) === 2 && in_array($kv[1], array('skipped', 'excluded'), true)) {
                     $missing[] = $kv[0];
                 }
             }

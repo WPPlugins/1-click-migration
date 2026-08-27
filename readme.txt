@@ -4,7 +4,7 @@ Tags: backup, migration, migrate, restore, transfer
 Requires at least: 4.0
 Tested up to: 7.1
 Requires PHP: 7.4
-Stable tag: 3.1.10
+Stable tag: 3.1.11
 Author URI: https://1clickmigration.com
 License: GPLv3 or later
 License URI: http://www.gnu.org/licenses/gpl-3.0.html
@@ -121,6 +121,10 @@ All of them! Migrate WordPress sites between any hosting providers: Bluehost, Si
 3. Restore-complete success
 
 == Changelog ==
+= 3.1.11 =
+* Sanitize backup logs (no ciphertext on encrypt failure) and write terminal Backup completed / Backup failed lines.
+* Show Leave a review on the first clean restore-complete dialog. Hidden on warned, missing-parts, partial, or failed restores. Permanently dismissible.
+
 = 3.1.10 =
 * **Large-database dumps**: SQL dumps now stream to disk in chunks instead of building the dump in PHP memory, with a preflight that logs DB size vs `memory_limit` and forces the streamed path when an in-memory dump would OOM. Low-memory warnings are written to the plugin log.
 * **Partial-backup honesty**: Skipping a part after the upload retry cap (e.g. `Skipping uploads Uploading`) now records that part as skipped in `BACKUP_PARTS` and finishes as completed-with-missing-parts — never `uploads=ok`.

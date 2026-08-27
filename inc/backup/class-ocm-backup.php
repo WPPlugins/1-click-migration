@@ -272,6 +272,8 @@ class OCM_Backup
         ['Cleaning up.', '92%'],
         ['Restore completed.', '100%'],
         ['Error:', '0%'],
+        ['Backup failed:', '0%'],
+        ['Restore failed:', '0%'],
         ['Allowed memory size', '0%'],
         ['SYSLOG: "[PHP ERR][FATAL]', '0%'],
         ['Stop & Reset Finished', '0%'],
@@ -363,21 +365,20 @@ class OCM_Backup
         $excluded_folders = self::get_excluded_folders();
 
         if (!self::ensure_temporary_directory()) {
-            One_Click_Migration::reset_actions_start_mark();
-            update_option('ocm_is_stopped', true, true);
+            self::fail_backup('temporary directory could not be created or is not writable');
             wp_safe_redirect(admin_url('tools.php?page=one-click-migration&message=write_permission'));
             exit;
         }
 
         $disk = self::check_backup_disk_space($excluded_folders);
         if (!$disk['ok']) {
-            One_Click_Migration::write_to_log(sprintf(
+            $disk_message = sprintf(
                 'Error: Not enough disk space to run backup. Need %s, only %s available.',
                 self::convertToReadableSize($disk['required']),
                 self::convertToReadableSize($disk['free'])
-            ));
-            One_Click_Migration::reset_actions_start_mark();
-            update_option('ocm_is_stopped', true, true);
+            );
+            One_Click_Migration::write_to_log($disk_message);
+            self::fail_backup($disk_message);
             wp_safe_redirect(admin_url('tools.php?page=one-click-migration&message=insufficient_disk_space'));
             exit;
         }
@@ -735,6 +736,7 @@ class OCM_Backup
                         self::convertToReadableSize($disk['free'])
                     ));
                 }
+                One_Click_Migration::write_to_log('Restore failed: Not enough disk space or the hosting disk quota is exhausted (see previous log line).');
                 One_Click_Migration::reset_actions_start_mark();
                 update_option('ocm_is_stopped', true, true);
                 wp_safe_redirect(admin_url('tools.php?page=one-click-migration&message=insufficient_disk_space'));
@@ -1154,6 +1156,7 @@ class OCM_Backup
                                 'Downloading restore files. Error: "%s" directory could not be moved or copied to "%s" directory. Please check the write permission for these directories.',
                                 $extract_path, $directory
                             ));
+                            One_Click_Migration::write_to_log(sprintf('Restore failed: restored "%s" files could not be moved into place (write permission).', $key));
 
                             update_option('ocm_is_stopped', true, true);
                             die();
@@ -1219,9 +1222,38 @@ class OCM_Backup
         exit;
     }
 
+    /**
+     * Reduce a detailed "Error: ..." message to a short single-line reason
+     * suitable for the terminal "Backup failed:" / "Restore failed:" markers.
+     */
+    private static function short_failure_reason($message)
+    {
+        $reason = trim(preg_replace('/^\s*Error:\s*/i', '', (string) $message));
+        $reason = preg_replace('/\s+/', ' ', $reason);
+        if (strlen($reason) > 160) {
+            $reason = substr($reason, 0, 160) . '…';
+        }
+        return '' !== $reason ? $reason : 'unknown error (see previous log lines)';
+    }
+
+    /**
+     * Terminal failure marker for a backup run. Support tooling and the
+     * Mailgun alerter key off the literal "Backup failed:" prefix (mirroring
+     * "Backup completed." on success) to tell a dead run from a hung one.
+     * Does not exit; callers keep their own exit/redirect behaviour.
+     */
+    public static function fail_backup($message)
+    {
+        One_Click_Migration::write_to_log('Backup failed: ' . self::short_failure_reason($message));
+        One_Click_Migration::reset_actions_start_mark();
+        update_option('ocm_is_stopped', true, true);
+    }
+
     private static function fail_restore($message)
     {
         One_Click_Migration::write_to_log($message);
+        // Terminal marker, same contract as "Backup failed:" above.
+        One_Click_Migration::write_to_log('Restore failed: ' . self::short_failure_reason($message));
         One_Click_Migration::disable_maintenance_mode();
         OCM_Debug_Mode::disable();
         One_Click_Migration::reset_actions_start_mark();
@@ -1285,7 +1317,7 @@ class OCM_Backup
             update_option('ocm_clean_restore_count', $clean_count, false);
             $dismissed = (bool) get_option('ocm_review_ask_dismissed', false);
             // Review CTA only on 2nd+ clean success for this site, unless permanently dismissed.
-            update_option('ocm_show_review_cta', (!$dismissed && $clean_count >= 2) ? 1 : 0, false);
+            update_option('ocm_show_review_cta', (!$dismissed && $clean_count >= 1) ? 1 : 0, false);
         }
         One_Click_Migration::reset_actions_start_mark();
         self::reset_current_restore_steps();
@@ -1310,6 +1342,7 @@ class OCM_Backup
           if (!self::check_is_complete_restore_step('db', self::STEP_RESTORE_CHILD_RESTORE)) {
               if (!self::restore_db($presigned_urls, $wpdb)) {
                   One_Click_Migration::write_to_log('Error: Restore failed during database import.');
+                  One_Click_Migration::write_to_log('Restore failed: database import failed (see previous log lines).');
                   One_Click_Migration::disable_maintenance_mode();
                   OCM_Debug_Mode::disable();
                   update_option('ocm_is_stopped', true, true);
@@ -1366,12 +1399,13 @@ class OCM_Backup
         if ($free_bytes > 0 && $db_size_mb > 0) {
             $required_bytes = $db_size_mb * 2 * 1024 * 1024;
             if ($free_bytes < $required_bytes) {
-                One_Click_Migration::write_to_log(sprintf(
+                $disk_message = sprintf(
                     'Error: Not enough disk space to complete backup. Need %sMB, only %sMB available.',
                     round($required_bytes / 1024 / 1024),
                     round($free_bytes / 1024 / 1024)
-                ));
-                update_option('ocm_is_stopped', true, true);
+                );
+                One_Click_Migration::write_to_log($disk_message);
+                self::fail_backup($disk_message);
                 exit;
             }
         }
@@ -1428,7 +1462,7 @@ class OCM_Backup
                     $concurrentDirectory, WP_CONTENT_DIR
                 ));
 
-                update_option('ocm_is_stopped', true, true);
+                self::fail_backup('database backup directory could not be created (write permission)');
                 exit;
             }
         }
@@ -1456,7 +1490,7 @@ class OCM_Backup
 
           $zip_filepath = self::createZipFile(OCM_PLUGIN_WRITABLE_PATH . 'db/', $aes_key, $presigned_urls);
           if (!$zip_filepath) {
-              update_option('ocm_is_stopped', true, true);
+              self::fail_backup('could not create the database archive (see previous error line)');
               exit;
           }
 
@@ -1593,7 +1627,7 @@ class OCM_Backup
             } catch (ZipException $e) {
                 One_Click_Migration::write_to_log(sprintf('Error: %s', $e->getMessage()));
 
-                update_option('ocm_is_stopped', true, true);
+                self::fail_backup('zip archive could not be saved: ' . $e->getMessage());
                 exit;
             }
             $zip->close();
@@ -1629,7 +1663,7 @@ class OCM_Backup
 
           $return = self::encryptZipFile($filename, $aes_key);
           if (!$return) {
-              update_option('ocm_is_stopped', true, true);
+              self::fail_backup('encryption of the database archive failed (see previous error line)');
               exit;
           }
 
@@ -1858,7 +1892,7 @@ class OCM_Backup
 
             $zip_filepath = self::encryptZipFile($filename, $aes_key);
             if (!$zip_filepath) {
-                update_option('ocm_is_stopped', true, true);
+                self::fail_backup(sprintf('encryption of the "%s" archive failed (see previous error line)', $folder_name));
                 exit;
             }
 
@@ -2284,11 +2318,45 @@ class OCM_Backup
         }
     }
 
+    /**
+     * Short, log-safe summary of the last PHP filesystem error. Never includes
+     * file contents; distinguishes hosting quota (EDQUOT, errno 122) from a
+     * full disk (ENOSPC, errno 28) because Support triages them differently.
+     */
+    public static function last_fs_error_summary()
+    {
+        $err = error_get_last();
+        $message = ($err && isset($err['message'])) ? (string) $err['message'] : '';
+
+        $errno = 0;
+        if (preg_match('/errno=(\d+)/', $message, $m)) {
+            $errno = (int) $m[1];
+        } elseif (false !== stripos($message, 'Disk quota exceeded')) {
+            $errno = 122;
+        } elseif (false !== stripos($message, 'No space left on device')) {
+            $errno = 28;
+        }
+
+        if (122 === $errno) {
+            return 'Reason: errno=122 EDQUOT (hosting disk quota exceeded — not the same as disk full/ENOSPC).';
+        }
+        if (28 === $errno) {
+            return 'Reason: errno=28 ENOSPC (no space left on device).';
+        }
+        if ('' === $message) {
+            return 'Reason: unknown I/O error.';
+        }
+
+        // Keep the reason short and printable so nothing binary can reach the log.
+        $message = preg_replace('/[^\x20-\x7E]/', '?', $message);
+        return 'Reason: ' . substr($message, 0, 200);
+    }
+
     public static function encryptZipFile($filename, $key)
     {
         // open file to read
         if (false === ($file_handle = fopen($filename, 'rb'))) {
-            One_Click_Migration::write_to_log(sprintf('Error: Failed to open file "%s"', $filename));
+            One_Click_Migration::write_to_log(sprintf('Error: Failed to open file "%s" for encryption. %s', $filename, self::last_fs_error_summary()));
             return false;
         }
 
@@ -2304,7 +2372,8 @@ class OCM_Backup
 
         // open new file from new path
         if (false === ($encrypted_handle = fopen($encrypted_path, 'wb+'))) {
-            One_Click_Migration::write_to_log(sprintf('Error: Failed to open file "%s"'));
+            One_Click_Migration::write_to_log(sprintf('Error: Failed to open file "%s" for writing. %s', $encrypted_path, self::last_fs_error_summary()));
+            fclose($file_handle);
             return false;
         }
 
@@ -2314,7 +2383,15 @@ class OCM_Backup
 
             // read buffer-sized amount from file
             if (false === ($file_part = fread($file_handle, $buffer_size))) {
-                One_Click_Migration::write_to_log(sprintf('Error: read buffer-sized amount from file "%s"'));
+                One_Click_Migration::write_to_log(sprintf(
+                    'Error: Failed to read from file "%s" at offset %d of %d bytes. %s',
+                    $filename,
+                    $data_encrypted,
+                    $file_size,
+                    self::last_fs_error_summary()
+                ));
+                fclose($encrypted_handle);
+                fclose($file_handle);
                 return false;
             }
 
@@ -2327,8 +2404,22 @@ class OCM_Backup
 
             $encrypted_data = $rijndael->encrypt($file_part);
 
-            if (false === fwrite($encrypted_handle, $encrypted_data)) {
-                One_Click_Migration::write_to_log(sprintf('Error: Encrypted data from file "%s"', $file_part));
+            // A short write (quota/disk full) corrupts the archive the same way a
+            // failed write does, so treat both as fatal. Never log the payload —
+            // binary ciphertext in the log breaks the JSON log consumers.
+            $written = fwrite($encrypted_handle, $encrypted_data);
+            if (false === $written || $written < strlen($encrypted_data)) {
+                One_Click_Migration::write_to_log(sprintf(
+                    'Error: Failed to write encrypted data to "%s" (wrote %s of %d bytes for this chunk, %d of %d source bytes done). %s',
+                    $encrypted_path,
+                    false === $written ? 'none' : (string) $written,
+                    strlen($encrypted_data),
+                    min($data_encrypted, $file_size),
+                    $file_size,
+                    self::last_fs_error_summary()
+                ));
+                fclose($encrypted_handle);
+                fclose($file_handle);
                 return false;
             }
 
@@ -2344,7 +2435,7 @@ class OCM_Backup
 
         // need to replace original file with tmp file
         if (false === @rename($encrypted_path, $result_path)) {
-            One_Click_Migration::write_to_log(sprintf('Error: Failed rename failed: "%s" -> "%s"', $encrypted_path, $result_path));
+            One_Click_Migration::write_to_log(sprintf('Error: Failed rename failed: "%s" -> "%s". %s', $encrypted_path, $result_path, self::last_fs_error_summary()));
             return false;
         }
 
@@ -2355,12 +2446,15 @@ class OCM_Backup
     {
         // open file to read
         if (false === ($file_handle = fopen($filename, 'rb'))) {
+            One_Click_Migration::write_to_log(sprintf('Error: Failed to open file "%s" for decryption. %s', $filename, self::last_fs_error_summary()));
             return false;
         }
 
         $decrypted_path = dirname($filename) . '/decrypt_' . basename($filename);
         // open new file from new path
         if (false === ($decrypted_handle = fopen($decrypted_path, 'wb+'))) {
+            One_Click_Migration::write_to_log(sprintf('Error: Failed to open file "%s" for writing. %s', $decrypted_path, self::last_fs_error_summary()));
+            fclose($file_handle);
             return false;
         }
 
@@ -2378,6 +2472,15 @@ class OCM_Backup
         while ($bytes_decrypted < $file_size) {
             // read buffer sized amount from file
             if (false === ($file_part = fread($file_handle, $buffer_size))) {
+                One_Click_Migration::write_to_log(sprintf(
+                    'Error: Failed to read from file "%s" at offset %d of %d bytes. %s',
+                    $filename,
+                    $bytes_decrypted,
+                    $file_size,
+                    self::last_fs_error_summary()
+                ));
+                fclose($decrypted_handle);
+                fclose($file_handle);
                 return false;
             }
             // check to ensure padding is needed before decryption
@@ -2408,7 +2511,17 @@ class OCM_Backup
                 }
             }
 
+            // Never log the decrypted payload here — path, sizes and errno only.
             if (false === fwrite($decrypted_handle, $decrypted_data, $write_bytes)) {
+                One_Click_Migration::write_to_log(sprintf(
+                    'Error: Failed to write decrypted data to "%s" (%d of %d source bytes done). %s',
+                    $decrypted_path,
+                    min($bytes_decrypted, $file_size),
+                    $file_size,
+                    self::last_fs_error_summary()
+                ));
+                fclose($decrypted_handle);
+                fclose($file_handle);
                 return false;
             }
             $bytes_decrypted += $buffer_size;
@@ -2426,6 +2539,7 @@ class OCM_Backup
         $filename_basename = basename($filename_new);
 
         if (false === @rename($decrypted_path, $filename_new)) {
+            One_Click_Migration::write_to_log(sprintf('Error: Failed rename failed: "%s" -> "%s". %s', $decrypted_path, $filename_new, self::last_fs_error_summary()));
             return false;
         }
 
@@ -2672,7 +2786,7 @@ class OCM_Backup
             return 'Free space or increase the hosting account disk quota, then run the restore again. If the hosting panel shows enough space, ask the host to check account quota or inode limits because PHP may report filesystem space instead of account quota.';
         }
 
-        if (strpos($log, 'write permissions') !== false || strpos($log, 'could not be moved or copied') !== false || strpos($log, 'could not be extracted') !== false) {
+        if (strpos($log, 'write permissions') !== false || strpos($log, 'could not be moved or copied') !== false || strpos($log, 'could not be moved into place') !== false || strpos($log, 'could not be extracted') !== false) {
             return 'Make sure WordPress can write to <code>wp-content</code>, <code>wp-content/plugins</code>, <code>wp-content/themes</code>, <code>wp-content/uploads</code>, and <code>wp-content/ocm_restore</code>, then retry the restore.';
         }
 
@@ -2684,7 +2798,7 @@ class OCM_Backup
             return 'Retry after freeing space. If it fails again, create a fresh backup because the downloaded archive may be incomplete.';
         }
 
-        if (strpos($log, 'Database restore failed while importing') !== false || strpos($log, 'Restore failed during database import') !== false || strpos($log, 'DB Restore') !== false) {
+        if (strpos($log, 'Database restore failed while importing') !== false || strpos($log, 'Restore failed during database import') !== false || strpos($log, 'database import failed') !== false || strpos($log, 'DB Restore') !== false) {
             return 'The database import failed on a SQL file. If <code>proc_open</code> is disabled, ask the host to enable it so the restore can use the MySQL CLI path. If that is not possible, export a new backup after cleaning invalid or binary data stored in options by third-party plugins.';
         }
 

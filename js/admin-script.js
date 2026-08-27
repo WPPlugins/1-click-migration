@@ -222,7 +222,7 @@
         $('#ocm-restore-success-modal').remove();
         var reviewUrl = (typeof siteData !== 'undefined' && siteData.reviewUrl)
             ? siteData.reviewUrl
-            : 'https://wordpress.org/support/plugin/1-click-migration/reviews/#new-post';
+            : 'https://wordpress.org/plugins/1-click-migration/reviews/#new-post';
         var dismissUrl = (typeof siteData !== 'undefined' && siteData.dismissReviewUrl)
             ? siteData.dismissReviewUrl
             : '';
@@ -245,8 +245,10 @@
             + '    <div class="ocm-modal-icon" aria-hidden="true">✓</div>'
             + '    <h2 id="ocm-restore-success-title" class="ocm-modal-title">Restore complete</h2>'
             + '    <p class="ocm-modal-body">' + bodyText + '</p>'
+            + '    <div class="ocm-modal-actions">'
             + reviewBlock
             + '    <button type="button" class="ocm-btn ocm-btn-ghost ocm-modal-dismiss" data-ocm-modal-close>Close</button>'
+            + '    </div>'
             + '  </div>'
             + '</div>';
         $('body').append(html);

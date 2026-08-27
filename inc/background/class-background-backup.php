@@ -118,6 +118,8 @@ class OCM_BackgroundBackup extends WP_Background_Process
         OCM_Backup::log_backup_parts_manifest($missing_parts);
 
         if (!OCM_Backup::send_restore_code_email($missing_parts)) {
+            // Terminal marker: without the restore code email the backup is unusable.
+            One_Click_Migration::write_to_log('Backup failed: restore code email could not be sent (see previous error line).');
             update_option('ocm_is_stopped', true, true);
             One_Click_Migration::clear_backup_plugin_isolation();
             One_Click_Migration::reset_actions_start_mark();
