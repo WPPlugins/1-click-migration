@@ -4,7 +4,7 @@
  * Plugin Name: 1 Click Migration
  * Plugin URI: https://wordpress.org/plugins/1-click-migration/
  * Description: Migrate, copy, or clone your entire site with 1 click. <strong>Any host, no size limitation, no premium versions.</strong>
- * Version: 3.1.12
+ * Version: 3.1.13
  * Author: 1ClickMigration
  * Author URI: https://1clickmigration.com/
  * Text Domain: 1-click-migration
@@ -112,6 +112,11 @@ class One_Click_Migration
 
         add_action( 'admin_notices', array(OCM_Backup::class, 'add_file_not_found_notice'));
 
+        // Review ask (shared with the restore-success modal flags): permanent
+        // dismiss handling on every admin screen + persistent admin notice.
+        add_action('admin_init', array(__CLASS__, 'handle_review_dismiss'));
+        add_action('admin_notices', array(__CLASS__, 'maybe_show_review_notice'));
+
     }
 
     public function get_version_from_php_doc()
@@ -181,13 +186,9 @@ class One_Click_Migration
             }
         }
 
-        // Permanent dismiss of the in-plugin Review ask (never ask again on this site).
-        if (!empty($_GET['ocm_dismiss_review']) && !empty($_GET['_wpnonce']) // phpcs:ignore WordPress.Security.NonceVerification.Recommended
-            && wp_verify_nonce(sanitize_text_field(wp_unslash($_GET['_wpnonce'])), 'ocm_dismiss_review') // phpcs:ignore WordPress.Security.NonceVerification.Recommended
-        ) {
-            update_option('ocm_review_ask_dismissed', 1, false);
-            update_option('ocm_show_review_cta', 0, false);
-        }
+        // Permanent dismiss of the in-plugin Review ask is handled on admin_init
+        // (handle_review_dismiss), which runs before this hook, so the modal's
+        // dismiss URL keeps working and the flags below already reflect it.
 
         $show_restore_success = false;
         $show_review_cta = false;
@@ -226,6 +227,55 @@ class One_Click_Migration
             'dismissReviewUrl' => wp_nonce_url(admin_url('tools.php?page=one-click-migration&ocm_dismiss_review=1'), 'ocm_dismiss_review'),
             'reviewUrl' => 'https://wordpress.org/plugins/1-click-migration/reviews/#new-post',
         ));
+    }
+
+    /**
+     * Permanent dismiss of the Review ask (never ask again on this site).
+     * Runs on admin_init so it works from any wp-admin screen; shared by the
+     * restore-success modal ("Don't ask again" link) and the admin notice.
+     */
+    public static function handle_review_dismiss()
+    {
+        if (empty($_GET['ocm_dismiss_review']) || empty($_GET['_wpnonce']) // phpcs:ignore WordPress.Security.NonceVerification.Recommended
+            || !wp_verify_nonce(sanitize_text_field(wp_unslash($_GET['_wpnonce'])), 'ocm_dismiss_review') // phpcs:ignore WordPress.Security.NonceVerification.Recommended
+        ) {
+            return;
+        }
+        if (!current_user_can('manage_options')) {
+            return;
+        }
+        update_option('ocm_review_ask_dismissed', 1, false);
+        update_option('ocm_show_review_cta', 0, false);
+    }
+
+    /**
+     * Persistent admin notice asking for a review after the first clean restore.
+     * Gated on ocm_clean_restore_count (never consumed) rather than
+     * ocm_show_review_cta, which the restore-success modal deletes one-shot.
+     */
+    public static function maybe_show_review_notice()
+    {
+        if (!current_user_can('manage_options')) {
+            return;
+        }
+        if ((int) get_option('ocm_clean_restore_count', 0) < 1) {
+            return;
+        }
+        if ((bool) get_option('ocm_review_ask_dismissed', false)) {
+            return;
+        }
+
+        $review_url  = 'https://wordpress.org/plugins/1-click-migration/reviews/#new-post';
+        $dismiss_url = wp_nonce_url(add_query_arg('ocm_dismiss_review', '1'), 'ocm_dismiss_review');
+        ?>
+        <div class="notice notice-info ocm-review-notice">
+            <p>Your site was restored. If 1-Click Migration helped, leave a review.</p>
+            <p>
+                <a class="button button-primary" href="<?php echo esc_url($review_url); ?>" target="_blank" rel="noopener noreferrer">Leave a review</a>
+                <a href="<?php echo esc_url($dismiss_url); ?>" style="margin-left: 12px;">Don&#8217;t ask again</a>
+            </p>
+        </div>
+        <?php
     }
 
     public static function install()

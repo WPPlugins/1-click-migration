@@ -2279,6 +2279,10 @@ class OCM_Backup
             RecursiveIteratorIterator::LEAVES_ONLY
         );
 
+        $queued_files = 0;
+        $queued_bytes = 0;
+        $last_tick = time();
+
         foreach ($files as $file) {
             if ($file->isDir()) {
                 continue;
@@ -2299,7 +2303,35 @@ class OCM_Backup
             if (defined('ZipArchive::CM_STORE')) {
                 $zip->setCompressionName($relative_path, ZipArchive::CM_STORE);
             }
+
+            $queued_files++;
+            $size = @filesize($file_path);
+            $queued_bytes += $size ? $size : 0;
+
+            // Enumerating a huge uploads dir can take minutes on its own, and
+            // nothing else in this loop resets the PHP timer or tells the
+            // stall watchdog the worker is alive.
+            if (0 === ($queued_files % 500) || (time() - $last_tick) >= 5) {
+                @set_time_limit(One_Click_Migration::get_timeout());
+                One_Click_Migration::worker_heartbeat();
+                $last_tick = time();
+            }
         }
+
+        // addFile() only queues entries; close() is the single blocking call
+        // that reads and writes every byte, so on multi-GB archives it can
+        // exceed max_execution_time by itself. Lift the limit entirely where
+        // the host allows it, otherwise fall back to the usual budget.
+        One_Click_Migration::worker_heartbeat();
+        if (!@set_time_limit(0)) {
+            @set_time_limit(One_Click_Migration::get_timeout());
+        }
+        One_Click_Migration::write_to_log(sprintf(
+            ' SYSLOG: Zip close starting for "%s": %d files, %d bytes queued. No further log output is expected until close finishes.',
+            basename($filename),
+            $queued_files,
+            $queued_bytes
+        ));
 
         return $zip->close();
     }
@@ -2377,9 +2409,20 @@ class OCM_Backup
             return false;
         }
 
+        $chunk_index = 0;
+        $last_progress_mark = 0;
+
         // loop around the file
         while ($data_encrypted < $file_size) {
 
+            // A 41.5GB archive is ~20k 2MB chunks — far beyond one
+            // max_execution_time budget. Refresh the timer and the stall
+            // watchdog every 8 chunks (16MB) to keep the heartbeat cheap.
+            if (0 === ($chunk_index % 8)) {
+                @set_time_limit(One_Click_Migration::get_timeout());
+                One_Click_Migration::worker_heartbeat();
+            }
+            $chunk_index++;
 
             // read buffer-sized amount from file
             if (false === ($file_part = fread($file_handle, $buffer_size))) {
@@ -2424,6 +2467,18 @@ class OCM_Backup
             }
 
             $data_encrypted += $buffer_size;
+
+            // Progress marker for Support (offsets only, never payload) so a
+            // long-running encrypt is distinguishable from a hang.
+            if (($data_encrypted - $last_progress_mark) >= 536870912) {
+                $last_progress_mark = $data_encrypted;
+                One_Click_Migration::write_to_log(sprintf(
+                    ' SYSLOG: Encrypting "%s": %d MB of %d MB done.',
+                    basename($filename),
+                    (int) floor(min($data_encrypted, $file_size) / 1048576),
+                    (int) floor($file_size / 1048576)
+                ));
+            }
         }
 
         // close the main file handle

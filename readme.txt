@@ -4,7 +4,7 @@ Tags: backup, migrate, migration, restore, clone
 Requires at least: 4.0
 Tested up to: 7.1
 Requires PHP: 7.4
-Stable tag: 3.1.12
+Stable tag: 3.1.13
 Author URI: https://1clickmigration.com
 License: GPLv3 or later
 License URI: http://www.gnu.org/licenses/gpl-3.0.html
@@ -122,6 +122,10 @@ All of them! Migrate WordPress sites between any hosting providers: Bluehost, Si
 4. Enter the restore code on the destination site.
 
 == Changelog ==
+= 3.1.13 =
+* **Review Notice**: After the first clean restore, the destination site's wp-admin now shows a persistent review notice with a Leave a review button and a permanent "Don't ask again" dismiss (same dismiss flag as the 3.1.11 restore-complete popup).
+* **Large-archive Reliability**: The native zip step and the encryption step now refresh the PHP time limit and the worker heartbeat while processing multi-GB archives, so they no longer die against the 300-second execution timeout. Encryption progress is logged every 512MB (offsets only).
+
 = 3.1.12 =
 * Directory listing title and short description refresh (Free 1-Click WordPress Migration). Plugin behavior identical to 3.1.11.
 
