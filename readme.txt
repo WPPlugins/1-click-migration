@@ -1,21 +1,21 @@
-===1-Click Backup Migration===
+=== Free 1-Click WordPress Migration ===
 Contributors: 1clickmigration
-Tags: backup, migration, migrate, restore, transfer
+Tags: backup, migrate, migration, restore, clone
 Requires at least: 4.0
 Tested up to: 7.1
 Requires PHP: 7.4
-Stable tag: 3.1.11
+Stable tag: 3.1.12
 Author URI: https://1clickmigration.com
 License: GPLv3 or later
 License URI: http://www.gnu.org/licenses/gpl-3.0.html
 
-Backup, restore, and migrate a WordPress site in one click. Transfer hosts with a restore code, no 4GB zip cap.
+Free WordPress migration plugin. Move to a new host or domain with a restore code. No 4GB zip cap.
 
 == Description ==
 
 ### Backup, restore, and migrate in one click ###
 
-1-Click Migration backs up a WordPress site, emails you an 8-character restore code, and restores it on a new host or domain. URLs and serialized data update automatically. The live site stays up during backup.
+This free WordPress migration plugin backs up a WordPress site, emails you an 8-character restore code, and lets you move to a new host or domain. URLs and serialized data update automatically. The live site stays up during backup.
 
 https://vimeo.com/1220910737
 
@@ -116,11 +116,15 @@ No. Your live WordPress site remains fully operational during the entire backup 
 All of them! Migrate WordPress sites between any hosting providers: Bluehost, SiteGround, WP Engine, Kinsta, GoDaddy, HostGator, DreamHost, and all others.
 
 == Screenshots ==
-1. One-click backup dashboard
-2. Selective backup options
-3. Restore-complete success
+1. Back up a live WordPress site in one click. The live site stays up.
+2. Choose database, plugins, themes, or uploads.
+3. Restore finished on the destination site.
+4. Enter the restore code on the destination site.
 
 == Changelog ==
+= 3.1.12 =
+* Directory listing title and short description refresh (Free 1-Click WordPress Migration). Plugin behavior identical to 3.1.11.
+
 = 3.1.11 =
 * Sanitize backup logs (no ciphertext on encrypt failure) and write terminal Backup completed / Backup failed lines.
 * Show Leave a review on the first clean restore-complete dialog. Hidden on warned, missing-parts, partial, or failed restores. Permanently dismissible.
