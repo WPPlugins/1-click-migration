@@ -13,6 +13,8 @@ class OCM_SQL_Utils
     protected static $sql_buffer = '';
     const SQL_STREAM_FLUSH_BYTES = 524288; // 512 KiB
     const SQL_STREAM_READ_BYTES = 1048576; // 1 MiB
+    /** Statement keyword + table name always sit within this many bytes of a line start. */
+    const SQL_STATEMENT_HEAD_BYTES = 4096;
     protected static $mysqldump_support_logged = false;
     protected static $db_backup_progress_logged = false;
     protected static $windows_logged = false;
@@ -227,12 +229,12 @@ class OCM_SQL_Utils
         return ( self::run_mysql_command($cmd, $final_args, $descriptors));
     }
 
-    public static function import($result_file)
+    public static function import($result_file, $source_prefix = '', $dest_prefix = '')
     {
         $result_file = self::sql_fix($result_file);
 
         if (!self::check_mysql_support()) {
-            $result = self::import_use_wpdb($result_file);
+            $result = self::import_use_wpdb($result_file, $source_prefix, $dest_prefix);
             if ($result) {
                 self::sql_fix_after($result_file);
             }
@@ -253,7 +255,7 @@ class OCM_SQL_Utils
         if ($result == false)
         {
 	        One_Click_Migration::write_to_log('Notice: Database restore in progress. Please don\'t leave the plugin page.');
-            $fallback_result = self::import_use_wpdb($result_file);
+            $fallback_result = self::import_use_wpdb($result_file, $source_prefix, $dest_prefix);
             if ($fallback_result) {
                 self::sql_fix_after($result_file);
             }
@@ -281,7 +283,7 @@ class OCM_SQL_Utils
         }
     }
 
-	    public static function import_use_wpdb($result_file)
+	    public static function import_use_wpdb($result_file, $source_prefix = '', $dest_prefix = '')
 	    {
 	        /** @var wpdb $wpdb */
 	        global $wpdb,$EZSQL_ERROR;
@@ -297,6 +299,7 @@ class OCM_SQL_Utils
 
 	        $error_count = 0;
 	        $statement_index = 0;
+	        $remapped_statements = 0;
 	        $buffer = '';
 	        $aborted = false;
 
@@ -320,7 +323,10 @@ class OCM_SQL_Utils
 	                    $statement_index,
 	                    $error_count,
 	                    $has_check_current_query,
-	                    $previous_check_current_query
+	                    $previous_check_current_query,
+	                    $source_prefix,
+	                    $dest_prefix,
+	                    $remapped_statements
 	                );
 	                if ($result === false) {
 	                    $aborted = true;
@@ -342,7 +348,10 @@ class OCM_SQL_Utils
 	                        $statement_index,
 	                        $error_count,
 	                        $has_check_current_query,
-	                        $previous_check_current_query
+	                        $previous_check_current_query,
+	                        $source_prefix,
+	                        $dest_prefix,
+	                        $remapped_statements
 	                    );
 	                    if ($result === false) {
 	                        $aborted = true;
@@ -355,6 +364,16 @@ class OCM_SQL_Utils
 
 	        if ($has_check_current_query) {
 	            $wpdb->check_current_query = $previous_check_current_query;
+	        }
+
+	        if ($remapped_statements > 0) {
+	            One_Click_Migration::write_to_log(sprintf(
+	                'Notice: Remapped %d statement(s) from source prefix "%s" to destination prefix "%s" while importing "%s".',
+	                $remapped_statements,
+	                $source_prefix,
+	                $dest_prefix,
+	                basename($result_file)
+	            ));
 	        }
 
 	        if ($aborted) {
@@ -378,9 +397,12 @@ class OCM_SQL_Utils
      * @param int    $error_count
      * @param bool   $has_check_current_query
      * @param mixed  $previous_check_current_query
+     * @param string $source_prefix   Table prefix of the backup being imported.
+     * @param string $dest_prefix     Destination site table prefix.
+     * @param int    $remapped_count  Incremented when a statement head is remapped.
      * @return bool
      */
-    private static function execute_imported_query($query, $result_file, &$statement_index, &$error_count, $has_check_current_query, $previous_check_current_query)
+    private static function execute_imported_query($query, $result_file, &$statement_index, &$error_count, $has_check_current_query, $previous_check_current_query, $source_prefix = '', $dest_prefix = '', &$remapped_count = 0)
     {
         global $wpdb, $EZSQL_ERROR;
 
@@ -388,6 +410,18 @@ class OCM_SQL_Utils
         if (empty($query)) {
             return true;
         }
+
+        // Last line of defense for cross-prefix restores: whatever state the dump
+        // file is in (unswapped, partially swapped after an interrupted run, or
+        // mutated by a restarted restore), never execute a statement against the
+        // source prefix. This guarantees CREATE TABLE and INSERT always agree on
+        // the destination prefix.
+        $remapped_query = self::remap_statement_table_prefix($query, $source_prefix, $dest_prefix);
+        if ($remapped_query !== $query) {
+            $query = $remapped_query;
+            $remapped_count++;
+        }
+
         $statement_index++;
         $wpdb->last_error = '';
         if ($has_check_current_query) {
@@ -756,10 +790,250 @@ class OCM_SQL_Utils
 
         $old_table_prefix = self::get_table_prefix($filepath);
         if ($old_table_prefix === '' || $old_table_prefix === $wpdb->base_prefix) {
-            return;
+            return true;
         }
 
-        self::stream_str_replace($filepath, $old_table_prefix, $wpdb->base_prefix);
+        if (!self::stream_str_replace($filepath, $old_table_prefix, $wpdb->base_prefix)) {
+            One_Click_Migration::write_to_log(sprintf(
+                'Error: Failed to swap table prefix "%s" to "%s" in "%s".',
+                $old_table_prefix,
+                $wpdb->base_prefix,
+                basename($filepath)
+            ));
+            return false;
+        }
+
+        // The swap above rewrites every occurrence in one pass, but an interrupted
+        // or restarted restore can leave a dump where some statements still target
+        // the source prefix (field incident: CREATE TABLE ran against wp_options
+        // while the INSERTs targeted eol_options, which was never created). Verify
+        // the statement-level table names and repair any stragglers so CREATE and
+        // INSERT both target the destination prefix before anything is imported.
+        return self::enforce_statement_table_prefix($filepath, $old_table_prefix, $wpdb->base_prefix);
+    }
+
+    /**
+     * Regex matching a statement head (line start) that targets a table with the
+     * given prefix: DROP/CREATE TABLE, INSERT/REPLACE INTO, ALTER TABLE (including
+     * the "!40000 ALTER TABLE" conditional-comment form mysqldump emits),
+     * LOCK TABLES and TRUNCATE.
+     *
+     * @param string $prefix
+     * @return string
+     */
+    private static function statement_head_pattern($prefix)
+    {
+        return '/^(\s*(?:\/\*!\d+\s+)?(?:DROP\s+TABLE(?:\s+IF\s+EXISTS)?|CREATE\s+TABLE(?:\s+IF\s+NOT\s+EXISTS)?|INSERT\s+(?:IGNORE\s+)?INTO|REPLACE\s+INTO|ALTER\s+TABLE|LOCK\s+TABLES|TRUNCATE(?:\s+TABLE)?)\s+`?)'
+            . preg_quote($prefix, '/') . '/i';
+    }
+
+    private static function replace_statement_head_prefix($head, $pattern, $new_prefix)
+    {
+        return preg_replace_callback(
+            $pattern,
+            static function ($matches) use ($new_prefix) {
+                return $matches[1] . $new_prefix;
+            },
+            $head,
+            1
+        );
+    }
+
+    /**
+     * Rewrite the table identifier in a single SQL statement's head from
+     * $old_prefix to $new_prefix. Anchored at the statement start, so table-name
+     * lookalikes inside VALUES data are never touched. No-op for same-prefix
+     * restores or when no prefixes were provided.
+     *
+     * @param string $query
+     * @param string $old_prefix
+     * @param string $new_prefix
+     * @return string
+     */
+    public static function remap_statement_table_prefix($query, $old_prefix, $new_prefix)
+    {
+        if (!is_string($query) || $query === ''
+            || !is_string($old_prefix) || $old_prefix === ''
+            || !is_string($new_prefix) || $new_prefix === ''
+            || $old_prefix === $new_prefix
+        ) {
+            return $query;
+        }
+
+        return self::replace_statement_head_prefix($query, self::statement_head_pattern($old_prefix), $new_prefix);
+    }
+
+    /**
+     * Verify that no statement in the dump still targets a table with the source
+     * prefix, and rewrite the statement heads to the destination prefix if any do.
+     * Streamed; only line heads are inspected, so INSERT payload data is never
+     * modified. Returns false only on I/O failure.
+     *
+     * @param string $filepath
+     * @param string $old_prefix
+     * @param string $new_prefix
+     * @return bool
+     */
+    public static function enforce_statement_table_prefix($filepath, $old_prefix, $new_prefix)
+    {
+        if ($old_prefix === '' || $new_prefix === '' || $old_prefix === $new_prefix) {
+            return true;
+        }
+
+        $matched = false;
+        if (!self::scan_or_remap_statement_prefix($filepath, $old_prefix, $new_prefix, false, $matched)) {
+            return false;
+        }
+        if (!$matched) {
+            return true;
+        }
+
+        One_Click_Migration::write_to_log(sprintf(
+            'Notice: "%s" still contained statements targeting source prefix "%s" after the prefix swap; remapping their table names to destination prefix "%s".',
+            basename($filepath),
+            $old_prefix,
+            $new_prefix
+        ));
+
+        return self::scan_or_remap_statement_prefix($filepath, $old_prefix, $new_prefix, true, $matched);
+    }
+
+    /**
+     * Streamed walk over the dump's line heads. In scan mode ($repair = false)
+     * returns as soon as a statement head targeting $old_prefix is found. In
+     * repair mode rewrites those heads to $new_prefix via a temp file + rename.
+     * Memory stays bounded: only up to SQL_STATEMENT_HEAD_BYTES of a line is ever
+     * buffered; the rest of long INSERT lines is passed through untouched.
+     *
+     * @param string $filepath
+     * @param string $old_prefix
+     * @param string $new_prefix
+     * @param bool   $repair
+     * @param bool   $matched Set true when at least one statement head matched.
+     * @return bool  False on I/O failure.
+     */
+    private static function scan_or_remap_statement_prefix($filepath, $old_prefix, $new_prefix, $repair, &$matched)
+    {
+        $matched = false;
+        $pattern = self::statement_head_pattern($old_prefix);
+
+        $in = @fopen($filepath, 'rb');
+        if (!$in) {
+            One_Click_Migration::write_to_log(sprintf('Error: Could not read SQL file "%s" for prefix verification.', $filepath));
+            return false;
+        }
+
+        $out = null;
+        $tmp = null;
+        if ($repair) {
+            $tmp = $filepath . '.ocm-remap.tmp';
+            $out = @fopen($tmp, 'wb');
+            if (!$out) {
+                fclose($in);
+                One_Click_Migration::write_to_log(sprintf('Error: Could not open temp file to remap table prefix in "%s".', $filepath));
+                return false;
+            }
+        }
+
+        $head = '';
+        $mid_line = false;
+        $ok = true;
+
+        while (!feof($in)) {
+            $chunk = fread($in, self::SQL_STREAM_READ_BYTES);
+            if ($chunk === false) {
+                $ok = false;
+                break;
+            }
+
+            $offset = 0;
+            $len = strlen($chunk);
+            while ($offset < $len) {
+                if ($mid_line) {
+                    $nl = strpos($chunk, "\n", $offset);
+                    $take = ($nl === false) ? $len - $offset : $nl - $offset + 1;
+                    if ($out) {
+                        fwrite($out, substr($chunk, $offset, $take));
+                    }
+                    $offset += $take;
+                    if ($nl !== false) {
+                        $mid_line = false;
+                    }
+                    continue;
+                }
+
+                $nl = strpos($chunk, "\n", $offset);
+                if ($nl === false) {
+                    $head .= substr($chunk, $offset);
+                    $offset = $len;
+                } else {
+                    $head .= substr($chunk, $offset, $nl - $offset + 1);
+                    $offset = $nl + 1;
+                }
+
+                $line_complete = ($nl !== false);
+                if ($line_complete || strlen($head) >= self::SQL_STATEMENT_HEAD_BYTES) {
+                    if (preg_match($pattern, $head)) {
+                        $matched = true;
+                        if (!$repair) {
+                            fclose($in);
+                            return true;
+                        }
+                        $head = self::replace_statement_head_prefix($head, $pattern, $new_prefix);
+                    }
+                    if ($out) {
+                        fwrite($out, $head);
+                    }
+                    $head = '';
+                    if (!$line_complete) {
+                        $mid_line = true;
+                    }
+                }
+            }
+        }
+
+        if ($ok && $head !== '') {
+            if (preg_match($pattern, $head)) {
+                $matched = true;
+                if ($repair) {
+                    $head = self::replace_statement_head_prefix($head, $pattern, $new_prefix);
+                }
+            }
+            if ($out) {
+                fwrite($out, $head);
+            }
+        }
+
+        fclose($in);
+        if (!$out) {
+            if (!$ok) {
+                One_Click_Migration::write_to_log(sprintf('Error: Read failed while verifying table prefix in SQL file "%s".', $filepath));
+            }
+            return $ok;
+        }
+        fclose($out);
+
+        if (!$ok) {
+            @unlink($tmp);
+            One_Click_Migration::write_to_log(sprintf('Error: Read failed while remapping table prefix in SQL file "%s"; file left unchanged.', $filepath));
+            return false;
+        }
+
+        if (!$matched) {
+            @unlink($tmp);
+            return true;
+        }
+
+        if (!@rename($tmp, $filepath)) {
+            $copied = @copy($tmp, $filepath);
+            @unlink($tmp);
+            if (!$copied) {
+                One_Click_Migration::write_to_log(sprintf('Error: Could not finalize prefix remap for SQL file "%s".', $filepath));
+                return false;
+            }
+        }
+
+        return true;
     }
 
     private static function clear_sql_content()
@@ -864,9 +1138,13 @@ class OCM_SQL_Utils
         }
 
         $carry = '';
+        $read_ok = true;
         while (!feof($in)) {
             $chunk = fread($in, self::SQL_STREAM_READ_BYTES);
             if ($chunk === false) {
+                // Never rename a partial result over the original: a truncated
+                // dump would import as silent data loss.
+                $read_ok = false;
                 break;
             }
             $data = $carry . $chunk;
@@ -891,6 +1169,12 @@ class OCM_SQL_Utils
         }
         fclose($in);
         fclose($out);
+
+        if (!$read_ok) {
+            @unlink($tmp);
+            One_Click_Migration::write_to_log(sprintf('Error: Read failed while stream-replacing in SQL file "%s"; file left unchanged.', $filepath));
+            return false;
+        }
 
         if (!@rename($tmp, $filepath)) {
             $copied = @copy($tmp, $filepath);

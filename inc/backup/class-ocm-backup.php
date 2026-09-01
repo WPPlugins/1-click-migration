@@ -1306,11 +1306,21 @@ class OCM_Backup
         One_Click_Migration::write_to_log('Restore completed.');
         // Durable flag so the admin UI can show the success modal after
         // post-restore logout / re-login (session cookies often invalidate).
+        // "Clean" means no backup-missing parts AND no parts that failed during
+        // this restore (skipped after max retries, or not found in storage).
+        // These options are reset at restore start (delete_restore_options), so
+        // they reflect only the current run. Hard failures never reach here at
+        // all — fail_restore() and finish_restore_db_phase() exit first.
         $missing_parts = get_option('ocm_backup_missing_parts', []);
-        $is_warned = is_array($missing_parts) && !empty($missing_parts);
+        $skipped_folders = get_option('ocm_skipped_folders', []);
+        $not_found_folders = get_option('ocm_eexcluded_folders', []);
+        $is_warned = (is_array($missing_parts) && !empty($missing_parts))
+            || (is_array($skipped_folders) && !empty($skipped_folders))
+            || (is_array($not_found_folders) && !empty($not_found_folders));
         update_option('ocm_show_restore_success', time(), false);
         if ($is_warned) {
-            // Success UI ok; never offer Review CTA on warned / missing-parts runs.
+            // Success UI ok; never offer Review CTA (and never count the run as
+            // clean) on warned / missing-parts / partial runs.
             update_option('ocm_show_review_cta', 0, false);
         } else {
             $clean_count = (int) get_option('ocm_clean_restore_count', 0) + 1;
@@ -3873,9 +3883,17 @@ class OCM_Backup
         $dir = new DirectoryIterator($dbfiles);
         $found_files = array();
         foreach ($dir as $fileinfo) {
-            if (!$fileinfo->isDot()) {
-                $found_files[] = $fileinfo->getPathname();
+            if ($fileinfo->isDot()) {
+                continue;
             }
+            // Leftover work files from an interrupted run (e.g. *.ocm-stream.tmp)
+            // must never be imported: they can carry a stale or partial prefix
+            // state and would DROP + re-create tables that were just restored.
+            if (strtolower(substr($fileinfo->getFilename(), -4)) !== '.sql') {
+                One_Click_Migration::write_to_log(sprintf('Notice: Skipping non-SQL file "%s" in the DB restore directory.', $fileinfo->getFilename()));
+                continue;
+            }
+            $found_files[] = $fileinfo->getPathname();
         }
 
         // Give priority to WP tables so they're imported first
@@ -3904,8 +3922,11 @@ class OCM_Backup
         sleep(1);
 
         foreach ($sorted_table_list as $filepath) {
-            OCM_SQL_Utils::swap_table_prefix($filepath);
-            if (!OCM_SQL_Utils::import($filepath)) {
+            if (!OCM_SQL_Utils::swap_table_prefix($filepath)) {
+                One_Click_Migration::write_to_log(sprintf('Error: Database restore failed while remapping the table prefix in "%s".', basename($filepath)));
+                return false;
+            }
+            if (!OCM_SQL_Utils::import($filepath, $source_prefix, $wpdb->base_prefix)) {
                 One_Click_Migration::write_to_log(sprintf('Error: Database restore failed while importing "%s".', basename($filepath)));
                 return false;
             }

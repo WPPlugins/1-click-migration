@@ -4,7 +4,7 @@ Tags: backup, migrate, migration, restore, clone
 Requires at least: 4.0
 Tested up to: 7.1
 Requires PHP: 7.4
-Stable tag: 3.1.13
+Stable tag: 3.1.14
 Author URI: https://1clickmigration.com
 License: GPLv3 or later
 License URI: http://www.gnu.org/licenses/gpl-3.0.html
@@ -122,6 +122,10 @@ All of them! Migrate WordPress sites between any hosting providers: Bluehost, Si
 4. Enter the restore code on the destination site.
 
 == Changelog ==
+= 3.1.14 =
+* **Review Notice Accuracy**: The destination-site review notice is now armed only by restores that completed cleanly. Restores that finished with parts skipped after repeated failures (or parts missing from storage) no longer count as clean, so the notice cannot appear after a partial restore. Failed restores never counted. Same permanent dismiss flag as before.
+* **Restore Reliability**: Fixed a cross-prefix restore failure where the database import could run `CREATE TABLE` against the source prefix while the `INSERT`s targeted the destination prefix (e.g. `Table '….eol_options' doesn't exist` when restoring a `wp_` backup onto a site using a different prefix). The prefix swap is now verified and repaired at statement level before import, the importer remaps any `CREATE`/`INSERT`/`DROP`/`ALTER` statement still carrying the source prefix to the destination prefix at execution time, a failed prefix rewrite aborts the restore instead of importing wrong-prefix tables, and leftover temp files in the restore DB folder are no longer imported. The destination-prefix table (e.g. `eol_options`) is always created before rows are inserted into it. Same-prefix (`wp_` → `wp_`) restores behave exactly as before.
+
 = 3.1.13 =
 * **Review Notice**: After the first clean restore, the destination site's wp-admin now shows a persistent review notice with a Leave a review button and a permanent "Don't ask again" dismiss (same dismiss flag as the 3.1.11 restore-complete popup).
 * **Large-archive Reliability**: The native zip step and the encryption step now refresh the PHP time limit and the worker heartbeat while processing multi-GB archives, so they no longer die against the 300-second execution timeout. Encryption progress is logged every 512MB (offsets only).
