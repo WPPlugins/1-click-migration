@@ -4,7 +4,7 @@ Tags: backup, migrate, migration, restore, clone
 Requires at least: 4.0
 Tested up to: 7.1
 Requires PHP: 7.4
-Stable tag: 3.1.14
+Stable tag: 3.1.15
 Author URI: https://1clickmigration.com
 License: GPLv3 or later
 License URI: http://www.gnu.org/licenses/gpl-3.0.html
@@ -15,7 +15,7 @@ Free WordPress migration plugin. Move to a new host or domain with a restore cod
 
 ### Backup, restore, and migrate in one click ###
 
-This free WordPress migration plugin backs up a WordPress site, emails you an 8-character restore code, and lets you move to a new host or domain. URLs and serialized data update automatically. The live site stays up during backup.
+1-Click Migration backs up a WordPress site, emails you an 8-character restore code, and restores it on a new host or domain. URLs and serialized data update automatically. The live site stays up during backup.
 
 https://vimeo.com/1220910737
 
@@ -116,12 +116,18 @@ No. Your live WordPress site remains fully operational during the entire backup 
 All of them! Migrate WordPress sites between any hosting providers: Bluehost, SiteGround, WP Engine, Kinsta, GoDaddy, HostGator, DreamHost, and all others.
 
 == Screenshots ==
-1. Back up a live WordPress site in one click. The live site stays up.
-2. Choose database, plugins, themes, or uploads.
-3. Restore finished on the destination site.
-4. Enter the restore code on the destination site.
+1. One-click backup dashboard
+2. Selective backup options
+3. Restore-complete success
 
 == Changelog ==
+= 3.1.15 =
+* **Restore Reliability**: Hardened options SQL import so large remapped `INSERT`s are no longer rejected as WordPress "invalid data" (`$wpdb->query()` `strip_invalid_text`, including the Turkish core string "Sorgu, içinde geçersiz veriler bulunduğundan işlenemedi"). Dump statements now prefer the raw mysqli handle when available; utf8/utf8mb3 connections are promoted to utf8mb4. Destination-prefix remap from 3.1.14 is unchanged.
+* **Backup Integrity**: S3 uploads now fail closed: failed or missing encrypted archives are recorded as missing, remain on disk for diagnosis/retry, never receive an `ok` manifest status, and cannot trigger a restore-code email. Streamed SQL exports retry short writes and abort the backup if any dump byte cannot be written.
+* **Safer Prefix Restore**: Prefix-remap temp files use checked full writes and atomic replacement, source-prefix detection requires exactly one canonical `*usermeta.sql` dump, and every SQL dump is validated/remapped before destination tables are dropped. Destination review-dismiss/count preferences survive the database replacement.
+* **Large Archive Reliability**: Normal sites continue to use `ZipArchive`. If `ZipArchive::close()` fails or a persisted marker shows that it hung/timed out on a huge tree, the retry switches to a slower monitored system-zip streaming failover with worker heartbeats.
+* **Log Security and Monitoring**: The migration log moved from the public plugin directory to a deny-protected private directory and is downloadable only by a nonce-verified administrator. Monitor classification now treats errors appended after a terminal marker as the current state while allowing a later terminal marker to resolve earlier transient errors.
+
 = 3.1.14 =
 * **Review Notice Accuracy**: The destination-site review notice is now armed only by restores that completed cleanly. Restores that finished with parts skipped after repeated failures (or parts missing from storage) no longer count as clean, so the notice cannot appear after a partial restore. Failed restores never counted. Same permanent dismiss flag as before.
 * **Restore Reliability**: Fixed a cross-prefix restore failure where the database import could run `CREATE TABLE` against the source prefix while the `INSERT`s targeted the destination prefix (e.g. `Table '….eol_options' doesn't exist` when restoring a `wp_` backup onto a site using a different prefix). The prefix swap is now verified and repaired at statement level before import, the importer remaps any `CREATE`/`INSERT`/`DROP`/`ALTER` statement still carrying the source prefix to the destination prefix at execution time, a failed prefix rewrite aborts the restore instead of importing wrong-prefix tables, and leftover temp files in the restore DB folder are no longer imported. The destination-prefix table (e.g. `eol_options`) is always created before rows are inserted into it. Same-prefix (`wp_` → `wp_`) restores behave exactly as before.
@@ -131,11 +137,11 @@ All of them! Migrate WordPress sites between any hosting providers: Bluehost, Si
 * **Large-archive Reliability**: The native zip step and the encryption step now refresh the PHP time limit and the worker heartbeat while processing multi-GB archives, so they no longer die against the 300-second execution timeout. Encryption progress is logged every 512MB (offsets only).
 
 = 3.1.12 =
-* Directory listing title and short description refresh (Free 1-Click WordPress Migration). Plugin behavior identical to 3.1.11.
+* **Directory Listing Refresh**: Updated the WordPress.org listing title and short description (Free 1-Click WordPress Migration). Plugin behavior is identical to 3.1.11 — no code changes.
 
 = 3.1.11 =
-* Sanitize backup logs (no ciphertext on encrypt failure) and write terminal Backup completed / Backup failed lines.
-* Show Leave a review on the first clean restore-complete dialog. Hidden on warned, missing-parts, partial, or failed restores. Permanently dismissible.
+* **Log Sanitization**: The plugin log (`ocm_debug.log`) no longer records encrypted/binary payload data; I/O errors are logged as errno codes only, and every backup now ends with a terminal `Backup completed` or `Backup failed` line so log consumers can reliably detect the outcome.
+* **Restore Success UX**: The Leave a review button now appears on the first clean restore-complete dialog (previously 2nd+). It is still hidden on warned, missing-parts, partial, or failed restores, and remains permanently dismissible.
 
 = 3.1.10 =
 * **Large-database dumps**: SQL dumps now stream to disk in chunks instead of building the dump in PHP memory, with a preflight that logs DB size vs `memory_limit` and forces the streamed path when an in-memory dump would OOM. Low-memory warnings are written to the plugin log.

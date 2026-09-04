@@ -105,19 +105,23 @@ class OCM_BackgroundBackup extends WP_Background_Process
     protected function complete()
     {
         OCM_Debug_Mode::disable();
+        $missing_parts = OCM_Backup::get_backup_missing_parts();
+        OCM_Backup::log_backup_parts_manifest($missing_parts);
+
+        if ($missing_parts) {
+            OCM_Backup::fail_backup('backup is incomplete; missing parts: ' . implode(', ', $missing_parts));
+            One_Click_Migration::clear_backup_plugin_isolation();
+            One_Click_Migration::cancel_all_process();
+            parent::complete();
+            return;
+        }
+
         $urls = get_option('ocm_presigned_urls');
         if (WP_DEBUG !== true) {
             OCM_Backup::deleteDir(OCM_PLUGIN_WRITABLE_PATH, 'Cleaning temporary directory', $urls);
         }
 
-        OCM_Backup::print_folders_skipped();
-
-        // Publish per-part status into the log (which is mirrored to S3) so the
-        // restore side knows up front which parts this backup does not contain.
-        $missing_parts = OCM_Backup::get_backup_missing_parts();
-        OCM_Backup::log_backup_parts_manifest($missing_parts);
-
-        if (!OCM_Backup::send_restore_code_email($missing_parts)) {
+        if (!OCM_Backup::send_restore_code_email()) {
             // Terminal marker: without the restore code email the backup is unusable.
             One_Click_Migration::write_to_log('Backup failed: restore code email could not be sent (see previous error line).');
             update_option('ocm_is_stopped', true, true);
@@ -128,11 +132,7 @@ class OCM_BackgroundBackup extends WP_Background_Process
             return;
         }
 
-        if ($missing_parts) {
-            One_Click_Migration::write_to_log('Backup completed with missing parts: ' . implode(', ', $missing_parts));
-        } else {
-            One_Click_Migration::write_to_log('Backup completed.');
-        }
+        One_Click_Migration::write_to_log('Backup completed.');
 
         OCM_Backup::reset_current_backup_steps();
         One_Click_Migration::clear_backup_plugin_isolation();

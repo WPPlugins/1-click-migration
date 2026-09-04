@@ -16,6 +16,9 @@ use ZipArchive;
 
 class OCM_Backup
 {
+    /** @var bool A selected archive backend ran and failed; do not retry via another huge-tree backend. */
+    private static $archive_backend_failed = false;
+
     const STEP_BACKUP_CHILD_URL_GENERATED = 'urlGenerated';
     const STEP_BACKUP_CHILD_INITIATE = 'initiate';
     const STEP_BACKUP_CHILD_INITIATE_DB_BACKUP = 'initiateDbBackup';
@@ -1249,6 +1252,15 @@ class OCM_Backup
         update_option('ocm_is_stopped', true, true);
     }
 
+    public static function fail_part_upload($part, $message)
+    {
+        $skipped = get_option('ocm_skipped_folders', array());
+        self::capture_failed_folder(is_array($skipped) ? $skipped : array(), $part, 'ocm_skipped_folders');
+        self::log_backup_parts_manifest(self::get_backup_missing_parts());
+        self::fail_backup(sprintf('%s upload failed: %s', $part, $message));
+        return OCM_BackgroundBackup::RETURN_TYPE_END_PROCESSS;
+    }
+
     private static function fail_restore($message)
     {
         One_Click_Migration::write_to_log($message);
@@ -1326,7 +1338,7 @@ class OCM_Backup
             $clean_count = (int) get_option('ocm_clean_restore_count', 0) + 1;
             update_option('ocm_clean_restore_count', $clean_count, false);
             $dismissed = (bool) get_option('ocm_review_ask_dismissed', false);
-            // Review CTA only on 2nd+ clean success for this site, unless permanently dismissed.
+            // Review CTA on every clean verified success, first one included, unless permanently dismissed.
             update_option('ocm_show_review_cta', (!$dismissed && $clean_count >= 1) ? 1 : 0, false);
         }
         One_Click_Migration::reset_actions_start_mark();
@@ -1484,10 +1496,13 @@ class OCM_Backup
                 if(file_exists(OCM_PLUGIN_WRITABLE_PATH . "db")){
                   // Suppressed: generates one log line per table, causing excessive log noise
                   // One_Click_Migration::write_to_log(sprintf(' SYSLOG: Table being backed up: "%s"', $t));
-                  OCM_SQL_Utils::export([$file], [
+                  $exported = OCM_SQL_Utils::export([$file], [
                       'tables' => $t,
                       'quick' => null
                   ]);
+                  if ($exported === false) {
+                      return self::fail_part_upload('db', sprintf('SQL dump write failed for table "%s"', $t));
+                  }
 
                 }else{
                   return OCM_BackgroundBackup::RETURN_TYPE_END_PROCESSS;
@@ -1577,10 +1592,17 @@ class OCM_Backup
               $zip_filepath = OCM_PLUGIN_WRITABLE_PATH . 'db.zip.crypt';
           }
 
-          $return = OCM_S3::upload_zip($zip_filepath);
-          if (in_array($return, [OCM_BackgroundBackup::RETURN_TYPE_STOP_PROCESSS, OCM_BackgroundBackup::RETURN_TYPE_END_PROCESSS], true))
-          {
-             return $return;
+          if (!is_string($zip_filepath) || !is_file($zip_filepath) || !is_readable($zip_filepath)) {
+              return self::fail_part_upload('db', 'encrypted archive is missing or unreadable');
+          }
+
+          try {
+              $return = OCM_S3::upload_zip($zip_filepath);
+          } catch (\Throwable $e) {
+              return self::fail_part_upload('db', $e->getMessage());
+          }
+          if ($return !== true) {
+              return self::fail_part_upload('db', 'storage did not confirm the encrypted archive upload');
           }
 
           if (!One_Click_Migration::$process_backup_single->time_exceeded()) {
@@ -1624,6 +1646,9 @@ class OCM_Backup
         $skipped_restore_files = get_option('ocm_skipped_folders', []);
 
         if (!self::create_native_zip_from_directory($filepath, $filename)) {
+            if (self::$archive_backend_failed) {
+                return false;
+            }
             $zip = new ZipFile();
             $dir = new DirectoryIterator($filepath);
             foreach ($dir as $fileinfo) {
@@ -1787,6 +1812,11 @@ class OCM_Backup
             try {
                 One_Click_Migration::write_to_log(sprintf('Archiving %s to %s', $folder_name, $filename));
                 if (!self::create_native_zip_from_directory($folder_path, $filename)) {
+                    if (self::$archive_backend_failed) {
+                        error_reporting($old_error_reporting);
+                        self::fail_backup(sprintf('archive creation failed for "%s" (see previous error line)', $folder_name));
+                        return OCM_BackgroundBackup::RETURN_TYPE_END_PROCESSS;
+                    }
                     /** @var SplFileInfo[] $files */
                     $files = new RecursiveIteratorIterator(
                         new RecursiveDirectoryIterator($folder_path, \FilesystemIterator::SKIP_DOTS),
@@ -1976,16 +2006,25 @@ class OCM_Backup
                 } else {
                     One_Click_Migration::write_to_log(sprintf(' SYSLOG: %s upload skipped - encrypted zip file not found at %s', $folder_name, $expected_path));
                     error_reporting($old_error_reporting);
-                    return false;
+                    return self::fail_part_upload($folder_name, 'encrypted archive is missing');
                 }
             }
 
             One_Click_Migration::write_to_log(sprintf('%s folder upload has been started.', $folder_name));
-            $return = OCM_S3::upload_zip($zip_filepath);
-
-            if (in_array($return, [OCM_BackgroundBackup::RETURN_TYPE_STOP_PROCESSS, OCM_BackgroundBackup::RETURN_TYPE_END_PROCESSS], true)) {
+            if (!is_string($zip_filepath) || !is_file($zip_filepath) || !is_readable($zip_filepath)) {
                 error_reporting($old_error_reporting);
-                return $return;
+                return self::fail_part_upload($folder_name, 'encrypted archive is missing or unreadable');
+            }
+
+            try {
+                $return = OCM_S3::upload_zip($zip_filepath);
+            } catch (\Throwable $e) {
+                error_reporting($old_error_reporting);
+                return self::fail_part_upload($folder_name, $e->getMessage());
+            }
+            if ($return !== true) {
+                error_reporting($old_error_reporting);
+                return self::fail_part_upload($folder_name, 'storage did not confirm the encrypted archive upload');
             }
 
             if (!One_Click_Migration::$process_backup_single->time_exceeded()) {
@@ -2273,6 +2312,30 @@ class OCM_Backup
 
     private static function create_native_zip_from_directory($folder_path, $filename)
     {
+        self::$archive_backend_failed = false;
+        $close_marker = 'ocm_zip_close_in_progress_' . md5($filename);
+
+        // Normal sites always use ZipArchive. This marker survives a PHP
+        // timeout/worker death inside close(); only that retry takes the slower
+        // monitored system-zip failover.
+        if (get_option($close_marker, false)) {
+            One_Click_Migration::write_to_log(sprintf(
+                'Notice: Previous ZipArchive::close() did not finish for "%s"; switching to slower monitored zip failover.',
+                basename($filename)
+            ));
+            $failover_result = self::create_cli_zip_from_directory($folder_path, $filename);
+            if ($failover_result === true) {
+                delete_option($close_marker);
+                return true;
+            }
+            self::$archive_backend_failed = true;
+            One_Click_Migration::write_to_log(sprintf(
+                'Error: Slower zip failover was unavailable or failed for "%s".',
+                basename($filename)
+            ));
+            return false;
+        }
+
         if (!class_exists('ZipArchive')) {
             return false;
         }
@@ -2343,7 +2406,126 @@ class OCM_Backup
             $queued_bytes
         ));
 
-        return $zip->close();
+        update_option($close_marker, time(), false);
+        $closed = $zip->close();
+        if ($closed) {
+            delete_option($close_marker);
+            return true;
+        }
+
+        One_Click_Migration::write_to_log(sprintf(
+            'Notice: ZipArchive::close() failed for "%s"; switching to slower monitored zip failover.',
+            basename($filename)
+        ));
+        $failover_result = self::create_cli_zip_from_directory($folder_path, $filename);
+        if ($failover_result === true) {
+            delete_option($close_marker);
+            return true;
+        }
+        self::$archive_backend_failed = true;
+        return false;
+    }
+
+    /**
+     * Slower failover used only after ZipArchive::close() failed or a persisted
+     * marker proves it hung/timed out. It streams outside PHP and keeps worker
+     * heartbeats moving instead of entering another uninterruptible close().
+     */
+    private static function create_cli_zip_from_directory($folder_path, $filename)
+    {
+        if (!is_dir($folder_path)) {
+            return null;
+        }
+
+        if (!self::directory_contains_files($folder_path)) {
+            @unlink($filename);
+            $empty_zip = hex2bin('504b0506000000000000000000000000000000000000');
+            return is_string($empty_zip)
+                && file_put_contents($filename, $empty_zip) === strlen($empty_zip);
+        }
+
+        if (DIRECTORY_SEPARATOR !== '/' || !function_exists('proc_open')) {
+            return null;
+        }
+
+        $probe = @proc_open(
+            '/usr/bin/env zip -v',
+            array(
+                1 => array('file', '/dev/null', 'w'),
+                2 => array('file', '/dev/null', 'w'),
+            ),
+            $probe_pipes
+        );
+        if (!is_resource($probe) || proc_close($probe) !== 0) {
+            return null;
+        }
+
+        @unlink($filename);
+        $process = @proc_open(
+            '/usr/bin/env zip -0 -q -r ' . escapeshellarg($filename) . ' .',
+            array(
+                1 => array('file', '/dev/null', 'w'),
+                2 => array('pipe', 'w'),
+            ),
+            $pipes,
+            $folder_path
+        );
+        if (!is_resource($process)) {
+            return null;
+        }
+
+        stream_set_blocking($pipes[2], false);
+        $error = '';
+        do {
+            $status = proc_get_status($process);
+            $error .= (string) stream_get_contents($pipes[2]);
+            if (strlen($error) > 2000) {
+                $error = substr($error, -2000);
+            }
+            One_Click_Migration::worker_heartbeat();
+            @set_time_limit(One_Click_Migration::get_timeout());
+            if (!empty($status['running'])) {
+                sleep(1);
+            }
+        } while (!empty($status['running']));
+
+        $error .= (string) stream_get_contents($pipes[2]);
+        fclose($pipes[2]);
+        $exit_code = proc_close($process);
+        if ($exit_code === -1 && isset($status['exitcode'])) {
+            $exit_code = (int) $status['exitcode'];
+        }
+
+        if ($exit_code !== 0 || !is_file($filename) || filesize($filename) === 0) {
+            @unlink($filename);
+            One_Click_Migration::write_to_log(sprintf(
+                'Error: Monitored system zip failed for "%s" (exit=%d): %s',
+                basename($filename),
+                $exit_code,
+                substr(trim($error), 0, 500)
+            ));
+            return false;
+        }
+
+        One_Click_Migration::write_to_log(sprintf(
+            ' SYSLOG: Created "%s" with monitored system zip.',
+            basename($filename)
+        ));
+        return true;
+    }
+
+    private static function directory_contains_files($folder_path)
+    {
+        $files = new RecursiveIteratorIterator(
+            new RecursiveDirectoryIterator($folder_path, \FilesystemIterator::SKIP_DOTS),
+            RecursiveIteratorIterator::LEAVES_ONLY
+        );
+        foreach ($files as $file) {
+            if ($file->isFile()) {
+                return true;
+            }
+        }
+        return false;
     }
 
 
@@ -3836,49 +4018,17 @@ class OCM_Backup
         // Detect source table prefix from backup SQL filenames (via usermeta.sql).
         $source_prefix = is_dir($dbfiles)
             ? OCM_SQL_Utils::get_table_prefix($dbfiles . 'dummy.sql')
-            : 'wp_';
+            : false;
+        if ($source_prefix === false || $source_prefix === '') {
+            One_Click_Migration::write_to_log('Error: Database restore could not determine one unambiguous source table prefix.');
+            return false;
+        }
         One_Click_Migration::write_to_log(sprintf(
             'Detected source_prefix="%s" dest_base_prefix="%s" dest_prefix="%s"',
             $source_prefix,
             $wpdb->base_prefix,
             $wpdb->prefix
         ));
-
-        // Only drop tables that match the destination prefix.
-        // Each SQL file already contains DROP TABLE IF EXISTS for its own table,
-        // so we only need to clean up destination-prefix tables that might not
-        // have a corresponding file in the backup (e.g. plugin tables that existed
-        // on destination but not on source).
-        $tables = $wpdb->get_results('SHOW TABLES');
-        foreach ($tables as $table) {
-            foreach ($table as $table_name) {
-                if (strpos($table_name, $wpdb->base_prefix) === 0) {
-                    $wpdb->query('DROP TABLE IF EXISTS `' . esc_sql($table_name) . '`');
-                }
-            }
-        }
-
-        // DROP only removes dest base_prefix tables; foreign-prefix leftovers (e.g.
-        // ktv_options, nst_options) remain. Never use them for the siteurl/home gate.
-        $leftover_foreign_options = 0;
-        $tables_after_drop = $wpdb->get_results('SHOW TABLES');
-        foreach ($tables_after_drop as $table) {
-            foreach ($table as $table_name) {
-                if (
-                    substr($table_name, -8) === '_options'
-                    && strpos($table_name, $wpdb->base_prefix) !== 0
-                ) {
-                    $leftover_foreign_options++;
-                }
-            }
-        }
-        if ($leftover_foreign_options > 0) {
-            One_Click_Migration::write_to_log(sprintf(
-                'Notice: Found %d leftover foreign-prefix *_options table(s) on destination; siteurl/home gate will use "%soptions" only.',
-                $leftover_foreign_options,
-                $wpdb->base_prefix
-            ));
-        }
 
         $dir = new DirectoryIterator($dbfiles);
         $found_files = array();
@@ -3921,11 +4071,50 @@ class OCM_Backup
 
         sleep(1);
 
+        // Remap and validate every dump before destroying any destination table.
         foreach ($sorted_table_list as $filepath) {
             if (!OCM_SQL_Utils::swap_table_prefix($filepath)) {
                 One_Click_Migration::write_to_log(sprintf('Error: Database restore failed while remapping the table prefix in "%s".', basename($filepath)));
                 return false;
             }
+            if (!is_file($filepath) || !is_readable($filepath) || filesize($filepath) === 0) {
+                One_Click_Migration::write_to_log(sprintf('Error: Database restore rejected invalid SQL dump "%s".', basename($filepath)));
+                return false;
+            }
+        }
+
+        $review_options = self::snapshot_destination_review_options($wpdb);
+
+        // Only after every dump passed do we remove destination-prefix tables.
+        $tables = $wpdb->get_results('SHOW TABLES');
+        foreach ($tables as $table) {
+            foreach ($table as $table_name) {
+                if (strpos($table_name, $wpdb->base_prefix) === 0) {
+                    $wpdb->query('DROP TABLE IF EXISTS `' . esc_sql($table_name) . '`');
+                }
+            }
+        }
+
+        $leftover_foreign_options = 0;
+        $tables_after_drop = $wpdb->get_results('SHOW TABLES');
+        foreach ($tables_after_drop as $table) {
+            foreach ($table as $table_name) {
+                if (substr($table_name, -8) === '_options'
+                    && strpos($table_name, $wpdb->base_prefix) !== 0
+                ) {
+                    $leftover_foreign_options++;
+                }
+            }
+        }
+        if ($leftover_foreign_options > 0) {
+            One_Click_Migration::write_to_log(sprintf(
+                'Notice: Found %d leftover foreign-prefix *_options table(s) on destination; siteurl/home gate will use "%soptions" only.',
+                $leftover_foreign_options,
+                $wpdb->base_prefix
+            ));
+        }
+
+        foreach ($sorted_table_list as $filepath) {
             if (!OCM_SQL_Utils::import($filepath, $source_prefix, $wpdb->base_prefix)) {
                 One_Click_Migration::write_to_log(sprintf('Error: Database restore failed while importing "%s".', basename($filepath)));
                 return false;
@@ -3981,6 +4170,8 @@ class OCM_Backup
                         array('%s')
                     );
                 }
+
+                self::restore_destination_review_options($wpdb, $review_options);
             }
         }
         // Clear any stale background process queues imported from the source site's database
@@ -3989,6 +4180,44 @@ class OCM_Backup
 
         One_Click_Migration::write_to_log('Database has been restored');
         return true;
+    }
+
+    private static function snapshot_destination_review_options(wpdb $wpdb)
+    {
+        $table = $wpdb->base_prefix . 'options';
+        $rows = $wpdb->get_results(
+            $wpdb->prepare(
+                "SELECT option_name, option_value, autoload FROM {$table} WHERE option_name IN (%s, %s)",
+                'ocm_review_ask_dismissed',
+                'ocm_clean_restore_count'
+            ),
+            ARRAY_A
+        );
+        return is_array($rows) ? $rows : array();
+    }
+
+    private static function restore_destination_review_options(wpdb $wpdb, $rows)
+    {
+        if (!is_array($rows)) {
+            return;
+        }
+
+        $table = $wpdb->base_prefix . 'options';
+        foreach ($rows as $row) {
+            if (!is_array($row) || !isset($row['option_name'], $row['option_value'], $row['autoload'])) {
+                continue;
+            }
+            $wpdb->replace(
+                $table,
+                array(
+                    'option_name' => $row['option_name'],
+                    'option_value' => $row['option_value'],
+                    'autoload' => $row['autoload'],
+                ),
+                array('%s', '%s', '%s')
+            );
+            wp_cache_delete($row['option_name'], 'options');
+        }
     }
 
     /**
@@ -4180,12 +4409,23 @@ class OCM_Backup
     public static function get_backup_missing_parts()
     {
         $skipped = get_option('ocm_skipped_folders', []);
+        $excluded = get_option('ocm_excluded_folders', array());
+        $excluded = is_array($excluded) ? $excluded : array();
         $missing = array();
         foreach ((is_array($skipped) ? $skipped : array()) as $part) {
             if (is_string($part) && $part !== '') {
                 $missing[] = strtolower($part);
             }
         }
+
+        foreach (array('db', 'themes', 'plugins', 'uploads') as $part) {
+            if (!in_array($part, $excluded, true)
+                && !self::check_is_complete_backup_step($part, self::STEP_BACKUP_CHILD_UPLOAD)
+            ) {
+                $missing[] = $part;
+            }
+        }
+
         $missing = array_values(array_unique($missing));
         sort($missing);
         return $missing;

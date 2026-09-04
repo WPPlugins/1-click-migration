@@ -53,6 +53,40 @@ namespace {
     use OCM\OCM_SQL_Utils;
     use OCM\One_Click_Migration;
 
+    class OCM_Short_Write_Stream
+    {
+        public static $data = '';
+        public static $fail_after = PHP_INT_MAX;
+
+        public function stream_open($path, $mode, $options, &$opened_path)
+        {
+            self::$data = '';
+            return true;
+        }
+
+        public function stream_write($data)
+        {
+            $remaining = self::$fail_after - strlen(self::$data);
+            if ($remaining <= 0) {
+                return 0;
+            }
+            $written = min(3, $remaining, strlen($data));
+            self::$data .= substr($data, 0, $written);
+            return $written;
+        }
+
+        public function stream_eof()
+        {
+            return true;
+        }
+
+        public function stream_stat()
+        {
+            return array();
+        }
+    }
+    stream_wrapper_register('ocmshort', OCM_Short_Write_Stream::class);
+
     // Fake $wpdb: records every executed query, never errors.
     $GLOBALS['wpdb'] = new class {
         public $base_prefix = 'eol_';
@@ -238,6 +272,62 @@ namespace {
 
     check('enforce on an already-clean dump is a silent no-op', true === OCM_SQL_Utils::enforce_statement_table_prefix($straggler, 'wp_', 'eol_'));
     check('clean dump unchanged', file_get_contents($straggler) === $repaired);
+
+    // --- 6. Checked writes and canonical source-prefix detection -------------
+    echo "checked writes and source-prefix detection:\n";
+
+    OCM_Short_Write_Stream::$fail_after = PHP_INT_MAX;
+    $short_handle = fopen('ocmshort://success', 'wb');
+    check('write_all completes repeated short writes', OCM_SQL_Utils::write_all($short_handle, 'abcdefghij'));
+    check('write_all preserves every byte', OCM_Short_Write_Stream::$data === 'abcdefghij');
+    fclose($short_handle);
+
+    OCM_Short_Write_Stream::$fail_after = 5;
+    $short_handle = fopen('ocmshort://failure', 'wb');
+    check('write_all reports a zero/failed continuation', !OCM_SQL_Utils::write_all($short_handle, 'abcdefghij'));
+    check('failed write is visibly truncated', strlen(OCM_Short_Write_Stream::$data) === 5);
+    fclose($short_handle);
+
+    if (!defined('WP_DEBUG')) {
+        define('WP_DEBUG', false);
+    }
+    if (!defined('ARRAY_N')) {
+        define('ARRAY_N', 'ARRAY_N');
+    }
+    if (!defined('ARRAY_A')) {
+        define('ARRAY_A', 'ARRAY_A');
+    }
+    $original_wpdb = $GLOBALS['wpdb'];
+    $GLOBALS['wpdb'] = new class {
+        public function get_results($query, $format = null)
+        {
+            if (strpos($query, 'DESCRIBE ') === 0) {
+                return array((object) array('Type' => 'int(11)', 'Field' => 'id', 'Default' => null));
+            }
+            if (strpos($query, 'SHOW CREATE TABLE ') === 0) {
+                return array(array('wp_test', 'CREATE TABLE `wp_test` (`id` int(11)) ENGINE=InnoDB'));
+            }
+            if (strpos($query, 'SELECT * FROM ') === 0) {
+                return array();
+            }
+            return false;
+        }
+    };
+    OCM_Short_Write_Stream::$fail_after = 20;
+    check(
+        'export_table propagates a short dump write',
+        false === OCM_SQL_Utils::export_table(array('tables' => 'wp_test', 'result-file' => 'ocmshort://dump'))
+    );
+    $GLOBALS['wpdb'] = $original_wpdb;
+
+    file_put_contents($work . '/db/other_usermeta.sql', "DROP TABLE IF EXISTS other_usermeta;\n");
+    One_Click_Migration::$log = array();
+    check(
+        'ambiguous canonical usermeta dumps are rejected',
+        false === OCM_SQL_Utils::get_table_prefix($work . '/db/dummy.sql')
+    );
+    check('ambiguity is logged', 1 === count(preg_grep('/Expected exactly one canonical/', One_Click_Migration::$log)));
+    @unlink($work . '/db/other_usermeta.sql');
 
     // ---------------------------------------------------------------------------
     foreach (glob($work . '/db/*') as $f) {

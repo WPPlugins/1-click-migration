@@ -440,45 +440,33 @@ body.ocm-modal-open { overflow: hidden; }
     margin: 0 0 20px; color: var(--ocm-muted); font-size: 13.5px; line-height: 1.5;
 }
 .ocm-modal-actions {
-    display: flex;
-    flex-direction: column;
-    align-items: stretch;
-    gap: 8px;
-    margin-top: 4px;
+    display: flex; flex-direction: column;
+    align-items: stretch; gap: 10px;
 }
+/* ID-qualified so WP admin `a { color }` / `a:focus { box-shadow }` cannot win:
+   the modal is appended to <body>, outside .ocm-app. */
 #ocm-restore-success-modal a.ocm-modal-review {
-    display: flex;
     box-sizing: border-box;
-    width: 100%;
-    height: 48px;
-    margin: 0;
-    padding: 0 18px;
-    align-items: center;
-    justify-content: center;
-    text-align: center;
-    font-size: 15px;
-    font-weight: 700;
-    line-height: 1;
-    letter-spacing: 0;
-    background: #0b2a5b;
-    color: #ffffff !important;
-    text-decoration: none !important;
-    border: 0;
-    border-radius: 10px;
-    box-shadow: none;
+    display: flex; align-items: center; justify-content: center;
+    width: 100%; height: 48px;
+    background: #0b2a5b; color: #ffffff;
+    font-size: 15px; font-weight: 700; line-height: 1;
+    text-align: center; text-decoration: none;
+}
+#ocm-restore-success-modal a.ocm-modal-review:visited {
+    color: #ffffff;
 }
 #ocm-restore-success-modal a.ocm-modal-review:hover,
 #ocm-restore-success-modal a.ocm-modal-review:focus,
-#ocm-restore-success-modal a.ocm-modal-review:visited,
 #ocm-restore-success-modal a.ocm-modal-review:active {
-    background: #143a78;
-    color: #ffffff !important;
-    text-decoration: none !important;
+    background: #143a78; color: #ffffff; text-decoration: none;
 }
-.ocm-modal-dismiss { width: 100%; box-sizing: border-box; }
-.ocm-modal-never {
-    display: flex;
-    justify-content: center;
-    margin: 0;
-    font-size: 12.5px;
+#ocm-restore-success-modal a.ocm-modal-review:focus {
+    outline: none;
+    box-shadow: 0 0 0 3px rgba(11, 42, 91, .28);
+}
+.ocm-modal-dismiss { width: 100%; }
+
+#ocm-restore-success-modal .ocm-modal-never {
+    align-self: center; margin: 0; font-size: 12.5px;
 }

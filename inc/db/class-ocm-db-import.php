@@ -18,6 +18,8 @@ class OCM_SQL_Utils
     protected static $mysqldump_support_logged = false;
     protected static $db_backup_progress_logged = false;
     protected static $windows_logged = false;
+    /** @var bool SET NAMES already applied on the raw import handle this file. */
+    protected static $import_charset_applied = false;
     protected static $descriptors = array(
         array('pipe', 'r'),
         array('pipe', 'w'),
@@ -288,14 +290,14 @@ class OCM_SQL_Utils
 	        /** @var wpdb $wpdb */
 	        global $wpdb,$EZSQL_ERROR;
 
-	        $has_check_current_query = property_exists($wpdb, 'check_current_query');
-	        $previous_check_current_query = $has_check_current_query ? $wpdb->check_current_query : null;
-
 	        $handle = @fopen($result_file, 'rb');
 	        if (!$handle) {
 	            One_Click_Migration::write_to_log(sprintf('Error: Could not open SQL file "%s" for import.', $result_file));
 	            return false;
 	        }
+
+	        self::reset_import_runtime_state();
+	        self::log_import_driver($wpdb, $result_file);
 
 	        $error_count = 0;
 	        $statement_index = 0;
@@ -322,8 +324,6 @@ class OCM_SQL_Utils
 	                    $result_file,
 	                    $statement_index,
 	                    $error_count,
-	                    $has_check_current_query,
-	                    $previous_check_current_query,
 	                    $source_prefix,
 	                    $dest_prefix,
 	                    $remapped_statements
@@ -347,8 +347,6 @@ class OCM_SQL_Utils
 	                        $result_file,
 	                        $statement_index,
 	                        $error_count,
-	                        $has_check_current_query,
-	                        $previous_check_current_query,
 	                        $source_prefix,
 	                        $dest_prefix,
 	                        $remapped_statements
@@ -361,10 +359,6 @@ class OCM_SQL_Utils
 	            }
 	        }
 	        fclose($handle);
-
-	        if ($has_check_current_query) {
-	            $wpdb->check_current_query = $previous_check_current_query;
-	        }
 
 	        if ($remapped_statements > 0) {
 	            One_Click_Migration::write_to_log(sprintf(
@@ -395,14 +389,12 @@ class OCM_SQL_Utils
      * @param string $result_file
      * @param int    $statement_index
      * @param int    $error_count
-     * @param bool   $has_check_current_query
-     * @param mixed  $previous_check_current_query
      * @param string $source_prefix   Table prefix of the backup being imported.
      * @param string $dest_prefix     Destination site table prefix.
      * @param int    $remapped_count  Incremented when a statement head is remapped.
      * @return bool
      */
-    private static function execute_imported_query($query, $result_file, &$statement_index, &$error_count, $has_check_current_query, $previous_check_current_query, $source_prefix = '', $dest_prefix = '', &$remapped_count = 0)
+    private static function execute_imported_query($query, $result_file, &$statement_index, &$error_count, $source_prefix = '', $dest_prefix = '', &$remapped_count = 0)
     {
         global $wpdb, $EZSQL_ERROR;
 
@@ -424,10 +416,11 @@ class OCM_SQL_Utils
 
         $statement_index++;
         $wpdb->last_error = '';
-        if ($has_check_current_query) {
-            $wpdb->check_current_query = false;
-        }
-        $wpdb->query($query);
+        // Prefer the raw mysqli handle. $wpdb->query() runs strip_invalid_text
+        // on non-ASCII SQL and rejects large options INSERTs that MySQL
+        // itself would accept — field backup 65a0b1d5, Turkish WP error
+        // "Sorgu, içinde geçersiz veriler bulunduğundan işlenemedi".
+        self::query_imported_sql($wpdb, $query);
         if (!empty($wpdb->last_error)) {
             $error_str = !empty($EZSQL_ERROR[0]['error_str']) ? $EZSQL_ERROR[0]['error_str'] : $wpdb->last_error;
             One_Click_Migration::write_to_log(sprintf('Error: DB Restore. Table: "%s" error_str: "%s"', $result_file, $error_str));
@@ -436,14 +429,289 @@ class OCM_SQL_Utils
 
             if (stripos($query, 'CREATE TABLE') !== false) {
                 One_Click_Migration::write_to_log(sprintf('Critical: CREATE TABLE failed for "%s". Aborting import of this file.', $result_file));
-                if ($has_check_current_query) {
-                    $wpdb->check_current_query = $previous_check_current_query;
-                }
                 return false;
             }
         }
 
         return true;
+    }
+
+    /**
+     * Reset per-file import driver state (charset SET NAMES latch).
+     */
+    public static function reset_import_runtime_state()
+    {
+        self::$import_charset_applied = false;
+    }
+
+    /**
+     * Execute one remapped dump statement, preferring the raw mysqli/driver
+     * handle so WordPress cannot strip_invalid_text() the SQL.
+     *
+     * @param object $wpdb
+     * @param string $query
+     * @return bool
+     */
+    public static function query_imported_sql($wpdb, $query)
+    {
+        $dbh = self::get_raw_import_driver($wpdb);
+        if ($dbh !== null) {
+            self::apply_import_connection_charset($wpdb, $dbh);
+            try {
+                $result = self::raw_driver_query($dbh, $query);
+            } catch (\Throwable $e) {
+                if (is_object($wpdb)) {
+                    $wpdb->last_error = $e->getMessage();
+                }
+                return false;
+            }
+            if ($result === false) {
+                if (is_object($wpdb)) {
+                    $wpdb->last_error = self::raw_driver_error($dbh);
+                }
+                return false;
+            }
+            if (is_object($wpdb)) {
+                $wpdb->last_error = '';
+            }
+            return true;
+        }
+
+        return self::query_imported_sql_via_wpdb($wpdb, $query);
+    }
+
+    /**
+     * Raw mysqli (or a query()+error test double) on $wpdb->dbh, after a
+     * lazy reconnect if the handle is not up yet.
+     *
+     * @param object $wpdb
+     * @return object|null
+     */
+    public static function get_raw_import_driver($wpdb)
+    {
+        if (!is_object($wpdb)) {
+            return null;
+        }
+
+        self::ensure_wpdb_connection($wpdb);
+
+        if (isset($wpdb->dbh) && self::is_raw_import_driver($wpdb->dbh)) {
+            return $wpdb->dbh;
+        }
+
+        return null;
+    }
+
+    /**
+     * True for a real mysqli connection or a driver double that exposes
+     * query() plus a public $error property (mysqli-shaped).
+     *
+     * @param mixed $dbh
+     * @return bool
+     */
+    public static function is_raw_import_driver($dbh)
+    {
+        if (!is_object($dbh)) {
+            return false;
+        }
+        if ($dbh instanceof \mysqli) {
+            return true;
+        }
+        return method_exists($dbh, 'query') && property_exists($dbh, 'error');
+    }
+
+    /**
+     * Connection charset for dump import. utf8/utf8mb3 is promoted to
+     * utf8mb4 so 4-byte option values are not rejected by a 3-byte client
+     * charset. Other charsets (latin1, etc.) are left as-is.
+     *
+     * @param object|null $wpdb
+     * @return string
+     */
+    public static function preferred_import_charset($wpdb)
+    {
+        $candidates = array();
+        if (is_object($wpdb) && isset($wpdb->charset) && is_string($wpdb->charset)) {
+            $candidates[] = $wpdb->charset;
+        }
+        if (defined('DB_CHARSET') && is_string(DB_CHARSET) && DB_CHARSET !== '') {
+            $candidates[] = DB_CHARSET;
+        }
+
+        foreach ($candidates as $candidate) {
+            $name = self::sanitize_mysql_ident($candidate);
+            if ($name === '') {
+                continue;
+            }
+            if ($name === 'utf8' || $name === 'utf8mb3') {
+                return 'utf8mb4';
+            }
+            return $name;
+        }
+
+        return 'utf8mb4';
+    }
+
+    private static function log_import_driver($wpdb, $result_file)
+    {
+        $raw = self::get_raw_import_driver($wpdb) !== null;
+        One_Click_Migration::write_to_log(sprintf(
+            'SYSLOG: SQL import of "%s" using %s.',
+            basename($result_file),
+            $raw
+                ? 'raw mysqli/driver path (bypassing $wpdb->query strip_invalid_text)'
+                : '$wpdb->query fallback (no raw mysqli handle)'
+        ));
+    }
+
+    private static function ensure_wpdb_connection($wpdb)
+    {
+        if (!is_object($wpdb)) {
+            return;
+        }
+        if (!empty($wpdb->dbh) && self::is_raw_import_driver($wpdb->dbh)) {
+            return;
+        }
+        if (method_exists($wpdb, 'check_connection')) {
+            $wpdb->check_connection(false);
+            return;
+        }
+        if (method_exists($wpdb, 'db_connect')) {
+            $wpdb->db_connect(false);
+        }
+    }
+
+    private static function apply_import_connection_charset($wpdb, $dbh)
+    {
+        if (self::$import_charset_applied) {
+            return;
+        }
+        self::$import_charset_applied = true;
+
+        $charset = self::preferred_import_charset($wpdb);
+        if ($charset === '') {
+            return;
+        }
+
+        $collate = self::preferred_import_collate($wpdb);
+        if ($charset === 'utf8mb4' && $collate !== '' && strpos($collate, 'utf8mb4_') !== 0) {
+            // Do not pair SET NAMES utf8mb4 with a leftover utf8_* collation.
+            $collate = '';
+        }
+
+        if ($dbh instanceof \mysqli && function_exists('mysqli_set_charset')) {
+            @mysqli_set_charset($dbh, $charset);
+        }
+
+        $sql = 'SET NAMES ' . $charset;
+        if ($collate !== '') {
+            $sql .= ' COLLATE ' . $collate;
+        }
+
+        try {
+            self::raw_driver_query($dbh, $sql);
+        } catch (\Throwable $e) {
+            // Charset apply is best-effort; the INSERT path still proceeds.
+        }
+    }
+
+    private static function preferred_import_collate($wpdb)
+    {
+        $candidates = array();
+        if (is_object($wpdb) && isset($wpdb->collate) && is_string($wpdb->collate)) {
+            $candidates[] = $wpdb->collate;
+        }
+        if (defined('DB_COLLATE') && is_string(DB_COLLATE) && DB_COLLATE !== '') {
+            $candidates[] = DB_COLLATE;
+        }
+
+        foreach ($candidates as $candidate) {
+            $name = self::sanitize_mysql_ident($candidate);
+            if ($name !== '') {
+                return $name;
+            }
+        }
+
+        return '';
+    }
+
+    /**
+     * Allow only charset / collation identifiers in SET NAMES.
+     *
+     * @param string $name
+     * @return string
+     */
+    private static function sanitize_mysql_ident($name)
+    {
+        $name = strtolower(trim((string) $name));
+        if ($name === '' || !preg_match('/^[a-z0-9_]+$/', $name)) {
+            return '';
+        }
+        return $name;
+    }
+
+    private static function raw_driver_query($dbh, $query)
+    {
+        if ($dbh instanceof \mysqli) {
+            if (function_exists('mysqli_query')) {
+                return mysqli_query($dbh, $query);
+            }
+            return $dbh->query($query);
+        }
+        if (is_object($dbh) && method_exists($dbh, 'query')) {
+            return $dbh->query($query);
+        }
+        return false;
+    }
+
+    private static function raw_driver_error($dbh)
+    {
+        if (is_object($dbh) && isset($dbh->error) && is_string($dbh->error) && $dbh->error !== '') {
+            return $dbh->error;
+        }
+        if ($dbh instanceof \mysqli && function_exists('mysqli_error')) {
+            $err = mysqli_error($dbh);
+            return is_string($err) ? $err : '';
+        }
+        return '';
+    }
+
+    private static function query_imported_sql_via_wpdb($wpdb, $query)
+    {
+        if (!is_object($wpdb) || !method_exists($wpdb, 'query')) {
+            return false;
+        }
+
+        try {
+            $result = $wpdb->query($query);
+        } catch (\Throwable $e) {
+            $wpdb->last_error = $e->getMessage();
+            return false;
+        }
+
+        if ($result === false && self::looks_like_wp_invalid_data_error(isset($wpdb->last_error) ? $wpdb->last_error : '')) {
+            One_Click_Migration::write_to_log(
+                'Notice: $wpdb rejected a dump statement as invalid data (strip_invalid_text). Raw mysqli driver was not available on this host.'
+            );
+        }
+
+        return $result !== false;
+    }
+
+    /**
+     * WordPress wpdb::query() last_error after strip_invalid_text_from_query()
+     * rejects the SQL. Includes the Turkish translation seen on backup 65a0b1d5.
+     *
+     * @param string $error
+     * @return bool
+     */
+    public static function looks_like_wp_invalid_data_error($error)
+    {
+        if (!is_string($error) || $error === '') {
+            return false;
+        }
+        return (stripos($error, 'invalid data') !== false)
+            || (stripos($error, 'geçersiz veriler') !== false);
     }
 
     private static function prepare_sql_query($query)
@@ -569,20 +837,30 @@ class OCM_SQL_Utils
         }
 
         // Add SQL statement to drop existing table
-        self::add_sql_line("\n# Delete any existing table $table \n\n");
-        self::add_sql_line("DROP TABLE IF EXISTS $table;");
+        if (!self::add_sql_line("\n# Delete any existing table $table \n\n")
+            || !self::add_sql_line("DROP TABLE IF EXISTS $table;")
+        ) {
+            self::close_sql_dump();
+            return false;
+        }
 
         // Table structure
         // Comment in SQL-file
 
         $description = 'table';
 
-        self::add_sql_line("\n# Table structure of $description $table\n\n");
+        if (!self::add_sql_line("\n# Table structure of $description $table\n\n")) {
+            self::close_sql_dump();
+            return false;
+        }
 
         $create_table = $wpdb->get_results("SHOW CREATE TABLE $table", ARRAY_N);
         if (false === $create_table) {
             $err_msg = 'Error with SHOW CREATE TABLE for ' . $table;
-            self::add_sql_line("#\n# $err_msg\n#\n");
+            if (!self::add_sql_line("#\n# $err_msg\n#\n")) {
+                self::close_sql_dump();
+                return false;
+            }
             One_Click_Migration::write_to_log(sprintf('Could not created table "%s"', $table));
         }
         $create_line = self::str_lreplace('TYPE=', 'ENGINE=', $create_table[0][1]);
@@ -595,16 +873,25 @@ class OCM_SQL_Utils
             }
         }
 
-        self::add_sql_line($create_line . ' ;');
+        if (!self::add_sql_line($create_line . ' ;')) {
+            self::close_sql_dump();
+            return false;
+        }
 
         if (false === $table_structure) {
             $err_msg = sprintf("Error getting $description structure of %s", $table);
             One_Click_Migration::write_to_log(sprintf('Failed to get structure for table "%s"', $table));
-            self::add_sql_line("#\n# $err_msg\n#\n");
+            if (!self::add_sql_line("#\n# $err_msg\n#\n")) {
+                self::close_sql_dump();
+                return false;
+            }
         }
 
         // Comment in SQL-file
-        self::add_sql_line("\n\n# " . sprintf("Data contents of $description %s", $table) . "\n\n");
+        if (!self::add_sql_line("\n\n# " . sprintf("Data contents of $description %s", $table) . "\n\n")) {
+            self::close_sql_dump();
+            return false;
+        }
 
         $defs = array();
         $integer_fields = array();
@@ -661,14 +948,20 @@ class OCM_SQL_Utils
 
                     // Flush often so one INSERT statement never approaches remaining RAM.
                     if (strlen($thisEntry) > 65536) {
-                        self::add_sql_line(" \n" . $entries . $thisEntry . ';');
+                        if (!self::add_sql_line(" \n" . $entries . $thisEntry . ';')) {
+                            self::close_sql_dump();
+                            return false;
+                        }
                         $thisEntry = '';
                     }
 
                 }
 
                 if ($thisEntry) {
-                    self::add_sql_line(" \n" . $entries . $thisEntry . ';');
+                    if (!self::add_sql_line(" \n" . $entries . $thisEntry . ';')) {
+                        self::close_sql_dump();
+                        return false;
+                    }
                 }
 
                 $row_start += $row_inc;
@@ -676,11 +969,14 @@ class OCM_SQL_Utils
         } while (count($table_data) > 0);
 
         // Create footer/closing comment in SQL-file
-        self::add_sql_line("\n# End of data contents of table $table\n\n");
+        if (!self::add_sql_line("\n# End of data contents of table $table\n\n")) {
+            self::close_sql_dump();
+            return false;
+        }
         // Suppress frequent SYSLOG messages that cause progress bar jumping
         // if (WP_DEBUG === true) One_Click_Migration::write_to_log(sprintf('SYSLOG: End of data contents of table "%s"', $table));
 
-        self::close_sql_dump();
+        return self::close_sql_dump();
     }
 
     public static function export($args, $assoc_args)
@@ -752,22 +1048,26 @@ class OCM_SQL_Utils
     public static function get_table_prefix($result_file)
     {
         $parent_directory = dirname($result_file);
-        $table_name = '';
+        $matches = array();
 
-        foreach (scandir($parent_directory) as $k => $v) {
-            if (strpos($v, 'usermeta') !== false) {
-                $table_name = $v;
+        foreach (scandir($parent_directory) ?: array() as $filename) {
+            if (preg_match('/^(.+)usermeta\.sql$/i', $filename, $match)
+                && is_file($parent_directory . DIRECTORY_SEPARATOR . $filename)
+            ) {
+                $matches[$filename] = $match[1];
             }
         }
 
-        $split = explode('usermeta.sql', $table_name);
-        $prefix = $split[0];
-
-        if ($prefix) {
-            return $prefix;
+        if (count($matches) !== 1) {
+            One_Click_Migration::write_to_log(sprintf(
+                'Error: Expected exactly one canonical "*usermeta.sql" dump in "%s"; found %d.',
+                $parent_directory,
+                count($matches)
+            ));
+            return false;
         }
 
-        return 'wp_';
+        return (string) reset($matches);
     }
 
     /**
@@ -789,7 +1089,10 @@ class OCM_SQL_Utils
         global $wpdb;
 
         $old_table_prefix = self::get_table_prefix($filepath);
-        if ($old_table_prefix === '' || $old_table_prefix === $wpdb->base_prefix) {
+        if ($old_table_prefix === false || $old_table_prefix === '') {
+            return false;
+        }
+        if ($old_table_prefix === $wpdb->base_prefix) {
             return true;
         }
 
@@ -953,7 +1256,10 @@ class OCM_SQL_Utils
                     $nl = strpos($chunk, "\n", $offset);
                     $take = ($nl === false) ? $len - $offset : $nl - $offset + 1;
                     if ($out) {
-                        fwrite($out, substr($chunk, $offset, $take));
+                        if (!self::write_all($out, substr($chunk, $offset, $take))) {
+                            $ok = false;
+                            break 2;
+                        }
                     }
                     $offset += $take;
                     if ($nl !== false) {
@@ -982,7 +1288,10 @@ class OCM_SQL_Utils
                         $head = self::replace_statement_head_prefix($head, $pattern, $new_prefix);
                     }
                     if ($out) {
-                        fwrite($out, $head);
+                        if (!self::write_all($out, $head)) {
+                            $ok = false;
+                            break 2;
+                        }
                     }
                     $head = '';
                     if (!$line_complete) {
@@ -1000,7 +1309,7 @@ class OCM_SQL_Utils
                 }
             }
             if ($out) {
-                fwrite($out, $head);
+                $ok = self::write_all($out, $head);
             }
         }
 
@@ -1011,11 +1320,13 @@ class OCM_SQL_Utils
             }
             return $ok;
         }
-        fclose($out);
+        if (!fflush($out) || !fclose($out)) {
+            $ok = false;
+        }
 
         if (!$ok) {
             @unlink($tmp);
-            One_Click_Migration::write_to_log(sprintf('Error: Read failed while remapping table prefix in SQL file "%s"; file left unchanged.', $filepath));
+            One_Click_Migration::write_to_log(sprintf('Error: Read/write failed while remapping table prefix in SQL file "%s"; file left unchanged.', $filepath));
             return false;
         }
 
@@ -1025,12 +1336,9 @@ class OCM_SQL_Utils
         }
 
         if (!@rename($tmp, $filepath)) {
-            $copied = @copy($tmp, $filepath);
             @unlink($tmp);
-            if (!$copied) {
-                One_Click_Migration::write_to_log(sprintf('Error: Could not finalize prefix remap for SQL file "%s".', $filepath));
-                return false;
-            }
+            One_Click_Migration::write_to_log(sprintf('Error: Could not atomically finalize prefix remap for SQL file "%s"; original left unchanged.', $filepath));
+            return false;
         }
 
         return true;
@@ -1061,47 +1369,73 @@ class OCM_SQL_Utils
         return true;
     }
 
+    public static function write_all($handle, $data)
+    {
+        if (!is_resource($handle) || !is_string($data)) {
+            return false;
+        }
+
+        $offset = 0;
+        $length = strlen($data);
+        while ($offset < $length) {
+            $written = fwrite($handle, substr($data, $offset));
+            if ($written === false || $written === 0) {
+                return false;
+            }
+            $offset += $written;
+        }
+
+        return true;
+    }
+
     private static function add_sql_line($line)
     {
         // Write through to disk. Do not sprintf/concat into $sql_buffer — that
         // second copy is what OOM'd at :792 when WP had already used the limit.
         if (self::$sql_fh) {
             if (self::$sql_buffer !== '') {
-                self::flush_sql_dump();
+                if (!self::flush_sql_dump()) {
+                    return false;
+                }
             }
-            if (fwrite(self::$sql_fh, $line) === false || fwrite(self::$sql_fh, "\n") === false) {
+            if (!self::write_all(self::$sql_fh, $line) || !self::write_all(self::$sql_fh, "\n")) {
                 One_Click_Migration::write_to_log('Error: Failed to write SQL dump chunk to disk.');
+                return false;
             }
-            return;
+            return true;
         }
         self::$sql_buffer .= $line . "\n";
         if (strlen(self::$sql_buffer) >= self::SQL_STREAM_FLUSH_BYTES) {
-            self::flush_sql_dump();
+            return self::flush_sql_dump();
         }
+        return true;
     }
 
     private static function flush_sql_dump()
     {
         if (!self::$sql_fh || self::$sql_buffer === '') {
-            return;
+            return true;
         }
-        $written = fwrite(self::$sql_fh, self::$sql_buffer);
-        if ($written === false) {
+        if (!self::write_all(self::$sql_fh, self::$sql_buffer)) {
             One_Click_Migration::write_to_log('Error: Failed to write SQL dump chunk to disk.');
+            return false;
         }
         self::$sql_buffer = '';
         self::$sql_line = '';
+        return true;
     }
 
     private static function close_sql_dump()
     {
-        self::flush_sql_dump();
+        $ok = self::flush_sql_dump();
         if (self::$sql_fh) {
-            fclose(self::$sql_fh);
+            $ok = fflush(self::$sql_fh) && $ok;
+            $ok = fclose(self::$sql_fh) && $ok;
             self::$sql_fh = null;
         }
         self::$sql_buffer = '';
         self::$sql_line = '';
+        return $ok;
     }
 
     /**
@@ -1162,27 +1496,29 @@ class OCM_SQL_Utils
             } else {
                 $carry = '';
             }
-            fwrite($out, str_replace($search, $replace, $data));
+            if (!self::write_all($out, str_replace($search, $replace, $data))) {
+                $read_ok = false;
+                break;
+            }
         }
-        if ($carry !== '') {
-            fwrite($out, str_replace($search, $replace, $carry));
+        if ($read_ok && $carry !== '' && !self::write_all($out, str_replace($search, $replace, $carry))) {
+            $read_ok = false;
         }
         fclose($in);
-        fclose($out);
+        if (!fflush($out) || !fclose($out)) {
+            $read_ok = false;
+        }
 
         if (!$read_ok) {
             @unlink($tmp);
-            One_Click_Migration::write_to_log(sprintf('Error: Read failed while stream-replacing in SQL file "%s"; file left unchanged.', $filepath));
+            One_Click_Migration::write_to_log(sprintf('Error: Read/write failed while stream-replacing in SQL file "%s"; file left unchanged.', $filepath));
             return false;
         }
 
         if (!@rename($tmp, $filepath)) {
-            $copied = @copy($tmp, $filepath);
             @unlink($tmp);
-            if (!$copied) {
-                One_Click_Migration::write_to_log(sprintf('Error: Could not finalize streamed SQL file "%s".', $filepath));
-                return false;
-            }
+            One_Click_Migration::write_to_log(sprintf('Error: Could not atomically finalize streamed SQL file "%s"; original left unchanged.', $filepath));
+            return false;
         }
         return true;
     }

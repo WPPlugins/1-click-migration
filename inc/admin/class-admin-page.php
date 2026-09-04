@@ -23,7 +23,10 @@ class OCM_Admin_Page
         $ocm_action_start_restore = get_option('ocm_action_start_restore');
         $action_active            = $ocm_action_start_backup || $ocm_action_start_restore;
         $log_file_exists          = file_exists(OCM_DEBUG_LOG_FILE);
-        $log_url                  = OCM_DEBUG_LOG_FILE_URL;
+        $log_url                  = wp_nonce_url(
+            admin_url('admin-post.php?action=ocm_download_log'),
+            'ocm_download_log'
+        );
         $ocm_user_email_value     = (string) get_option('ocm_user_email', '');
         $start_action_value       = $ocm_action_start_backup ? 'backup' : ($ocm_action_start_restore ? 'restore' : '');
         $progress_text_safe       = wp_kses_post($progress['text']);

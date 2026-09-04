@@ -4,7 +4,7 @@
  * Plugin Name: 1 Click Migration
  * Plugin URI: https://wordpress.org/plugins/1-click-migration/
  * Description: Migrate, copy, or clone your entire site with 1 click. <strong>Any host, no size limitation, no premium versions.</strong>
- * Version: 3.1.14
+ * Version: 3.1.15
  * Author: 1ClickMigration
  * Author URI: https://1clickmigration.com/
  * Text Domain: 1-click-migration
@@ -26,8 +26,9 @@ define('OCM_MAIN_FILE', __FILE__);
 define('OCM_SET_TIME_LIMIT', 900);
 
 define('OCM_DEBUG_LOG_FILENAME', 'ocm_debug.log');
-define('OCM_DEBUG_LOG_FILE', OCM_PLUGIN_ROOT . OCM_DEBUG_LOG_FILENAME);
-define('OCM_DEBUG_LOG_FILE_URL', plugins_url(OCM_DEBUG_LOG_FILENAME, OCM_MAIN_FILE));
+define('OCM_DEBUG_LOG_DIR', dirname(rtrim(ABSPATH, '/\\')) . '/.ocm-private');
+define('OCM_DEBUG_LOG_FILE', OCM_DEBUG_LOG_DIR . '/' . OCM_DEBUG_LOG_FILENAME);
+define('OCM_DEBUG_LOG_FILE_URL', '');
 define('OCM_WP_CONFIG_FILE', ABSPATH . 'wp-config.php');
 define('OCM_API_ENDPOINT', 'https://1clickmigration.com/api/');
 
@@ -75,6 +76,12 @@ class One_Click_Migration
 
     public function __construct()
     {
+        // Move an upgrade-era public plugin log before any admin page or new
+        // migration write can expose/use it.
+        if (is_file(OCM_PLUGIN_ROOT . OCM_DEBUG_LOG_FILENAME)) {
+            self::ensure_private_log_directory();
+        }
+
         $this->fire_hooks();
         $this->get_version_from_php_doc();
 
@@ -98,6 +105,7 @@ class One_Click_Migration
         add_action('wp_ajax_ocm_restart_failed_process', array(OCM_Backup::class, 'restart_failed_process'));
         add_action('admin_post_start_restore', array(OCM_Backup::class, 'start_restore'));
         add_action('admin_post_cancel_actions', array(OCM_Backup::class, 'cancel_actions'));
+        add_action('admin_post_ocm_download_log', array(__CLASS__, 'download_log'));
         add_action('plugins_loaded', array(__CLASS__, 'init_background_jobs'));
         add_action('plugins_loaded', array(__CLASS__, 'init_handler'));
         add_action('rest_api_init', static function () {
@@ -503,6 +511,10 @@ class One_Click_Migration
       $string = self::sanitize_log_message($string);
       $file = OCM_DEBUG_LOG_FILE;
       $urls = get_option('ocm_presigned_urls');
+      if (!self::ensure_private_log_directory()) {
+          error_log('[1-Click Migration] Could not create private log directory.');
+          return;
+      }
 
       if (preg_match('/Error:/', $string)) {
           self::reset_actions_start_mark();
@@ -589,6 +601,63 @@ class One_Click_Migration
 
       }
 
+    }
+
+    public static function ensure_private_log_directory()
+    {
+        static $ready = false;
+        if ($ready) {
+            return true;
+        }
+
+        if (!is_dir(OCM_DEBUG_LOG_DIR)
+            && !@mkdir(OCM_DEBUG_LOG_DIR, 0700, true)
+            && !is_dir(OCM_DEBUG_LOG_DIR)
+        ) {
+            return false;
+        }
+
+        if (!is_file(OCM_DEBUG_LOG_DIR . '/.htaccess')) {
+            @file_put_contents(OCM_DEBUG_LOG_DIR . '/.htaccess', "Deny from all\nRequire all denied\n");
+        }
+        if (!is_file(OCM_DEBUG_LOG_DIR . '/web.config')) {
+            @file_put_contents(
+                OCM_DEBUG_LOG_DIR . '/web.config',
+                '<configuration><system.webServer><authorization><deny users="*" /></authorization></system.webServer></configuration>'
+            );
+        }
+        if (!is_file(OCM_DEBUG_LOG_DIR . '/index.php')) {
+            @file_put_contents(OCM_DEBUG_LOG_DIR . '/index.php', "<?php\nhttp_response_code(404);\n");
+        }
+
+        $legacy_file = OCM_PLUGIN_ROOT . OCM_DEBUG_LOG_FILENAME;
+        if (is_file($legacy_file) && !is_file(OCM_DEBUG_LOG_FILE)) {
+            if (!@rename($legacy_file, OCM_DEBUG_LOG_FILE) && @copy($legacy_file, OCM_DEBUG_LOG_FILE)) {
+                @unlink($legacy_file);
+            }
+        }
+
+        $ready = true;
+        return true;
+    }
+
+    public static function download_log()
+    {
+        if (!current_user_can('manage_options')) {
+            wp_die('You do not have sufficient permissions to access this log.');
+        }
+        check_admin_referer('ocm_download_log');
+        self::ensure_private_log_directory();
+        if (!is_file(OCM_DEBUG_LOG_FILE) || !is_readable(OCM_DEBUG_LOG_FILE)) {
+            wp_die('Migration log not found.');
+        }
+
+        nocache_headers();
+        header('Content-Type: text/plain; charset=UTF-8');
+        header('Content-Disposition: attachment; filename="' . OCM_DEBUG_LOG_FILENAME . '"');
+        header('X-Content-Type-Options: nosniff');
+        readfile(OCM_DEBUG_LOG_FILE);
+        exit;
     }
 
     public static function set_default_max_execution_time($v)

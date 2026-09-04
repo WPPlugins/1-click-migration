@@ -417,8 +417,12 @@ class OCM_S3
             ]);
 
             $response = $client->send($request);
+            $status = (int) $response->getStatusCode();
+            if ($status < 200 || $status >= 300) {
+                throw new Exception('Storage returned HTTP ' . $status);
+            }
 
-            return $response;
+            return true;
 
         } catch (Exception $e) {
             One_Click_Migration::write_to_log("Upload failed for " . $folder_type . ": " . $e->getMessage());
@@ -429,9 +433,9 @@ class OCM_S3
               update_option('ocm_backup_upload_retry_' . $folder_type , $next_retry_count + 1, true);
               One_Click_Migration::$process_backup_single->restart_task();
             }else{
-              One_Click_Migration::write_to_log(sprintf('Skipping %s Uploading', $folder_type));
-              OCM_Backup::set_complete_backup_step($folder_type, OCM_Backup::STEP_BACKUP_CHILD_UPLOAD);
+              One_Click_Migration::write_to_log(sprintf('Upload retries exhausted for %s; backup will fail closed.', $folder_type));
             }
+            return false;
         } finally {
             if (is_resource($file_handle)) {
                 fclose($file_handle);

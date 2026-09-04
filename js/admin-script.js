@@ -232,9 +232,9 @@
         var reviewBlock = '';
         if (withReviewCta) {
             reviewBlock = ''
-                + '    <a class="ocm-btn ocm-btn-primary ocm-modal-review" id="ocm-review-btn" href="' + reviewUrl + '" target="_blank" rel="noopener noreferrer">Leave a review</a>'
+                + '      <a class="ocm-btn ocm-btn-primary ocm-modal-review" id="ocm-review-btn" href="' + reviewUrl + '" target="_blank" rel="noopener noreferrer">Leave a review</a>'
                 + (dismissUrl
-                    ? '    <a class="ocm-btn-link ocm-modal-never" id="ocm-dismiss-review" href="' + dismissUrl + '">Don\'t ask again</a>'
+                    ? '      <a class="ocm-btn-link ocm-modal-never" id="ocm-dismiss-review" href="' + dismissUrl + '">Don\'t ask again</a>'
                     : '');
         }
         var html = ''
@@ -247,7 +247,7 @@
             + '    <p class="ocm-modal-body">' + bodyText + '</p>'
             + '    <div class="ocm-modal-actions">'
             + reviewBlock
-            + '    <button type="button" class="ocm-btn ocm-btn-ghost ocm-modal-dismiss" data-ocm-modal-close>Close</button>'
+            + '      <button type="button" class="ocm-btn ocm-btn-ghost ocm-modal-dismiss" data-ocm-modal-close>Close</button>'
             + '    </div>'
             + '  </div>'
             + '</div>';
