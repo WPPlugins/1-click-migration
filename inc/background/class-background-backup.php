@@ -60,7 +60,14 @@ class OCM_BackgroundBackup extends WP_Background_Process
     {
 
 
-        list($action) = $data;
+        $action = isset($data[0]) ? $data[0] : '';
+        $run_id = isset($data[1]) ? $data[1] : '';
+        if (!OCM_Backup::is_current_backup_run($run_id)) {
+            One_Click_Migration::write_to_log(' SYSLOG: Ignoring backup queue item owned by a different run.');
+            return self::RETURN_TYPE_END_PROCESSS;
+        }
+        OCM_Backup::set_backup_run_context($run_id);
+
         $presigned_urls = get_option('ocm_presigned_urls');
         $aes_key_b64    = get_option('ocm_aes_key');
         $aes_key        = $aes_key_b64 ? base64_decode($aes_key_b64) : '';
@@ -73,6 +80,10 @@ class OCM_BackgroundBackup extends WP_Background_Process
             $return = OCM_Backup::initiate_db_backup($presigned_urls, $aes_key);
         } else {
             $return = OCM_Backup::initiate_folder_backup($action, $presigned_urls, $aes_key);
+        }
+
+        if (!OCM_Backup::is_current_backup_run($run_id)) {
+            return self::RETURN_TYPE_END_PROCESSS;
         }
 
         if (in_array($return, [self::RETURN_TYPE_STOP_PROCESSS, self::RETURN_TYPE_END_PROCESSS], true)) {
@@ -104,6 +115,14 @@ class OCM_BackgroundBackup extends WP_Background_Process
      */
     protected function complete()
     {
+        $run = get_option(OCM_Backup::BACKUP_RUN_OPTION, array());
+        $run_id = is_array($run) && isset($run['id']) ? (string) $run['id'] : '';
+        if ('' === $run_id) {
+            parent::complete();
+            return;
+        }
+
+        OCM_Backup::set_backup_run_context($run_id);
         OCM_Debug_Mode::disable();
         $missing_parts = OCM_Backup::get_backup_missing_parts();
         OCM_Backup::log_backup_parts_manifest($missing_parts);
@@ -118,13 +137,14 @@ class OCM_BackgroundBackup extends WP_Background_Process
 
         $urls = get_option('ocm_presigned_urls');
         if (WP_DEBUG !== true) {
-            OCM_Backup::deleteDir(OCM_PLUGIN_WRITABLE_PATH, 'Cleaning temporary directory', $urls);
+            OCM_Backup::deleteDir(OCM_Backup::get_backup_work_path(), 'Cleaning temporary directory', $urls);
         }
 
         if (!OCM_Backup::send_restore_code_email()) {
             // Terminal marker: without the restore code email the backup is unusable.
             One_Click_Migration::write_to_log('Backup failed: restore code email could not be sent (see previous error line).');
             update_option('ocm_is_stopped', true, true);
+            OCM_Backup::release_backup_run($run_id);
             One_Click_Migration::clear_backup_plugin_isolation();
             One_Click_Migration::reset_actions_start_mark();
             One_Click_Migration::cancel_all_process();
@@ -133,6 +153,7 @@ class OCM_BackgroundBackup extends WP_Background_Process
         }
 
         One_Click_Migration::write_to_log('Backup completed.');
+        OCM_Backup::release_backup_run($run_id);
 
         OCM_Backup::reset_current_backup_steps();
         One_Click_Migration::clear_backup_plugin_isolation();

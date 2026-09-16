@@ -4,7 +4,7 @@ Tags: backup, migrate, migration, restore, clone
 Requires at least: 4.0
 Tested up to: 7.1
 Requires PHP: 7.4
-Stable tag: 3.1.15
+Stable tag: 3.1.16
 Author URI: https://1clickmigration.com
 License: GPLv3 or later
 License URI: http://www.gnu.org/licenses/gpl-3.0.html
@@ -116,11 +116,17 @@ No. Your live WordPress site remains fully operational during the entire backup 
 All of them! Migrate WordPress sites between any hosting providers: Bluehost, SiteGround, WP Engine, Kinsta, GoDaddy, HostGator, DreamHost, and all others.
 
 == Screenshots ==
-1. One-click backup dashboard
-2. Selective backup options
-3. Restore-complete success
+1. Free one-click WordPress migration plugin. Back up a live site; it stays up while you migrate.
+2. Selective WordPress migrate — choose database, plugins, themes, or uploads to back up.
+3. Restore finished on the destination site. WordPress migration complete.
+4. Enter the restore code on the destination site to finish your WordPress migration.
 
 == Changelog ==
+= 3.1.16 =
+* **Concurrent Backup Safety**: Added an atomic single-flight owner and per-run scratch directory so overlapping starts cannot share SQL dumps, archives, queue items, retry state, or bucket attribution.
+* **Backup Part Accuracy**: Successful uploads are committed before timeout handling and cannot later be marked skipped. Part manifests are bound to the run's registered bucket, and stale workers cannot update a newer run.
+* **ZIP Retry Accuracy**: A retry now accepts a valid archive left by a completed `ZipArchive::close()` before invoking monitored system-zip failover, avoiding false backup failures.
+
 = 3.1.15 =
 * **Restore Reliability**: Hardened options SQL import so large remapped `INSERT`s are no longer rejected as WordPress "invalid data" (`$wpdb->query()` `strip_invalid_text`, including the Turkish core string "Sorgu, içinde geçersiz veriler bulunduğundan işlenemedi"). Dump statements now prefer the raw mysqli handle when available; utf8/utf8mb3 connections are promoted to utf8mb4. Destination-prefix remap from 3.1.14 is unchanged.
 * **Backup Integrity**: S3 uploads now fail closed: failed or missing encrypted archives are recorded as missing, remain on disk for diagnosis/retry, never receive an `ok` manifest status, and cannot trigger a restore-code email. Streamed SQL exports retry short writes and abort the backup if any dump byte cannot be written.
