@@ -122,7 +122,7 @@ class OCM_Admin_Page
                                     </div>
                                     <div class="ocm-step">
                                         <div class="ocm-step-title">2. Start the restore</div>
-                                        <p>Paste the 8-character restore code from the email we sent you, then click <strong>Restore</strong>. The restore can take up to 30 minutes depending on size.</p>
+                                        <p>Paste the 8-character restore code from the email we sent you, then click <strong>Check backup &amp; restore</strong>. Review any extra site addresses before starting. The restore can take up to 30 minutes depending on size.</p>
                                     </div>
                                     <div class="ocm-step">
                                         <div class="ocm-step-title">3. Troubleshooting</div>
@@ -198,11 +198,12 @@ class OCM_Admin_Page
                                         </div>
                                         <button class="ocm-btn ocm-btn-primary ocm-submit ocm-button restore-button" type="button" id="ocm-btn-restore">
                                             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>
-                                            Restore
+                                            Check backup &amp; restore
                                         </button>
                                     </div>
-                                    <div class="ocm-field-help">Format: 8 characters separated by a dash.</div>
+                                    <div class="ocm-field-help">We check the backup first. If extra site addresses are found, you can review them before restore starts.</div>
                                 </div>
+                                <section id="ocm-restore-precheck" aria-label="Backup address review" hidden></section>
                             </div>
 
                             <!-- ADVANCED -->

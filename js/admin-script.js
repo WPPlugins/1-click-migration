@@ -19,6 +19,7 @@
         $('.ocm-button.backup-button, .ocm-button.restore-button').addClass('one-click-disabled');
     }
     function enableButtons() {
+        $('#ocm-btn-restore, #ocm_restore_code, input[data-ocm-exclude]').prop('disabled', false);
         $('.ocm-button').removeClass('one-click-disabled');
         if (typeof siteData !== 'undefined' && siteData.otherPluginsActive > 0 && !$('#ocm-plugins-ack-checkbox').is(':checked')) {
             $('.ocm-button.backup-button, .ocm-button.restore-button').addClass('one-click-disabled');
@@ -55,12 +56,18 @@
     }
 
     // -------- progress polling --------
-    function displayProgressBar() {
-        clearMessages();
-        var timeoutId, intervalId;
+    var progressTimeoutId, progressIntervalId;
+    function stopProgressPolling() {
+        clearTimeout(progressTimeoutId);
+        clearInterval(progressIntervalId);
+    }
 
-        timeoutId = setTimeout(function () {
-            intervalId = setInterval(function () {
+    function displayProgressBar() {
+        stopProgressPolling();
+        clearMessages();
+
+        progressTimeoutId = setTimeout(function () {
+            progressIntervalId = setInterval(function () {
                 $.ajax({
                     url: siteData.progressUrl,
                     method: 'GET',
@@ -90,8 +97,8 @@
                         var responseText = response.text || '';
 
                         if (response.isStopped) {
-                            clearInterval(intervalId);
-                            clearTimeout(timeoutId);
+                            clearInterval(progressIntervalId);
+                            clearTimeout(progressTimeoutId);
                             $('#ocm-pg-fill').removeClass('running');
                             enableButtons();
                         } else if ('100%' === response.value) {
@@ -100,8 +107,8 @@
                             $('.restart-button').hide();
                             enableButtons();
                             if (responseText.indexOf('Backup completed') !== -1 || responseText.indexOf('Restore completed') !== -1) {
-                                clearInterval(intervalId);
-                                clearTimeout(timeoutId);
+                                clearInterval(progressIntervalId);
+                                clearTimeout(progressTimeoutId);
                                 if (responseText.indexOf('Restore completed') !== -1 || response.restoreCompleted) {
                                     redirectToPluginPageAfterRestore();
                                 }
@@ -118,8 +125,8 @@
                     },
                     error: function (xhr) {
                         if (xhr.status === 403) {
-                            clearInterval(intervalId);
-                            clearTimeout(timeoutId);
+                            clearInterval(progressIntervalId);
+                            clearTimeout(progressTimeoutId);
                             setTimeout(function () { window.location.reload(); }, 5000);
                         }
                     }
@@ -178,11 +185,100 @@
         $.get(url).fail(function () { enableButtons(); });
     }
 
+    var restorePreparation = null;
+    var prepareGeneration = 0;
+
+    function clearRestorePreparation() {
+        prepareGeneration++;
+        restorePreparation = null;
+        $('#ocm-restore-precheck').prop('hidden', true).empty();
+        $('#ocm-btn-restore').prop('disabled', false);
+        enableButtons();
+    }
+
+    function startPreparedRestore(preparation, ids) {
+        // The server also binds this token to the code, exclusions, user and destination.
+        disableButtons();
+        $('#ocm-restore-precheck button, #ocm-restore-precheck input, #ocm_restore_code, input[data-ocm-exclude]').prop('disabled', true);
+        var url = $('#ocm-restore-href').attr('href')
+            + '&restore_code=' + encodeURIComponent(preparation.code)
+            + '&selected=' + encodeURIComponent(preparation.excludes.join(','))
+            + '&_wpnonce=' + encodeURIComponent(siteData.restoreNonce);
+        $.post(url, { precheck_token: preparation.token, domain_ids: ids }).done(function (response) {
+            if (response && response.success === false) {
+                restoreStartFailed(response.data && response.data.message);
+            }
+        }).fail(function (xhr) {
+            // A rejected precheck never starts a worker. A transport timeout may
+            // leave a running worker, so let progress polling reconcile that case.
+            if (xhr.responseJSON && xhr.responseJSON.success === false) {
+                restoreStartFailed(xhr.responseJSON.data && xhr.responseJSON.data.message);
+            }
+        });
+        $('#ocm-restore-precheck').prop('hidden', true);
+        stopTimer = false;
+        setProgress('1%', preparation.legacy
+            ? 'Restore started. This older backup will be checked for extra addresses after restore.'
+            : 'Restore started');
+        displayProgressBar();
+        displayDecreasingTimer();
+    }
+
+    function restoreStartFailed(message) {
+        stopProgressPolling();
+        clearInterval(timer);
+        timerInitiated = 0;
+        stopTimer = true;
+        clearRestorePreparation();
+        $('#ocm_restore_code, input[data-ocm-exclude]').prop('disabled', false);
+        $('#ocm-restore-precheck').prop('hidden', false)
+            .append($('<p role="alert"></p>').text(message || 'Check the backup again before starting restore.'));
+    }
+
+    function renderRestorePreparation(preparation) {
+        var likely = '', other = '';
+        preparation.candidates.forEach(function (row) {
+            var item = '<li><label><input type="checkbox" name="ocm_precheck_domain" value="' + escHtml(row.id) + '">'
+                + '<span><strong>' + escHtml(row.label || row.host) + '</strong>'
+                + '<span class="ocm-precheck-note">' + (row.class === 'suggest' ? 'Possible old site address' : 'External or other address') + '</span>'
+                + '<span class="ocm-precheck-example">From: ' + escHtml(row.example) + '</span>'
+                + '<span class="ocm-precheck-example">To: ' + escHtml(row.preview) + '</span></span></label></li>';
+            if (row.class === 'suggest') likely += item;
+            else other += item;
+        });
+        var html = '<h3 tabindex="-1" id="ocm-precheck-title">Review remaining site addresses</h3>'
+            + '<p>Some links point to other domains. Select only addresses that belonged to the site you are restoring. Your primary site address updates automatically.</p>'
+            + (likely ? '<ul>' + likely + '</ul>' : '')
+            + (other ? '<details' + (!likely ? ' open' : '') + '><summary>Other domains</summary><p>External services and links usually stay unchanged.</p><ul>' + other + '</ul></details>' : '')
+            + (preparation.omitted ? '<p>Some additional addresses are not listed. You can review remaining links on your restored site.</p>' : '')
+            + '<p id="ocm-precheck-selection" role="status">No extra addresses selected.</p>'
+            + '<p>Starting restore replaces the selected sections of this site with the backup.</p>'
+            + '<div class="ocm-precheck-actions"><button type="button" class="ocm-btn ocm-btn-primary" id="ocm-precheck-start">Start restore</button>'
+            + '<button type="button" class="ocm-btn ocm-btn-ghost" id="ocm-precheck-back">Back</button></div>';
+        $('#ocm-restore-precheck').html(html).prop('hidden', false);
+        $('#ocm-precheck-title').trigger('focus');
+        $('#ocm-restore-precheck input').on('change', function () {
+            var count = $('#ocm-restore-precheck input:checked').length;
+            $('#ocm-precheck-selection').text(count ? count + ' extra domain(s) will be updated.' : 'No extra addresses selected.');
+        });
+        $('#ocm-precheck-back').on('click', function () {
+            clearRestorePreparation();
+            $('#ocm-btn-restore').trigger('focus');
+        });
+        $('#ocm-precheck-start').on('click', function () {
+            if (restorePreparation !== preparation) return;
+            var ids = [];
+            $('#ocm-restore-precheck input:checked').each(function () { ids.push($(this).val()); });
+            restorePreparation = null;
+            startPreparedRestore(preparation, ids);
+        });
+    }
+
     function submitRestore() {
         clearMessages();
         var raw = ($('#ocm_restore_code').val() || '').replace(/[\s\-]+/g, '').toUpperCase();
         if (raw.length < 6 || raw.length > 32) {
-            $('#ocm-pg-status').html('<span style="color:var(--ocm-err)">Paste the 8-character restore code we emailed you (e.g. <code>XXXX-XXXX</code>).</span>');
+            $('#ocm-restore-precheck').prop('hidden', false).text('Paste the restore code from your backup email.');
             return;
         }
         var excludes = getSelectedExcludes();
@@ -191,15 +287,37 @@
             return;
         }
         $('.ocm-exclusion-warning').hide();
+        clearRestorePreparation();
+        var generation = prepareGeneration;
         disableButtons();
-        var url = $('#ocm-restore-href').attr('href')
-            + '&restore_code=' + encodeURIComponent(raw)
-            + '&selected=' + encodeURIComponent(excludes.join(','))
-            + '&_wpnonce=' + siteData.restoreNonce;
-        setProgress('1%', 'Restore started');
-        displayProgressBar();
-        displayDecreasingTimer();
-        $.get(url).fail(function () { enableButtons(); });
+        $('#ocm-btn-restore').prop('disabled', true);
+        $('#ocm-restore-precheck').prop('hidden', false).html('<p role="status">Checking backup addresses…</p>');
+        $.post(siteData.ajaxurl, {
+            action: 'ocm_prepare_restore',
+            _wpnonce: siteData.prepareRestoreNonce,
+            restore_code: raw,
+            selected: excludes.join(',')
+        }).done(function (response) {
+            if (generation !== prepareGeneration) return;
+            if (!response || !response.success) {
+                restoreStartFailed(response && response.data && response.data.message);
+                return;
+            }
+            var preparation = response.data;
+            preparation.code = raw;
+            preparation.excludes = excludes;
+            restorePreparation = preparation;
+            if (!preparation.candidates.length && !preparation.omitted) {
+                restorePreparation = null;
+                startPreparedRestore(preparation, []);
+            } else {
+                renderRestorePreparation(preparation);
+            }
+        }).fail(function (xhr) {
+            if (generation !== prepareGeneration) return;
+            restoreStartFailed(xhr.responseJSON && xhr.responseJSON.data && xhr.responseJSON.data.message
+                || 'Could not check the backup. Please try again.');
+        });
     }
 
     function setActiveTab(name) {
@@ -218,6 +336,111 @@
     }
 
     // -------- restore success modal --------
+    var extraDomainsSettled = false;
+    var extraDomainsApplyStarted = false;
+
+    function extraDomainRows() {
+        if (typeof siteData === 'undefined' || !siteData.extraDomains || !siteData.extraDomains.length) {
+            return [];
+        }
+        return siteData.extraDomains;
+    }
+
+    function escHtml(value) {
+        return String(value == null ? '' : value).replace(/[&<>"']/g, function (ch) {
+            return {
+                '&': '&amp;',
+                '<': '&lt;',
+                '>': '&gt;',
+                '"': '&quot;',
+                "'": '&#39;'
+            }[ch];
+        });
+    }
+
+    function extraDomainsBlock() {
+        var rows = extraDomainRows();
+        if (!rows.length) return '';
+        var items = '';
+        for (var i = 0; i < rows.length; i++) {
+            var row = rows[i] || {};
+            var id = escHtml(row.id);
+            items += ''
+                + '<li>'
+                + '  <label>'
+                + '    <input type="checkbox" name="ocm_extra_domain" value="' + id + '"' + (ocmFlagOn(row.checked) ? ' checked' : '') + '>'
+                + '    <span>'
+                + '      <span class="ocm-extra-host">' + escHtml(row.label || row.host) + '</span>'
+                + (row.note ? '      <span class="ocm-extra-note">' + escHtml(row.note) + '</span>' : '')
+                + (row.example ? '      <span class="ocm-extra-example">' + escHtml(row.example) + '</span>' : '')
+                + '    </span>'
+                + '  </label>'
+                + '</li>';
+        }
+        return ''
+            + '<div class="ocm-extra-domains">'
+            + '  <h3>Other addresses found</h3>'
+            + '  <p>Checked addresses will be rewritten to this site. Close to leave them unchanged.</p>'
+            + '  <ul>' + items + '</ul>'
+            + '  <button type="button" class="ocm-btn ocm-btn-primary" id="ocm-extra-domains-apply">Update checked addresses</button>'
+            + '  <p id="ocm-extra-domains-status" class="ocm-extra-status" hidden></p>'
+            + '</div>';
+    }
+
+    function settleExtraDomainsSkip() {
+        if (extraDomainsSettled || extraDomainsApplyStarted || !extraDomainRows().length) return;
+        if (typeof siteData === 'undefined' || !siteData.ajaxurl || !siteData.extraDomainsNonce) return;
+        extraDomainsSettled = true;
+        var body = new FormData();
+        body.append('action', 'ocm_apply_extra_domains');
+        body.append('_wpnonce', siteData.extraDomainsNonce);
+        if (navigator.sendBeacon) {
+            navigator.sendBeacon(siteData.ajaxurl, body);
+            return;
+        }
+        $.post(siteData.ajaxurl, {
+            action: 'ocm_apply_extra_domains',
+            _wpnonce: siteData.extraDomainsNonce
+        });
+    }
+
+    function applyExtraDomains() {
+        if (extraDomainsApplyStarted || typeof siteData === 'undefined') return;
+        extraDomainsApplyStarted = true;
+        var $btn = $('#ocm-extra-domains-apply');
+        var $status = $('#ocm-extra-domains-status');
+        var ids = [];
+        $('#ocm-restore-success-modal input[name="ocm_extra_domain"]:checked').each(function () {
+            ids.push($(this).val());
+        });
+        $btn.prop('disabled', true);
+        $('#ocm-restore-success-modal input[name="ocm_extra_domain"]').prop('disabled', true);
+        $status.prop('hidden', false).text('Updating addresses…');
+        $.post(siteData.ajaxurl, {
+            action: 'ocm_apply_extra_domains',
+            _wpnonce: siteData.extraDomainsNonce,
+            ids: ids
+        }).done(function (resp) {
+            extraDomainsSettled = true;
+            var updates = resp && resp.data && typeof resp.data.updates !== 'undefined' ? parseInt(resp.data.updates, 10) : 0;
+            if (!resp || !resp.success) {
+                $status.text('Some addresses may not have been updated. Retry to finish updating.');
+                extraDomainsApplyStarted = false;
+                extraDomainsSettled = false;
+                $btn.prop('disabled', false);
+                $('#ocm-restore-success-modal input[name="ocm_extra_domain"]').prop('disabled', false);
+                return;
+            }
+            $status.text(updates > 0 ? ('Updated ' + updates + ' database rows.') : 'No addresses were rewritten.');
+        }).fail(function () {
+            extraDomainsApplyStarted = false;
+            extraDomainsSettled = false;
+            $btn.prop('disabled', false);
+            $('#ocm-restore-success-modal input[name="ocm_extra_domain"]').prop('disabled', false);
+            $status.prop('hidden', false).text('Some addresses may not have been updated. Retry to finish updating.');
+        });
+    }
+
     function ensureRestoreSuccessModal(withReviewCta) {
         $('#ocm-restore-success-modal').remove();
         var reviewUrl = (typeof siteData !== 'undefined' && siteData.reviewUrl)
@@ -237,14 +460,17 @@
                     ? '      <a class="ocm-btn-link ocm-modal-never" id="ocm-dismiss-review" href="' + dismissUrl + '">Don\'t ask again</a>'
                     : '');
         }
+        var domains = extraDomainsBlock();
+        var cardClass = 'ocm-modal-card' + (domains ? ' ocm-has-extra-domains' : '');
         var html = ''
             + '<div id="ocm-restore-success-modal" class="ocm-modal" role="dialog" aria-modal="true" aria-labelledby="ocm-restore-success-title" hidden>'
             + '  <div class="ocm-modal-backdrop" data-ocm-modal-close></div>'
-            + '  <div class="ocm-modal-card">'
+            + '  <div class="' + cardClass + '">'
             + '    <button type="button" class="ocm-modal-close" data-ocm-modal-close aria-label="Close">&times;</button>'
             + '    <div class="ocm-modal-icon" aria-hidden="true">✓</div>'
             + '    <h2 id="ocm-restore-success-title" class="ocm-modal-title">Restore complete</h2>'
             + '    <p class="ocm-modal-body">' + bodyText + '</p>'
+            + domains
             + '    <div class="ocm-modal-actions">'
             + reviewBlock
             + '      <button type="button" class="ocm-btn ocm-btn-ghost ocm-modal-dismiss" data-ocm-modal-close>Close</button>'
@@ -254,6 +480,9 @@
         $('body').append(html);
         $('#ocm-restore-success-modal').on('click', '[data-ocm-modal-close]', function () {
             hideRestoreSuccessModal();
+        });
+        $('#ocm-extra-domains-apply').on('click', function () {
+            applyExtraDomains();
         });
         $(document).on('keydown.ocmRestoreModal', function (e) {
             if (e.key === 'Escape') hideRestoreSuccessModal();
@@ -266,7 +495,9 @@
         $m.prop('hidden', false).attr('aria-hidden', 'false').addClass('open');
         $('body').addClass('ocm-modal-open');
         setTimeout(function () {
-            var $focus = withReviewCta ? $('#ocm-review-btn') : $m.find('[data-ocm-modal-close]').first();
+            var $focus = extraDomainRows().length
+                ? $('#ocm-extra-domains-apply')
+                : (withReviewCta ? $('#ocm-review-btn') : $m.find('[data-ocm-modal-close]').first());
             $focus.trigger('focus');
         }, 50);
     }
@@ -274,6 +505,7 @@
     function hideRestoreSuccessModal() {
         var $m = $('#ocm-restore-success-modal');
         if (!$m.length) return;
+        settleExtraDomainsSkip();
         $m.prop('hidden', true).attr('aria-hidden', 'true').removeClass('open');
         $('body').removeClass('ocm-modal-open');
         $(document).off('keydown.ocmRestoreModal');
@@ -325,6 +557,7 @@
 
         // Restore code formatter (XXXX-XXXX as user types)
         $('#ocm_restore_code').on('input', function () {
+            clearRestorePreparation();
             var v = ($(this).val() || '').replace(/[^a-zA-Z0-9]/g, '').toUpperCase().slice(0, 8);
             if (v.length > 4) v = v.slice(0, 4) + '-' + v.slice(4);
             $(this).val(v);
@@ -336,6 +569,7 @@
             if (buttonIsDisabled(this)) return;
             submitBackup();
         });
+        $('input[data-ocm-exclude]').on('change', clearRestorePreparation);
         $('#ocm-btn-restore').on('click', function (e) {
             e.preventDefault();
             if (buttonIsDisabled(this)) return;
@@ -348,8 +582,9 @@
             displayProgressBar();
         }
 
-        // Post-restore success modal (flag from PHP option or ?ocm_restore_done=1)
-        if (typeof siteData !== 'undefined' && ocmFlagOn(siteData.showRestoreSuccess)) {
+        // Post-restore success modal (flag from PHP option or ?ocm_restore_done=1).
+        // Extra-domain candidates keep the same screen open until the admin confirms or closes it.
+        if (typeof siteData !== 'undefined' && (ocmFlagOn(siteData.showRestoreSuccess) || extraDomainRows().length)) {
             showRestoreSuccessModal(ocmFlagOn(siteData.showReviewCta));
             // Clean the query arg so refresh does not re-open forever if option already cleared
             if (window.history && window.history.replaceState) {

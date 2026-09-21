@@ -930,6 +930,9 @@ class OCM_SQL_Utils
                 foreach ($table_data as $row) {
                     $values = array();
                     foreach ($row as $key => $value) {
+                        if (isset($assoc_args['ocm_collect_urls']) && is_callable($assoc_args['ocm_collect_urls'])) {
+                            call_user_func($assoc_args['ocm_collect_urls'], $value);
+                        }
                         if (isset($integer_fields[strtolower($key)])) {
                             // make sure there are no blank spots in the insert syntax,
                             // yet try to avoid quotation marks around integers
@@ -988,6 +991,8 @@ class OCM_SQL_Utils
             $result_file = sprintf('%s-%s-%s.sql', DB_NAME, date('Y-m-d'), $hash);
         }
 
+        $collector = $assoc_args['ocm_collect_urls'] ?? null;
+        unset($assoc_args['ocm_collect_urls']);
         $stdout = ('-' === $result_file);
         if (!$stdout) {
             $assoc_args['result-file'] = $result_file;
@@ -1004,6 +1009,7 @@ class OCM_SQL_Utils
                 One_Click_Migration::write_to_log('Database backup in progress. Please do not leave the plugin page.');
                 self::$db_backup_progress_logged = true;
             }
+            $assoc_args['ocm_collect_urls'] = $collector;
             return self::export_table($assoc_args);
         }
 
@@ -1041,7 +1047,11 @@ class OCM_SQL_Utils
                 $assoc_args['tables'] = $saved_tables;
             }
 	        One_Click_Migration::write_to_log('Database backup in progress. Please do not leave the plugin page.');
+            $assoc_args['ocm_collect_urls'] = $collector;
 	        return self::export_table($assoc_args);
+        }
+        if (is_callable($collector) && !$stdout) {
+            return OCM_URL_Manifest::collect_dump($result_file, $collector);
         }
     }
 

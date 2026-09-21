@@ -638,7 +638,19 @@ class OCM_Backup
             wp_die('You do not have sufficient permissions to perform this action.');
         }
 
+        if (get_option('ocm_action_start_backup') || get_option('ocm_action_start_restore')) {
+            wp_send_json_error(array('message' => 'Another operation started. Wait for it to finish or stop it first.'), 409);
+            return;
+        }
         $restore_code = self::get_restore_code();
+        $url_plan = OCM_Restore_Precheck::consume(
+            $_POST['precheck_token'] ?? '', $restore_code, $_GET['selected'] ?? '',
+            isset($_POST['domain_ids']) ? wp_unslash($_POST['domain_ids']) : array()
+        );
+        if (is_wp_error($url_plan)) {
+            wp_send_json_error(array('message' => $url_plan->get_error_message()), 400);
+            return;
+        }
 
         update_option('ocm_download_auto_try_nb_db', 0, true);
         update_option('ocm_download_auto_try_nb_themes', 0, true);
@@ -652,6 +664,10 @@ class OCM_Backup
         self::reset_current_backup_steps();
         self::reset_current_restore_steps();
         self::delete_restore_options();
+        if (!update_option(OCM_Restore_Precheck::OPTION, $url_plan, false)) {
+            wp_send_json_error(array('message' => 'The address choices could not be saved. Check the backup again before restoring.'), 500);
+            return;
+        }
         // Clear stale presigned URLs from a prior migration so early write_to_log
         // calls don't create a local log file keyed to a dead bucket (which would
         // later block the merge-in of the backup log from the new bucket).
@@ -706,6 +722,12 @@ class OCM_Backup
                 exit;
             }
 
+            $url_plan = get_option(OCM_Restore_Precheck::OPTION, array());
+            if ($url_plan && ($url_plan['bucket_id'] !== $redeem->bucket_id || $url_plan['destination'] !== site_url())) {
+                One_Click_Migration::write_to_log('Error: Restore preparation no longer matches this backup or destination. Check the backup again.');
+                update_option('ocm_is_stopped', true, true);
+                exit;
+            }
             $bucket_id      = $redeem->bucket_id;
             $aes_key        = base64_decode($redeem->aes_key_b64);
             $presigned_urls = $redeem->urls;
@@ -1281,6 +1303,7 @@ class OCM_Backup
     }
 
     public static function complete_restore(){
+      delete_option(OCM_Restore_Precheck::OPTION);
       $presigned_urls = get_option('ocm_presigned_urls');
 
         self::post_restore_cleanup();
@@ -1365,6 +1388,9 @@ class OCM_Backup
         $presigned_urls   = get_option('ocm_presigned_urls');
         $excluded_folders = get_option('ocm_excluded_folders', []);
 
+        // Keep the destination decision in memory across the options-table import.
+        $url_plan = get_option(OCM_Restore_Precheck::OPTION, array());
+
         //cater for the database restore.
         if(!in_array('db', $excluded_folders)){
           if (!self::check_is_complete_restore_step('db', self::STEP_RESTORE_CHILD_RESTORE)) {
@@ -1389,16 +1415,25 @@ class OCM_Backup
 
 
         if (!empty($old_url)) {
-            $extra_arguments = array(
-                'search_for'=> $old_url,
-                'replace_with' => $current_url
-            );
+            $extra_arguments = OCM_Restore_Precheck::replacement_args($url_plan, $old_url, $current_url);
             $db_details = new OCM_DB();
+            if (empty($url_plan['reviewed'])) {
+                $db_details->enable_url_collection();
+            }
             $tables = $db_details->get_tables();
             $result = $db_details->search_replace_db( $tables, $extra_arguments );
             $report_update = $result['updates'];
             One_Click_Migration::write_to_log(sprintf('SYSLOG: Number of updates made from replace "%s"',$report_update) );
             One_Click_Migration::write_to_log(sprintf('SYSLOG: Finished updating URLs in the database'));
+            if (empty($url_plan['reviewed'])) {
+                self::store_extra_domain_candidates($db_details->collected_urls(), $old_url, $current_url);
+            } elseif (!empty($result['errors'])) {
+                // Retain only approved hosts for a post-restore retry.
+                update_option(OCM_Extra_Domains::OPTION, $url_plan['selected'], false);
+                One_Click_Migration::write_to_log('Notice: Some approved address updates failed. Review the remaining addresses after restore.');
+            } else {
+                delete_option(OCM_Extra_Domains::OPTION);
+            }
         }
         self::complete_restore();
         exit;
@@ -1496,6 +1531,10 @@ class OCM_Backup
             }
         }
 
+        $url_found = array();
+        $collect_urls = function ($value) use (&$url_found) {
+            OCM_Extra_Domains::collect_from_text($url_found, $value);
+        };
         foreach ($tables as $table) {
             foreach ($table as $t) {
 
@@ -1505,7 +1544,8 @@ class OCM_Backup
                   // One_Click_Migration::write_to_log(sprintf(' SYSLOG: Table being backed up: "%s"', $t));
                   $exported = OCM_SQL_Utils::export([$file], [
                       'tables' => $t,
-                      'quick' => null
+                      'quick' => null,
+                      'ocm_collect_urls' => $collect_urls,
                   ]);
                   if ($exported === false) {
                       return self::fail_part_upload('db', sprintf('SQL dump write failed for table "%s"', $t));
@@ -1520,6 +1560,7 @@ class OCM_Backup
         }
 
 
+          self::publish_url_manifest($url_found);
           $zip_filepath = self::createZipFile($work_path . 'db/', $aes_key, $presigned_urls);
           if (!$zip_filepath) {
               self::fail_backup('could not create the database archive (see previous error line)');
@@ -4483,6 +4524,117 @@ class OCM_Backup
 
     }
 
+    /**
+     * Rewrite only the extra hosts an administrator checked on the restore-complete screen.
+     * An empty selection records the decision and rewrites nothing.
+     */
+    public static function apply_extra_domains()
+    {
+        if (!current_user_can('manage_options')) {
+            wp_send_json_error(array('message' => 'Forbidden'), 403);
+        }
+        check_ajax_referer('ocm_apply_extra_domains');
+
+        $stored = get_option(OCM_Extra_Domains::OPTION, array());
+        if (!is_array($stored) || !$stored) {
+            wp_send_json_success(array('updates' => 0));
+        }
+
+        $raw_ids = array();
+        if (isset($_POST['ids'])) {
+            $raw_ids = wp_unslash($_POST['ids']);
+            if (!is_array($raw_ids)) {
+                $raw_ids = explode(',', (string) $raw_ids);
+            }
+        }
+        $wanted = array();
+        foreach ($raw_ids as $id) {
+            $id = sanitize_text_field($id);
+            if ('' !== $id) {
+                $wanted[$id] = true;
+            }
+        }
+
+        $selected = array();
+        foreach ($stored as $row) {
+            if (is_array($row) && isset($row['id']) && isset($wanted[$row['id']])) {
+                $selected[] = $row;
+            }
+        }
+
+        $updates = 0;
+        if ($selected) {
+            $pairs = array();
+            foreach ($selected as $row) {
+                $pairs = array_merge($pairs, OCM_Extra_Domains::replacement_pairs($row, site_url()));
+            }
+            if ($pairs) {
+                One_Click_Migration::enable_maintenance_mode();
+                $maintenance_on = true;
+                register_shutdown_function(function () use (&$maintenance_on) {
+                    if ($maintenance_on) {
+                        One_Click_Migration::disable_maintenance_mode();
+                        $maintenance_on = false;
+                    }
+                });
+                try {
+                    @set_time_limit(One_Click_Migration::get_timeout());
+                    $db = new OCM_DB();
+                    $result = $db->search_replace_db($db->get_tables(), array('pairs' => $pairs));
+                    $updates = isset($result['updates']) ? (int) $result['updates'] : 0;
+                } finally {
+                    One_Click_Migration::disable_maintenance_mode();
+                    $maintenance_on = false;
+                }
+                if (!empty($result['errors'])) {
+                    One_Click_Migration::write_to_log(sprintf('Error: Extra-domain rewrite failed for %d rows.', count($result['errors'])));
+                    wp_send_json_error(array(
+                        'message' => 'Some addresses could not be updated. Please retry.',
+                        'updates' => $updates,
+                    ), 500);
+                    return;
+                }
+            }
+        }
+
+        delete_option(OCM_Extra_Domains::OPTION);
+        One_Click_Migration::write_to_log(sprintf('SYSLOG: Extra-domain rewrite updates "%d"', $updates));
+        wp_send_json_success(array('updates' => $updates));
+    }
+
+    /**
+     * Hosts were collected during the primary rewrite, so this does not scan the database again.
+     *
+     * @param array  $found
+     * @param string $source_siteurl
+     * @param string $dest_siteurl
+     */
+    private static function store_extra_domain_candidates($found, $source_siteurl, $dest_siteurl)
+    {
+        $report = OCM_Extra_Domains::finalize($found, $source_siteurl, $dest_siteurl);
+        $candidates = isset($report['candidates']) && is_array($report['candidates']) ? $report['candidates'] : array();
+        if (!$candidates) {
+            delete_option(OCM_Extra_Domains::OPTION);
+            One_Click_Migration::write_to_log('SYSLOG: Extra domains awaiting confirmation "0"');
+            return;
+        }
+
+        update_option(OCM_Extra_Domains::OPTION, $candidates, false);
+        One_Click_Migration::write_to_log(sprintf('SYSLOG: Extra domains awaiting confirmation "%d"', count($candidates)));
+        if (!empty($report['omitted'])) {
+            One_Click_Migration::write_to_log(sprintf('SYSLOG: Extra domains omitted from the checklist "%d"', (int) $report['omitted']));
+        }
+        foreach ($candidates as $candidate) {
+            One_Click_Migration::write_to_log(sprintf(
+                'SYSLOG: Extra domain host "%s" class "%s" count "%d" example "%s"',
+                $candidate['host'],
+                $candidate['class'],
+                $candidate['count'],
+                $candidate['example']
+            ));
+        }
+    }
+
 
     public static function delete_restore_options(){
       delete_option('ocm_force_deactivated_plugins');
@@ -4509,6 +4661,8 @@ class OCM_Backup
       delete_option('ocm_excluded_folders');
       delete_option('ocm_skipped_folders');
       delete_option('ocm_eexcluded_folders');
+      delete_option(OCM_Extra_Domains::OPTION);
+      delete_option(OCM_Restore_Precheck::OPTION);
 
     }
 
@@ -4664,6 +4818,33 @@ class OCM_Backup
         $missing = array_values(array_unique($missing));
         sort($missing);
         return $missing;
+    }
+
+    /** Append bounded manifest records once; the final log write mirrors them to S3. */
+    private static function publish_url_manifest($found)
+    {
+        if (!self::backup_context_owns_current_run() || !One_Click_Migration::ensure_private_log_directory()) {
+            return;
+        }
+        $run = get_option(self::BACKUP_RUN_OPTION, array());
+        $bucket = $run['bucket_id'] ?? '';
+        if (!$bucket) {
+            return;
+        }
+        $lines = OCM_URL_Manifest::lines($found, site_url(), $bucket);
+        if (!$lines) {
+            One_Click_Migration::write_to_log('Notice: Backup address inventory unavailable; addresses can be reviewed after restore.');
+            return;
+        }
+        $text = '';
+        foreach ($lines as $line) {
+            $text .= date('m/d/YTH:i:sa') . ' - ' . $line . PHP_EOL;
+        }
+        if (@file_put_contents(OCM_DEBUG_LOG_FILE, $text, FILE_APPEND | LOCK_EX) !== strlen($text)) {
+            One_Click_Migration::write_to_log('Notice: Backup address inventory could not be saved; addresses can be reviewed after restore.');
+            return;
+        }
+        One_Click_Migration::write_to_log('SYSLOG: Backup address inventory saved.');
     }
 
     /**

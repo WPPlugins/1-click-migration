@@ -4,7 +4,7 @@
  * Plugin Name: 1 Click Migration
  * Plugin URI: https://wordpress.org/plugins/1-click-migration/
  * Description: Migrate, copy, or clone your entire site with 1 click. <strong>Any host, no size limitation, no premium versions.</strong>
- * Version: 3.1.16
+ * Version: 3.1.17
  * Author: 1ClickMigration
  * Author URI: https://1clickmigration.com/
  * Text Domain: 1-click-migration
@@ -40,6 +40,9 @@ require_once __DIR__ . '/inc/s3/class-ocm-s3.php';
 require_once __DIR__ . '/inc/db/class-ocm-db-import.php';
 require_once __DIR__ . '/inc/db/class-ocm-search-replace-db.php';
 require_once __DIR__ . '/inc/db/class-ocm-db.php';
+require_once __DIR__ . '/inc/db/class-ocm-extra-domains.php';
+require_once __DIR__ . '/inc/db/class-ocm-url-manifest.php';
+require_once __DIR__ . '/inc/backup/class-ocm-restore-precheck.php';
 require_once __DIR__ . '/inc/handler/class-error-handler.php';
 require_once __DIR__ . '/inc/handler/class-ocm-debug-mode.php';
 
@@ -103,6 +106,8 @@ class One_Click_Migration
         add_action('wp_ajax_ocm_loopback_check', array(__CLASS__, 'loopback_check'));
         add_action('wp_ajax_nopriv_ocm_loopback_check', array(__CLASS__, 'loopback_check'));
         add_action('wp_ajax_ocm_restart_failed_process', array(OCM_Backup::class, 'restart_failed_process'));
+        add_action('wp_ajax_ocm_prepare_restore', array(OCM_Restore_Precheck::class, 'prepare'));
+        add_action('wp_ajax_ocm_apply_extra_domains', array(OCM_Backup::class, 'apply_extra_domains'));
         add_action('admin_post_start_restore', array(OCM_Backup::class, 'start_restore'));
         add_action('admin_post_cancel_actions', array(OCM_Backup::class, 'cancel_actions'));
         add_action('admin_post_ocm_download_log', array(__CLASS__, 'download_log'));
@@ -172,9 +177,9 @@ class One_Click_Migration
             return;
         }
 
-        wp_enqueue_style('custom_ocm_admin_css', plugins_url('css/admin-style.css', __FILE__), array(), self::$version);
+        wp_enqueue_style('custom_ocm_admin_css', plugins_url('css/admin-style.css', __FILE__), array(), self::$version . '.' . filemtime(__DIR__ . '/css/admin-style.css'));
 
-        wp_enqueue_script('custom_ocm_admin_js', plugins_url('js/admin-script.js', __FILE__), array('jquery'), self::$version, true);
+        wp_enqueue_script('custom_ocm_admin_js', plugins_url('js/admin-script.js', __FILE__), array('jquery'), self::$version . '.' . filemtime(__DIR__ . '/js/admin-script.js'), true);
         $ocm_user_email = get_option('ocm_user_email');
         $user_email = '';
         $urlparts = parse_url(home_url());
@@ -218,6 +223,8 @@ class One_Click_Migration
             $show_review_cta = false;
         }
 
+        $extra_domains = OCM_Extra_Domains::public_rows(get_option(OCM_Extra_Domains::OPTION, array()));
+
         wp_localize_script('custom_ocm_admin_js', 'siteData', array(
             'progressUrl' => get_rest_url(null, 'ocm/v1/progress'),
             'userEmail' => $user_email,
@@ -228,12 +235,15 @@ class One_Click_Migration
             'restNonce' => wp_create_nonce('wp_rest'),
             'backupNonce' => wp_create_nonce('one_click_migration_start_backup'),
             'restoreNonce' => wp_create_nonce('one_click_migration_start_restore'),
+            'prepareRestoreNonce' => wp_create_nonce('ocm_prepare_restore'),
             'otherPluginsActive' => $other_active_count,
             'pluginPageUrl' => admin_url('tools.php?page=one-click-migration'),
             'showRestoreSuccess' => $show_restore_success ? 1 : 0,
             'showReviewCta' => $show_review_cta ? 1 : 0,
             'dismissReviewUrl' => wp_nonce_url(admin_url('tools.php?page=one-click-migration&ocm_dismiss_review=1'), 'ocm_dismiss_review'),
             'reviewUrl' => 'https://wordpress.org/plugins/1-click-migration/reviews/#new-post',
+            'extraDomains' => $extra_domains,
+            'extraDomainsNonce' => wp_create_nonce('ocm_apply_extra_domains'),
         ));
     }
 
@@ -306,6 +316,8 @@ class One_Click_Migration
             'ocm_is_stopped',
             'ocm_show_restore_success',
             'ocm_show_review_cta',
+            'ocm_extra_domain_candidates',
+            'ocm_restore_url_plan',
             'ocm_clean_restore_count',
             'ocm_review_ask_dismissed',
             'ocm_user_email',
@@ -372,6 +384,8 @@ class One_Click_Migration
       delete_option('ocm_bucket_id');
       delete_option('ocm_aes_key');
       delete_option('ocm_restore_code_plain');
+      delete_option('ocm_extra_domain_candidates');
+      delete_option('ocm_restore_url_plan');
       delete_option('ocm_active_backup_run');
       delete_option('ocm_backup_uploaded_parts');
       self::clear_backup_plugin_isolation();

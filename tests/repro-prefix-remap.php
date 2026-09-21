@@ -299,6 +299,7 @@ namespace {
     }
     $original_wpdb = $GLOBALS['wpdb'];
     $GLOBALS['wpdb'] = new class {
+        public $data_reads = 0;
         public function get_results($query, $format = null)
         {
             if (strpos($query, 'DESCRIBE ') === 0) {
@@ -308,7 +309,8 @@ namespace {
                 return array(array('wp_test', 'CREATE TABLE `wp_test` (`id` int(11)) ENGINE=InnoDB'));
             }
             if (strpos($query, 'SELECT * FROM ') === 0) {
-                return array();
+                $this->data_reads++;
+                return $this->data_reads === 1 ? array(array('id' => 1, 'url' => 'https://old.temp.domains/image.jpg')) : array();
             }
             return false;
         }
@@ -318,6 +320,18 @@ namespace {
         'export_table propagates a short dump write',
         false === OCM_SQL_Utils::export_table(array('tables' => 'wp_test', 'result-file' => 'ocmshort://dump'))
     );
+    OCM_Short_Write_Stream::$fail_after = PHP_INT_MAX;
+    $collected = array();
+    check(
+        'PHP exporter collects values during its existing row pass',
+        OCM_SQL_Utils::export_table(array(
+            'tables' => 'wp_test',
+            'result-file' => $work . '/collected.sql',
+            'ocm_collect_urls' => function ($value) use (&$collected) { $collected[] = $value; },
+        )) && in_array('https://old.temp.domains/image.jpg', $collected, true)
+    );
+    @unlink($work . '/collected.sql');
+    check('collector adds no extra row reads', $GLOBALS['wpdb']->data_reads === 2);
     $GLOBALS['wpdb'] = $original_wpdb;
 
     file_put_contents($work . '/db/other_usermeta.sql', "DROP TABLE IF EXISTS other_usermeta;\n");

@@ -4,7 +4,7 @@ Tags: backup, migrate, migration, restore, clone
 Requires at least: 4.0
 Tested up to: 7.1
 Requires PHP: 7.4
-Stable tag: 3.1.16
+Stable tag: 3.1.17
 Author URI: https://1clickmigration.com
 License: GPLv3 or later
 License URI: http://www.gnu.org/licenses/gpl-3.0.html
@@ -122,6 +122,9 @@ All of them! Migrate WordPress sites between any hosting providers: Bluehost, Si
 4. Enter the restore code on the destination site to finish your WordPress migration.
 
 == Changelog ==
+= 3.1.17 =
+* **Review addresses before restore**: New backups collect an address inventory during database export. After checking the restore code, administrators can review old-to-new URL previews and select extra domains before restore starts. All choices start unchecked. Approved addresses are updated with the primary site URL in one serialized-safe pass. Older backups keep the post-restore address review.
+
 = 3.1.16 =
 * **Concurrent Backup Safety**: Added an atomic single-flight owner and per-run scratch directory so overlapping starts cannot share SQL dumps, archives, queue items, retry state, or bucket attribution.
 * **Backup Part Accuracy**: Successful uploads are committed before timeout handling and cannot later be marked skipped. Part manifests are bound to the run's registered bucket, and stale workers cannot update a newer run.

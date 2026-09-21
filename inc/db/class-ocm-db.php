@@ -25,6 +25,12 @@ class OCM_DB {
 	private $wpdb;
 
 	/**
+	 * Hosts seen while rewriting, or null when collection is off.
+	 * @var array|null
+	 */
+	private $url_found = null;
+
+	/**
 	 * Initializes the class and its properties.
 	 * @access public
 	 */
@@ -34,6 +40,20 @@ class OCM_DB {
 		$this->wpdb = $wpdb;
 
 		$this->page_size = $this->get_page_size();
+	}
+
+	/**
+	 * Record hosts from cells the current rewrite already reads.
+	 */
+	public function enable_url_collection() {
+		$this->url_found = array();
+	}
+
+	/**
+	 * @return array
+	 */
+	public function collected_urls() {
+		return is_array( $this->url_found ) ? $this->url_found : array();
 	}
 
 	/**
@@ -195,6 +215,8 @@ class OCM_DB {
 	public function search_replace_db( $tables, $args ) {
 		One_Click_Migration::write_to_log('Starting to update URLs in database');
 
+		$pairs = $this->replacement_pairs_from_args( $args );
+
 		$table_report = array(
 			'change' 	=> 0,
 			'updates' 	=> 0,
@@ -215,12 +237,14 @@ class OCM_DB {
 			// Bail out early if there isn't a primary key.
 			if ( null === $primary_key ) {
 				$table_report['skipped'] = true;
-				return array( 'table_complete' => true, 'table_report' => $table_report );
+				One_Click_Migration::write_to_log( sprintf( 'Notice: Skipping URL replace on table "%s" (no primary key).', $table ) );
+				continue;
 			}
 
 			$current_row 	= 0;
 
 			for ( $current_page = 0; $current_page < $pages; $current_page++ ) {
+				$this->touch_replace_limits();
 				$start 	= $current_page * $this->page_size;
 				$end 	= $this->page_size;
 
@@ -248,8 +272,13 @@ class OCM_DB {
 							continue;
 						}
 
+						if ( is_array( $this->url_found ) ) {
+							OCM_Extra_Domains::collect_from_text( $this->url_found, $data_to_fix );
+						}
+
 						// Run a search replace on the data that'll respect the serialisation.
-						$edited_data = $this->recursive_unserialize_replace( $args['search_for'], $args['replace_with'], $data_to_fix, false );
+						// Pairs are longest-first so a path-prefixed temp URL is rewritten before the bare host.
+						$edited_data = $this->apply_replacement_pairs( $data_to_fix, $pairs );
 
 						// Something was changed
 						if ( $edited_data != $data_to_fix ) {
@@ -301,23 +330,24 @@ class OCM_DB {
 	 * @param  array  			$data       		Used to pass any subordinate arrays back to in.
 	 * @param  boolean 			$serialised 		Does the array passed via $data need serialising.
 	 *
+	 * @param boolean      $url_boundary Require a URL component boundary after the match.
 	 * @return string|array	The original array with all elements replaced as needed.
 	 */
-	public function recursive_unserialize_replace( $from = '', $to = '', $data = '', $serialised = false ) {
+	public function recursive_unserialize_replace( $from = '', $to = '', $data = '', $serialised = false, $url_boundary = false ) {
 
 
 		try {
 
 
 			if ( is_string( $data ) && ! is_serialized_string( $data ) && ( $unserialized = $this->unserialize( $data ) ) !== false ) {
-				$data = $this->recursive_unserialize_replace( $from, $to, $unserialized, true);
+				$data = $this->recursive_unserialize_replace( $from, $to, $unserialized, true, $url_boundary );
 
 			}
 
 			elseif ( is_array( $data ) ) {
 				$_tmp = array( );
 				foreach ( $data as $key => $value ) {
-					$_tmp[ $key ] = $this->recursive_unserialize_replace( $from, $to, $value, false );
+					$_tmp[ $key ] = $this->recursive_unserialize_replace( $from, $to, $value, false, $url_boundary );
 				}
 
 				$data = $_tmp;
@@ -333,7 +363,7 @@ class OCM_DB {
 				$props = get_object_vars( $data );
 				foreach ( $props as $key => $value ) {
 					if(!is_a($value, '__PHP_Incomplete_Class')){
-						$_tmp->$key = $this->recursive_unserialize_replace( $from, $to, $value, false );
+						$_tmp->$key = $this->recursive_unserialize_replace( $from, $to, $value, false, $url_boundary );
 					}
 				}
 
@@ -347,9 +377,7 @@ class OCM_DB {
 				$data = $this->unserialize( $data );
 				if ( $data !== false ) {
 
-					$datatest = $this->unserialize( $data );
-					$from = $this->unserialize($from);
-					$data = $this->str_replace( $from, $to, $data );
+					$data = $this->recursive_unserialize_replace( $from, $to, $data, false, $url_boundary );
 					$data = serialize( $data );
 				}
 
@@ -357,7 +385,7 @@ class OCM_DB {
 
 			else {
 				if ( is_string( $data ) ) {
-					$data = $this->str_replace( $from, $to, $data );
+					$data = $this->str_replace( $from, $to, $data, $url_boundary );
 				}
 			}
 
@@ -424,11 +452,87 @@ class OCM_DB {
 	 *
 	 * @return string
 	 */
-	public function str_replace( $from, $to, $data ) {
+	public function str_replace( $from, $to, $data, $url_boundary = false ) {
+		if ( $url_boundary ) {
+			// Match the end of the authority/path component, never a longer host,
+			// another port, userinfo, or a longer temporary username.
+			$pattern = '~' . preg_quote( $from, '~' ) . '(?=$|[/?#\s"\'<>\\\\])~i';
+			return preg_replace_callback( $pattern, function () use ( $to ) {
+				return $to;
+			}, $data );
+		}
+
 
 			$data = str_ireplace( $from, $to, $data );
 
 		return $data;
+	}
+
+	/**
+	 * One search/replace pair, or several ordered pairs when 'pairs' is set.
+	 *
+	 * @param array $args
+	 * @return array<int, array{search: string, replace: string}>
+	 */
+	private function replacement_pairs_from_args( $args ) {
+		$pairs = array();
+		if ( isset( $args['pairs'] ) && is_array( $args['pairs'] ) ) {
+			$pairs = $args['pairs'];
+		} else {
+			$pairs[] = array(
+				'search'  => isset( $args['search_for'] ) ? $args['search_for'] : '',
+				'replace' => isset( $args['replace_with'] ) ? $args['replace_with'] : '',
+			);
+		}
+
+		$unique = array();
+		foreach ( $pairs as $pair ) {
+			if ( ! is_array( $pair ) || ! isset( $pair['search'] ) || '' === $pair['search'] ) {
+				continue;
+			}
+			$unique[ $pair['search'] ] = array(
+				'search'  => $pair['search'],
+				'replace' => isset( $pair['replace'] ) ? $pair['replace'] : '',
+				'url_boundary' => ! empty( $pair['url_boundary'] ),
+			);
+		}
+		$pairs = array_values( $unique );
+		usort(
+			$pairs,
+			function ( $a, $b ) {
+				$len = strlen( $b['search'] ) - strlen( $a['search'] );
+				if ( 0 !== $len ) {
+					return $len;
+				}
+				return strcmp( $a['search'], $b['search'] );
+			}
+		);
+		return $pairs;
+	}
+
+	/**
+	 * @param mixed $data
+	 * @param array $pairs
+	 * @return mixed
+	 */
+	private function apply_replacement_pairs( $data, $pairs ) {
+		$edited = $data;
+		foreach ( $pairs as $pair ) {
+			$edited = $this->recursive_unserialize_replace( $pair['search'], $pair['replace'], $edited, false, ! empty( $pair['url_boundary'] ) );
+		}
+		return $edited;
+	}
+
+	/**
+	 * Keep a long URL rewrite inside the worker time limit.
+	 */
+	private function touch_replace_limits() {
+		if ( method_exists( One_Click_Migration::class, 'worker_heartbeat' ) ) {
+			One_Click_Migration::worker_heartbeat();
+		}
+		if ( method_exists( One_Click_Migration::class, 'get_timeout' ) ) {
+			@set_time_limit( One_Click_Migration::get_timeout() );
+		}
 	}
 
 }
