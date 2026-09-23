@@ -1680,9 +1680,13 @@ class OCM_Backup
         $skipped_restore_files = get_option('ocm_skipped_folders', []);
 
         if (!self::create_native_zip_from_directory($filepath, $filename)) {
+            // The DB dump is bounded in size, so the in-process streaming
+            // zip is the last resort even after the monitored system zip
+            // failed (#69); only its own failure ends the backup.
             if (self::$archive_backend_failed) {
-                return false;
+                One_Click_Migration::write_to_log(' SYSLOG: Trying in-process streaming zip as the last database archive failover.');
             }
+            @unlink($filename);
             $zip = new ZipFile();
             $dir = new DirectoryIterator($filepath);
             foreach ($dir as $fileinfo) {
@@ -1693,13 +1697,21 @@ class OCM_Backup
 
             try {
                 $zip->saveAsFile($filename);
-            } catch (ZipException $e) {
-                One_Click_Migration::write_to_log(sprintf('Error: %s', $e->getMessage()));
+            } catch (\Throwable $e) {
+                @unlink($filename);
+                One_Click_Migration::write_to_log(sprintf(
+                    'Error: In-process zip failover could not save "%s": %s (free: %d bytes)',
+                    basename($filename),
+                    $e->getMessage(),
+                    (int) self::get_free_disk_space(dirname($filename))
+                ));
 
-                self::fail_backup('zip archive could not be saved: ' . $e->getMessage());
+                self::fail_backup('database archive could not be created by ZipArchive, system zip or in-process zip: ' . $e->getMessage());
                 exit;
             }
             $zip->close();
+            delete_option('ocm_zip_close_in_progress_' . md5($filename));
+            One_Click_Migration::write_to_log(sprintf(' SYSLOG: Created "%s" with in-process streaming zip.', basename($filename)));
         }
 
         $retry_count = get_option('ocm_backup_encrypt_retry_db', 0);
@@ -2351,17 +2363,7 @@ class OCM_Backup
                 'Notice: Previous ZipArchive::close() did not finish for "%s"; switching to slower monitored zip failover.',
                 basename($filename)
             ));
-            $failover_result = self::create_cli_zip_from_directory($folder_path, $filename);
-            if ($failover_result === true) {
-                delete_option($close_marker);
-                return true;
-            }
-            self::$archive_backend_failed = true;
-            One_Click_Migration::write_to_log(sprintf(
-                'Error: Slower zip failover was unavailable or failed for "%s".',
-                basename($filename)
-            ));
-            return false;
+            return self::run_zip_close_failover($folder_path, $filename, $close_marker);
         }
 
         if (!class_exists('ZipArchive')) {
@@ -2435,7 +2437,10 @@ class OCM_Backup
         ));
 
         update_option($close_marker, time(), false);
-        $closed = $zip->close();
+        if (function_exists('error_clear_last')) {
+            error_clear_last();
+        }
+        $closed = @$zip->close();
         if ($closed || self::is_valid_zip_archive($filename)) {
             delete_option($close_marker);
             if (!$closed) {
@@ -2447,16 +2452,61 @@ class OCM_Backup
             return true;
         }
 
+        // close() returned false: libzip discarded the archive. Record why
+        // (status/warning, bytes left on disk, free space) so support can tell
+        // a disk/quota failure from a libzip one, then fail over.
+        $close_warning = error_get_last();
+        try {
+            $status = @$zip->getStatusString();
+        } catch (\Throwable $e) {
+            $status = '';
+        }
         One_Click_Migration::write_to_log(sprintf(
-            'Notice: ZipArchive::close() failed for "%s"; switching to slower monitored zip failover.',
-            basename($filename)
+            'Notice: ZipArchive::close() failed for "%s" (%d files, %d bytes queued; status: %s; warning: %s; on disk: %d bytes; free: %d bytes); switching to slower monitored zip failover.',
+            basename($filename),
+            $queued_files,
+            $queued_bytes,
+            is_string($status) && '' !== $status ? $status : 'n/a',
+            is_array($close_warning) && isset($close_warning['message']) ? $close_warning['message'] : 'n/a',
+            is_file($filename) ? (int) @filesize($filename) : 0,
+            (int) self::get_free_disk_space(dirname($filename))
         ));
+        return self::run_zip_close_failover($folder_path, $filename, $close_marker);
+    }
+
+    /**
+     * Shared failover after ZipArchive::close() failed or hung. Tries the
+     * monitored system zip first. When that is unavailable on the host (no
+     * proc_open or zip binary), returns false with $archive_backend_failed
+     * cleared so callers use their in-process PhpZip streaming fallback
+     * instead of dead-ending. A system zip that ran and failed sets
+     * $archive_backend_failed.
+     */
+    private static function run_zip_close_failover($folder_path, $filename, $close_marker)
+    {
+        // Never let a half-written primary archive be mistaken for a result.
+        @unlink($filename);
         $failover_result = self::create_cli_zip_from_directory($folder_path, $filename);
         if ($failover_result === true) {
             delete_option($close_marker);
             return true;
         }
+        @unlink($filename);
+
+        if ($failover_result === null) {
+            self::$archive_backend_failed = false;
+            One_Click_Migration::write_to_log(sprintf(
+                'Notice: Monitored system zip is unavailable on this host for "%s"; switching to in-process streaming zip failover.',
+                basename($filename)
+            ));
+            return false;
+        }
+
         self::$archive_backend_failed = true;
+        One_Click_Migration::write_to_log(sprintf(
+            'Notice: Slower zip failover failed for "%s".',
+            basename($filename)
+        ));
         return false;
     }
 

@@ -3,7 +3,7 @@
         'name' => 'oneclickmigration/1-click-migration',
         'pretty_version' => 'dev-master',
         'version' => 'dev-master',
-        'reference' => 'dcaf42130e8f8a7124c41296925240d35b4cd83e',
+        'reference' => '49a4c0251d190bea0f383f49dac3abb750028e0c',
         'type' => 'library',
         'install_path' => __DIR__ . '/../../',
         'aliases' => array(),
@@ -58,7 +58,7 @@
         'oneclickmigration/1-click-migration' => array(
             'pretty_version' => 'dev-master',
             'version' => 'dev-master',
-            'reference' => 'dcaf42130e8f8a7124c41296925240d35b4cd83e',
+            'reference' => '49a4c0251d190bea0f383f49dac3abb750028e0c',
             'type' => 'library',
             'install_path' => __DIR__ . '/../../',
             'aliases' => array(),

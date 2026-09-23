@@ -1,0 +1,24 @@
+{
+    "name": "oneclickmigration/1-click-migration",
+    "description": "The 1-click-migration WordPress plugin",
+    "keywords": [
+        "backup",
+        "1-click-migration",
+        "wordpress"
+    ],
+    "require": {
+        "php": ">=7.0",
+        "a5hleyrich/wp-background-processing": "^1.0",
+        "guzzlehttp/guzzle": "^6.5.5",
+        "nelexa/zip": "^3.3",
+        "phpseclib/phpseclib": "^2.0"
+    },
+    "config": {
+        "optimize-autoloader": true,
+        "preferred-install": "dist",
+        "sort-packages": true,
+        "platform": {
+            "php": "7.4"
+        }
+    }
+}
