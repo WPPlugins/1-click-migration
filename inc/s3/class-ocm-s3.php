@@ -326,6 +326,9 @@ class OCM_S3
         curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 15);
         curl_setopt($ch, CURLOPT_TIMEOUT, max(60, One_Click_Migration::get_timeout()));
         curl_setopt($ch, CURLOPT_FAILONERROR, false);
+        // Capture the body: without this an S3 error document is printed into
+        // whatever request runs the worker (possibly the progress REST call).
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
         curl_setopt($ch, CURLOPT_HEADERFUNCTION, function($curl, $header) use (&$headers) {
             $length = strlen($header);
             $parts = explode(':', $header, 2);
@@ -335,14 +338,17 @@ class OCM_S3
             return $length;
         });
 
-        $ok = curl_exec($ch);
+        // A successful PUT has an empty body, so only false means failure.
+        $body = curl_exec($ch);
         $errno = curl_errno($ch);
         $error = curl_error($ch);
         $http_code = (int) curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
-        curl_close($ch);
+        // Dropping the last reference closes the handle on every PHP version;
+        // curl_close() is a no-op since 8.0 and deprecated in 8.5.
+        unset($ch);
         fclose($file_handle);
 
-        if (!$ok || $errno !== 0 || $http_code < 200 || $http_code >= 300) {
+        if ($body === false || $errno !== 0 || $http_code < 200 || $http_code >= 300) {
             One_Click_Migration::write_to_log(sprintf(
                 'Upload failed for multipart part at offset %d: %s',
                 $offset,
@@ -351,7 +357,16 @@ class OCM_S3
             return false;
         }
 
-        return $headers['etag'] ?? false;
+        if (empty($headers['etag'])) {
+            One_Click_Migration::write_to_log(sprintf(
+                'Upload failed for multipart part at offset %d: no ETag in the storage response (HTTP %d)',
+                $offset,
+                $http_code
+            ));
+            return false;
+        }
+
+        return $headers['etag'];
     }
 
     public static function upload_zip( $zip_file )

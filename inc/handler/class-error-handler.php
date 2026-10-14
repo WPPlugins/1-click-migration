@@ -72,6 +72,27 @@ class Error_Handler
           return;
       }
 
+      // A fatal ends the request, and the server monitor and progress bar key
+      // on its line. Always log it: a retry within the hour, or a second
+      // attempt whose log still holds the first one's copy, must show its own
+      // crash. No dedup and no log read, which can itself fail right after an
+      // out-of-memory fatal.
+      if (self::is_fatal($errno)) {
+          One_Click_Migration::write_to_log(sprintf(' SYSLOG: "%s"', self::getMessage($errno, $errstr, $errfile, $errline)));
+          One_Click_Migration::write_to_log($errstr);
+          // Only die for fatal errors originating from plugin code
+          if ($is_plugin_error) {
+              die();
+          }
+          return;
+      }
+
+      // Other errors are only logged in debug mode; skip the dedup bookkeeping
+      // (an option write per error) when they won't be logged anyway.
+      if (WP_DEBUG !== true && !OCM_Debug_Mode::is_active()) {
+          return;
+      }
+
       // Deduplicate: suppress identical errors within the dedup interval
       $error_fingerprint = md5($errstr . '|' . $errfile . '|' . $errline);
       $now = microtime(true);
@@ -106,22 +127,7 @@ class Error_Handler
 
       $log_message = self::getMessage($errno, $errstr, $errfile, $errline);
       if(!self::substr_in_array($errstr, $file_array)){
-        switch ($errno) {
-            case E_ERROR :
-                One_Click_Migration::write_to_log(sprintf(' SYSLOG: "%s"', $log_message));
-                One_Click_Migration::write_to_log($errstr);
-                // Only die for fatal errors originating from plugin code
-                if ($is_plugin_error) {
-                    die();
-                }
-                break;
-            case E_NOTICE :
-            case E_WARNING :
-            default :
-                if (WP_DEBUG === true || OCM_Debug_Mode::is_active()) One_Click_Migration::write_to_log(sprintf(' SYSLOG: "%s"', $log_message));
-                break;
-        }
-
+        One_Click_Migration::write_to_log(sprintf(' SYSLOG: "%s"', $log_message));
       }
 
     }
@@ -184,11 +190,26 @@ class Error_Handler
       return !empty($filtered);
     }
 
+    /**
+     * Error types that end the request. None of them reach a set_error_handler()
+     * callback; they arrive via shutdown() / error_get_last().
+     *
+     * @param int $errno
+     * @return bool
+     */
+    private static function is_fatal($errno)
+    {
+        return in_array($errno, array(E_ERROR, E_PARSE, E_CORE_ERROR, E_COMPILE_ERROR), true);
+    }
+
     private static function getMessage($errno, $errstr, $errfile, $errline)
     {
         $result = '[PHP ERR]';
         switch ($errno) {
             case E_ERROR :
+            case E_PARSE :
+            case E_CORE_ERROR :
+            case E_COMPILE_ERROR :
                 $result .= '[FATAL]';
                 break;
             case E_WARNING :

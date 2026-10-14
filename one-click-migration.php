@@ -4,7 +4,7 @@
  * Plugin Name: 1 Click Migration
  * Plugin URI: https://wordpress.org/plugins/1-click-migration/
  * Description: Migrate, copy, or clone your entire site with 1 click. <strong>Any host, no size limitation, no premium versions.</strong>
- * Version: 3.1.18
+ * Version: 3.1.20
  * Author: 1ClickMigration
  * Author URI: https://1clickmigration.com/
  * Text Domain: 1-click-migration
@@ -38,7 +38,6 @@ require_once __DIR__ . '/inc/admin/class-admin-page.php';
 require_once __DIR__ . '/inc/backup/class-ocm-backup.php';
 require_once __DIR__ . '/inc/s3/class-ocm-s3.php';
 require_once __DIR__ . '/inc/db/class-ocm-db-import.php';
-require_once __DIR__ . '/inc/db/class-ocm-search-replace-db.php';
 require_once __DIR__ . '/inc/db/class-ocm-db.php';
 require_once __DIR__ . '/inc/db/class-ocm-extra-domains.php';
 require_once __DIR__ . '/inc/db/class-ocm-url-manifest.php';
@@ -63,6 +62,9 @@ class One_Click_Migration
 
     /**@var OCM_BackgroundRestore */
     public static $process_restore_single;
+
+    /** @var int Last transfer_heartbeat() write, for its 10-second throttle. */
+    private static $last_transfer_heartbeat = 0;
 
     /** @var string */
     private static $version;
@@ -224,6 +226,8 @@ class One_Click_Migration
         }
 
         $extra_domains = OCM_Extra_Domains::public_rows(get_option(OCM_Extra_Domains::OPTION, array()));
+        $show_restore_partial = (bool) get_option('ocm_restore_was_partial', false);
+        $show_restore_warned = (bool) get_option(OCM_Backup::OPTION_RESTORE_WAS_WARNED, false);
 
         wp_localize_script('custom_ocm_admin_js', 'siteData', array(
             'progressUrl' => get_rest_url(null, 'ocm/v1/progress'),
@@ -239,6 +243,8 @@ class One_Click_Migration
             'otherPluginsActive' => $other_active_count,
             'pluginPageUrl' => admin_url('tools.php?page=one-click-migration'),
             'showRestoreSuccess' => $show_restore_success ? 1 : 0,
+            'showRestorePartial' => $show_restore_partial ? 1 : 0,
+            'showRestoreWarned' => $show_restore_warned ? 1 : 0,
             'showReviewCta' => $show_review_cta ? 1 : 0,
             'dismissReviewUrl' => wp_nonce_url(admin_url('tools.php?page=one-click-migration&ocm_dismiss_review=1'), 'ocm_dismiss_review'),
             'reviewUrl' => 'https://wordpress.org/plugins/1-click-migration/reviews/#new-post',
@@ -438,6 +444,7 @@ class One_Click_Migration
       delete_option('ocm_worker_revival_count');
       delete_option('ocm_dispatch_blocked');
       delete_option('ocm_backup_missing_parts');
+      delete_option('ocm_backup_excluded_parts');
       delete_option('ocm_backup_parts_known');
 
     }
@@ -902,6 +909,15 @@ PHP;
         delete_site_transient('wp_ocm_background_backup_process_lock');
         delete_site_transient('wp_ocm_background_restore_process_lock');
 
+        // Drop leftover staging tables from an interrupted restore.
+        if (class_exists('OCM\\OCM_SQL_Utils')) {
+            global $wpdb;
+            if (isset($wpdb) && is_object($wpdb)) {
+                \OCM\OCM_SQL_Utils::drop_stale_temp_tables($wpdb, null, isset($wpdb->base_prefix) ? $wpdb->base_prefix : null);
+            }
+            delete_option(\OCM\OCM_SQL_Utils::OPTION_STAGING_PREFIX);
+        }
+
         // Delete ocm_restore folder
         if(!WP_DEBUG){
           if (is_dir(WP_CONTENT_DIR . '/ocm_restore/')) {
@@ -970,6 +986,7 @@ PHP;
                 return;
             }
             self::extract_missing_parts_from_backup_log($remote, $bucket_id);
+            OCM_SQL_Utils::store_backup_plugin_version_from_log($remote);
             $file = OCM_DEBUG_LOG_FILE;
             $local = file_exists($file) ? (string) @file_get_contents($file) : '';
             $combined = rtrim($remote, "\r\n") . PHP_EOL . $local;
@@ -989,6 +1006,7 @@ PHP;
     public static function extract_missing_parts_from_backup_log($remote_log, $bucket_id)
     {
         $missing = array();
+        $excluded_at_backup = array();
         $structured = false;
 
         if (preg_match_all('/BACKUP_PARTS bucket=' . preg_quote($bucket_id, '/') . ' ([a-z_= ]+)/', $remote_log, $matches)) {
@@ -996,8 +1014,17 @@ PHP;
             $line = end($matches[1]);
             foreach (explode(' ', trim($line)) as $pair) {
                 $kv = explode('=', $pair, 2);
-                if (count($kv) === 2 && in_array($kv[1], array('skipped', 'excluded'), true)) {
-                    $missing[] = $kv[0];
+                if (count($kv) !== 2) {
+                    continue;
+                }
+                $part = strtolower($kv[0]);
+                $status = $kv[1];
+                // Skipped (timeout / failure) parts warn on restore. User-excluded
+                // parts at backup time are intentional and must not warn.
+                if ($status === 'skipped') {
+                    $missing[] = $part;
+                } elseif ($status === 'excluded') {
+                    $excluded_at_backup[] = $part;
                 }
             }
         } elseif (preg_match_all('/Notice: File (\w+) was skipped due to timeout/i', $remote_log, $matches)) {
@@ -1007,7 +1034,9 @@ PHP;
         }
 
         $missing = array_values(array_unique($missing));
+        $excluded_at_backup = array_values(array_unique($excluded_at_backup));
         update_option('ocm_backup_missing_parts', $missing, false);
+        update_option('ocm_backup_excluded_parts', $excluded_at_backup, false);
         update_option('ocm_backup_parts_known', $structured ? 1 : 0, false);
 
         return $missing;
@@ -1021,6 +1050,28 @@ PHP;
     public static function worker_heartbeat()
     {
         update_option('ocm_worker_heartbeat', time(), false);
+    }
+
+    /**
+     * Heartbeat from inside one long call (a download or decrypt) that doesn't
+     * return to the worker loop. At most every 10 seconds it refreshes the
+     * heartbeat and the worker's process lock, so the watchdog never takes a
+     * busy worker for a stalled one and starts a second one (#79).
+     *
+     * @param \WP_Background_Process|null $process The worker running the call.
+     */
+    public static function transfer_heartbeat($process = null)
+    {
+        $now = time();
+        if ($now - self::$last_transfer_heartbeat < 10) {
+            return;
+        }
+        self::$last_transfer_heartbeat = $now;
+
+        self::worker_heartbeat();
+        if (is_object($process) && method_exists($process, 'lock_process')) {
+            $process->lock_process(false);
+        }
     }
 
     /**

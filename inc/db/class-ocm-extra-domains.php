@@ -173,6 +173,188 @@ class OCM_Extra_Domains {
 	}
 
 	/**
+	 * Primary siteurl → destination pairs, including http/https, www, path
+	 * prefixes (cPanel /~user), and JSON-escaped variants.
+	 *
+	 * @param string $source_siteurl
+	 * @param string $dest_siteurl
+	 * @return array<int, array{search: string, replace: string, url_boundary?: bool}>
+	 */
+	public static function primary_replacement_pairs( $source_siteurl, $dest_siteurl ) {
+		$source_siteurl = (string) $source_siteurl;
+		$dest_siteurl   = (string) $dest_siteurl;
+		if ( '' === $source_siteurl || 0 === strcasecmp( $source_siteurl, $dest_siteurl ) ) {
+			return array();
+		}
+
+		$pairs = array(
+			array(
+				'search'       => $source_siteurl,
+				'replace'      => $dest_siteurl,
+				// Always boundary-safe: never rewrite a longer host that merely
+				// contains the old site host as a substring (cdn.oldsite.com,
+				// example.com.au when searching example.com, etc.).
+				'url_boundary' => true,
+			),
+		);
+
+		$parts = parse_url( $source_siteurl );
+		if ( is_array( $parts ) && ! empty( $parts['host'] ) ) {
+			$host = strtolower( (string) $parts['host'] );
+			if ( 0 === strpos( $host, 'www.' ) ) {
+				$host = substr( $host, 4 );
+			}
+			$search_host = $host;
+			if ( ! empty( $parts['port'] ) ) {
+				$search_host .= ':' . (int) $parts['port'];
+			}
+
+			$path = isset( $parts['path'] ) ? (string) $parts['path'] : '';
+			$path = rtrim( $path, '/' );
+			// Subfolder / ~user installs: only scheme and www variants of
+			// host+full path. No bare-host pairs (those silently rewrite
+			// localhost/otherproject or ~otheruser on shared hosts).
+			if ( '' !== $path && '/' !== $path ) {
+				$pairs = array_merge(
+					$pairs,
+					self::path_locked_host_pairs( $search_host, $path, $dest_siteurl )
+				);
+			} else {
+				$path_prefixes = array();
+				$pairs         = array_merge(
+					$pairs,
+					self::replacement_pairs(
+						array(
+							'search_host'   => $search_host,
+							'path_prefixes' => $path_prefixes,
+						),
+						$dest_siteurl
+					)
+				);
+			}
+		}
+
+		return self::with_json_escaped_variants( $pairs );
+	}
+
+	/**
+	 * Scheme/www variants of host + full site path only (no bare host).
+	 *
+	 * @param string $search_host Host with optional port, www already stripped.
+	 * @param string $path        Absolute path without trailing slash (e.g. /~user or /subfolder).
+	 * @param string $dest_siteurl
+	 * @return array<int, array{search: string, replace: string, url_boundary: bool}>
+	 */
+	public static function path_locked_host_pairs( $search_host, $path, $dest_siteurl ) {
+		$search_host = strtolower( (string) $search_host );
+		$path        = (string) $path;
+		if ( ! preg_match( '/^[a-z0-9.:-]+$/', $search_host ) || false !== strpos( $search_host, '..' ) ) {
+			return array();
+		}
+		if ( '' === $path || '/' === $path || $path[0] !== '/' ) {
+			return array();
+		}
+		$dest = self::site_origin( $dest_siteurl );
+		// Prefer the full destination URL (may include a path) as the replace
+		// target for path-locked pairs, matching the exact primary pair.
+		$dest_full = rtrim( (string) $dest_siteurl, '/' );
+		if ( '' === $dest_full ) {
+			$dest_full = $dest;
+		}
+		if ( '' === $dest_full ) {
+			return array();
+		}
+
+		$host_only = self::host_without_port( $search_host );
+		$hosts     = array( $search_host );
+		if ( self::allow_www_variant( $host_only ) && 0 !== strpos( $host_only, 'www.' ) ) {
+			$hosts[] = 'www.' . $search_host;
+		}
+
+		$pairs = array();
+		foreach ( array( 'http', 'https' ) as $scheme ) {
+			foreach ( $hosts as $host ) {
+				$search = $scheme . '://' . $host . $path;
+				if ( 0 === strcasecmp( $search, $dest_full ) ) {
+					continue;
+				}
+				$pairs[ $search ] = $dest_full;
+			}
+		}
+
+		$ordered = array();
+		foreach ( $pairs as $search => $replace ) {
+			$ordered[] = array(
+				'search'       => $search,
+				'replace'      => $replace,
+				'url_boundary' => true,
+			);
+		}
+		usort(
+			$ordered,
+			function ( $a, $b ) {
+				$len = strlen( $b['search'] ) - strlen( $a['search'] );
+				if ( 0 !== $len ) {
+					return $len;
+				}
+				return strcmp( $a['search'], $b['search'] );
+			}
+		);
+		return $ordered;
+	}
+
+	/**
+	 * Add JSON-escaped URL variants (https:\/\/…) alongside plain pairs.
+	 *
+	 * @param array<int, array{search: string, replace: string, url_boundary?: bool}> $pairs
+	 * @return array<int, array{search: string, replace: string, url_boundary?: bool}>
+	 */
+	public static function with_json_escaped_variants( $pairs ) {
+		if ( ! is_array( $pairs ) ) {
+			return array();
+		}
+
+		$out  = array();
+		$seen = array();
+		foreach ( $pairs as $pair ) {
+			if ( ! is_array( $pair ) || ! isset( $pair['search'] ) || '' === $pair['search'] ) {
+				continue;
+			}
+			$search = (string) $pair['search'];
+			if ( ! isset( $seen[ $search ] ) ) {
+				$seen[ $search ] = true;
+				$out[]           = array(
+					'search'       => $search,
+					'replace'      => isset( $pair['replace'] ) ? (string) $pair['replace'] : '',
+					'url_boundary' => ! empty( $pair['url_boundary'] ),
+				);
+			}
+			$esc_search  = str_replace( '/', '\\/', $search );
+			$esc_replace = str_replace( '/', '\\/', isset( $pair['replace'] ) ? (string) $pair['replace'] : '' );
+			if ( $esc_search !== $search && ! isset( $seen[ $esc_search ] ) ) {
+				$seen[ $esc_search ] = true;
+				$out[]               = array(
+					'search'       => $esc_search,
+					'replace'      => $esc_replace,
+					'url_boundary' => ! empty( $pair['url_boundary'] ),
+				);
+			}
+		}
+
+		usort(
+			$out,
+			function ( $a, $b ) {
+				$len = strlen( $b['search'] ) - strlen( $a['search'] );
+				if ( 0 !== $len ) {
+					return $len;
+				}
+				return strcmp( $a['search'], $b['search'] );
+			}
+		);
+		return $out;
+	}
+
+	/**
 	 * Longest-first http and https pairs, including a /~user path prefix when one was seen.
 	 *
 	 * @param array  $candidate

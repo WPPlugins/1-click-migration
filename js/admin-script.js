@@ -449,11 +449,21 @@
         var dismissUrl = (typeof siteData !== 'undefined' && siteData.dismissReviewUrl)
             ? siteData.dismissReviewUrl
             : '';
-        var bodyText = withReviewCta
-            ? 'Your site was restored successfully. If this plugin helped, leave a quick review on WordPress.org.'
-            : 'Your site was restored successfully.';
+        var isPartial = typeof siteData !== 'undefined' && ocmFlagOn(siteData.showRestorePartial);
+        var isWarned = typeof siteData !== 'undefined' && ocmFlagOn(siteData.showRestoreWarned);
+        var isIncomplete = isPartial || isWarned;
+        var titleText = isPartial
+            ? 'Restore completed with partial updates'
+            : (isWarned ? 'Restore completed with warnings' : 'Restore complete');
+        var bodyText = isPartial
+            ? 'Your site was restored, but some address updates did not apply. Review remaining links on your site.'
+            : (isWarned
+                ? 'Your site was restored, but some parts were skipped or incomplete. Check the migration log for details.'
+                : (withReviewCta
+                    ? 'Your site was restored successfully. If this plugin helped, leave a quick review on WordPress.org.'
+                    : 'Your site was restored successfully.'));
         var reviewBlock = '';
-        if (withReviewCta) {
+        if (withReviewCta && !isIncomplete) {
             reviewBlock = ''
                 + '      <a class="ocm-btn ocm-btn-primary ocm-modal-review" id="ocm-review-btn" href="' + reviewUrl + '" target="_blank" rel="noopener noreferrer">Leave a review</a>'
                 + (dismissUrl
@@ -467,8 +477,8 @@
             + '  <div class="ocm-modal-backdrop" data-ocm-modal-close></div>'
             + '  <div class="' + cardClass + '">'
             + '    <button type="button" class="ocm-modal-close" data-ocm-modal-close aria-label="Close">&times;</button>'
-            + '    <div class="ocm-modal-icon" aria-hidden="true">✓</div>'
-            + '    <h2 id="ocm-restore-success-title" class="ocm-modal-title">Restore complete</h2>'
+            + '    <div class="ocm-modal-icon" aria-hidden="true">' + (isIncomplete ? '!' : '✓') + '</div>'
+            + '    <h2 id="ocm-restore-success-title" class="ocm-modal-title">' + titleText + '</h2>'
             + '    <p class="ocm-modal-body">' + bodyText + '</p>'
             + domains
             + '    <div class="ocm-modal-actions">'

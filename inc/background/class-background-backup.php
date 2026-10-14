@@ -173,6 +173,15 @@ class OCM_BackgroundBackup extends WP_Background_Process
      * from processing the same batch simultaneously.
      */
     protected function handle() {
+        // A backup can't start while a restore runs, so backup rows seen now came
+        // in with the restored database: never resume them (#78). Drop only the
+        // backup queue; the restore's queue and status stay untouched.
+        if (get_option('ocm_action_start_restore')) {
+            One_Click_Migration::write_to_log(' SYSLOG: Backup worker refused: a restore is running on this site; dropped the backup queue.');
+            OCM_BackgroundHelper::delete_backup_batch_process();
+            return;
+        }
+
         // Acquire a database-level advisory lock to prevent concurrent handlers.
         // GET_LOCK with timeout=0 returns immediately: 1 if acquired, 0 if held by another session.
         // The lock is automatically released when the database connection closes (e.g. on wp_die/crash).
@@ -191,9 +200,22 @@ class OCM_BackgroundBackup extends WP_Background_Process
         $this->lock_process();
         $isStopProcess = false;
         $isEndProcess = false;
+        $drainedElsewhere = false;
 
         do {
             $batch = $this->get_batch();
+            if (!self::is_usable_batch($batch)) {
+                if (is_object($batch) && isset($batch->key) && $batch->key !== '') {
+                    // Unreadable batch row: drop it so the queue can't stall on it.
+                    One_Click_Migration::write_to_log(' SYSLOG: Dropping unreadable backup batch row.');
+                    $this->delete($batch->key);
+                    continue;
+                }
+                // The last batch was finished by the worker that released this
+                // lock; it completes the run. Don't complete it twice (#72).
+                $drainedElsewhere = true;
+                break;
+            }
             One_Click_Migration::write_to_log(' SYSLOG: *** BATCH RETRIEVED: ' . count($batch->data) . ' items ***');
 
             foreach ( $batch->data as $key => $value ) {
@@ -238,6 +260,11 @@ class OCM_BackgroundBackup extends WP_Background_Process
         // Release the advisory lock before dispatching next process or completing.
         $wpdb->query( $wpdb->prepare( "SELECT RELEASE_LOCK(%s)", $lock_name ) );
 
+        if ($drainedElsewhere) {
+            One_Click_Migration::write_to_log(' SYSLOG: Backup queue already drained by another worker - this instance will exit');
+            wp_die();
+        }
+
         if (self::RETURN_TYPE_STOP_PROCESSS === $isStopProcess) {
             wp_die();
         }
@@ -256,6 +283,18 @@ class OCM_BackgroundBackup extends WP_Background_Process
         }
 
         wp_die();
+    }
+
+    /**
+     * get_batch() returns array() once another worker has deleted the last
+     * batch, and a batch whose row failed to unserialize has non-array data.
+     *
+     * @param mixed $batch
+     * @return bool
+     */
+    public static function is_usable_batch($batch)
+    {
+        return is_object($batch) && isset($batch->key, $batch->data) && is_array($batch->data);
     }
 
     /**

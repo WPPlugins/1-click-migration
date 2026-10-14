@@ -825,7 +825,11 @@ class OCM_SQL_Utils
         global $wpdb;
 
         $table = $assoc_args['tables'];
-        $table_structure = $wpdb->get_results('DESCRIBE ' . $table);
+        // SHOW FULL COLUMNS exposes Extra=INVISIBLE; fall back to DESCRIBE.
+        $table_structure = $wpdb->get_results('SHOW FULL COLUMNS FROM ' . $table);
+        if (!$table_structure) {
+            $table_structure = $wpdb->get_results('DESCRIBE ' . $table);
+        }
         if (!$table_structure) {
           if (WP_DEBUG === true) One_Click_Migration::write_to_log(sprintf('SYSLOG: No table structure for table "%s"', $table));
 
@@ -895,15 +899,46 @@ class OCM_SQL_Utils
 
         $defs = array();
         $integer_fields = array();
+        $binary_fields = array();
+        $bit_fields = array();
+        $select_exprs = array();
+        $insert_col_sql = array();
+        $skipped_invisible = false;
         foreach ($table_structure as $struct) {
+            $extra_lower = strtolower((string) (isset($struct->Extra) ? $struct->Extra : ''));
+            // MariaDB 10.3+ / MySQL 8.0.23+ INVISIBLE columns must not pad
+            // INSERT VALUES counts; skip them in both SELECT and INSERT lists.
+            if (strpos($extra_lower, 'invisible') !== false) {
+                $skipped_invisible = true;
+                continue;
+            }
+            $field_key = strtolower($struct->Field);
+            $type_lower = strtolower((string) $struct->Type);
+            $field_sql = '`' . str_replace('`', '``', $struct->Field) . '`';
+            $insert_col_sql[] = $field_sql;
             if ((0 === strpos($struct->Type, 'tinyint'))
                 || (0 === stripos($struct->Type, 'smallint'))
                 || (0 === stripos($struct->Type, 'mediumint'))
                 || (0 === stripos($struct->Type, 'int'))
                 || (0 === stripos($struct->Type, 'bigint'))
             ) {
-                $defs[strtolower($struct->Field)] = (null === $struct->Default) ? 'NULL' : $struct->Default;
-                $integer_fields[strtolower($struct->Field)] = '1';
+                $defs[$field_key] = (null === $struct->Default) ? 'NULL' : $struct->Default;
+                $integer_fields[$field_key] = '1';
+                $select_exprs[] = $field_sql;
+            } elseif (self::is_bit_column_type($type_lower)) {
+                // Force a decimal integer from the server so raw-byte drivers
+                // cannot return ASCII digits that ctype_digit would misread.
+                $bit_fields[$field_key] = '1';
+                $select_exprs[] = $field_sql . '+0 AS ' . $field_sql;
+            } elseif (self::is_binary_column_type($type_lower)) {
+                // BINARY/BLOB/VARBINARY must not ride in quoted strings: invalid
+                // UTF-8 / NUL bytes inside a quoted literal on a utf8mb4
+                // connection break the INSERT (field backup b98f274e /
+                // Wordfence wffilemods). Hex literals avoid that.
+                $binary_fields[$field_key] = '1';
+                $select_exprs[] = $field_sql;
+            } else {
+                $select_exprs[] = $field_sql;
             }
         }
 
@@ -917,10 +952,23 @@ class OCM_SQL_Utils
         
         $search = array("\x00", "\x0a", "\x0d", "\x1a");
         $replace = array('\0', '\n', '\r', '\Z');
+        // Explicit column lists when BIT needs ``col+0`` or INVISIBLE columns
+        // were skipped — otherwise INSERT VALUES count mismatches CREATE TABLE.
+        // Keep SELECT * / INSERT VALUES for the common path (tests + hosts).
+        $use_explicit_cols = ($bit_fields !== array()) || $skipped_invisible;
+        $select_list = $use_explicit_cols ? implode(', ', $select_exprs) : '*';
 
         do {
-            $table_data = $wpdb->get_results("SELECT * FROM $table LIMIT {$row_start}, {$row_inc}", ARRAY_A);
-            $entries = 'INSERT INTO ' . $table . ' VALUES ';
+            $table_data = $wpdb->get_results(
+                "SELECT {$select_list} FROM $table LIMIT {$row_start}, {$row_inc}",
+                ARRAY_A
+            );
+            if (!is_array($table_data)) {
+                $table_data = array();
+            }
+            $entries = $use_explicit_cols
+                ? 'INSERT INTO ' . $table . ' (' . implode(', ', $insert_col_sql) . ') VALUES '
+                : 'INSERT INTO ' . $table . ' VALUES ';
 
             // \x08\\x09, not required
             if ($table_data) {
@@ -933,10 +981,15 @@ class OCM_SQL_Utils
                         if (isset($assoc_args['ocm_collect_urls']) && is_callable($assoc_args['ocm_collect_urls'])) {
                             call_user_func($assoc_args['ocm_collect_urls'], $value);
                         }
-                        if (isset($integer_fields[strtolower($key)])) {
+                        $field_key = strtolower($key);
+                        if (isset($binary_fields[$field_key])) {
+                            $values[] = self::sql_binary_literal($value);
+                        } elseif (isset($bit_fields[$field_key])) {
+                            $values[] = self::sql_bit_literal($value);
+                        } elseif (isset($integer_fields[$field_key])) {
                             // make sure there are no blank spots in the insert syntax,
                             // yet try to avoid quotation marks around integers
-                            $value = (null === $value || '' === $value) ? $defs[strtolower($key)] : $value;
+                            $value = (null === $value || '' === $value) ? $defs[$field_key] : $value;
                             $values[] = ('' === $value) ? "''" : $value;
                         } else {
                             $values[] = (null === $value) ? 'NULL' : "'" . str_replace($search, $replace, str_replace('\'', '\\\'', str_replace('\\', '\\\\', $value))) . "'";
@@ -1017,10 +1070,10 @@ class OCM_SQL_Utils
 
         if ($support_column_statistics) {
           if (WP_DEBUG === true) One_Click_Migration::write_to_log('SYSLOG: Column statistics are supported');
-          $command = '/usr/bin/env mysqldump --no-defaults --skip-column-statistics %s';
+          $command = '/usr/bin/env mysqldump --no-defaults --hex-blob --skip-column-statistics %s';
         } else {
           if (WP_DEBUG === true) One_Click_Migration::write_to_log('SYSLOG: Column statistics are not supported');
-          $command = '/usr/bin/env mysqldump --no-defaults %s';
+          $command = '/usr/bin/env mysqldump --no-defaults --hex-blob %s';
         }
 
         $command_esc_args = array(DB_NAME);
@@ -1094,23 +1147,27 @@ class OCM_SQL_Utils
         return vsprintf($cmd, array_map('escapeshellarg', $args));
     }
 
-    public static function swap_table_prefix($filepath)
+    public static function swap_table_prefix($filepath, $target_prefix = null)
     {
         global $wpdb;
+
+        if ($target_prefix === null || $target_prefix === '') {
+            $target_prefix = $wpdb->base_prefix;
+        }
 
         $old_table_prefix = self::get_table_prefix($filepath);
         if ($old_table_prefix === false || $old_table_prefix === '') {
             return false;
         }
-        if ($old_table_prefix === $wpdb->base_prefix) {
+        if ($old_table_prefix === $target_prefix) {
             return true;
         }
 
-        if (!self::stream_str_replace($filepath, $old_table_prefix, $wpdb->base_prefix)) {
+        if (!self::stream_str_replace($filepath, $old_table_prefix, $target_prefix)) {
             One_Click_Migration::write_to_log(sprintf(
                 'Error: Failed to swap table prefix "%s" to "%s" in "%s".',
                 $old_table_prefix,
-                $wpdb->base_prefix,
+                $target_prefix,
                 basename($filepath)
             ));
             return false;
@@ -1122,7 +1179,773 @@ class OCM_SQL_Utils
         // while the INSERTs targeted eol_options, which was never created). Verify
         // the statement-level table names and repair any stragglers so CREATE and
         // INSERT both target the destination prefix before anything is imported.
-        return self::enforce_statement_table_prefix($filepath, $old_table_prefix, $wpdb->base_prefix);
+        return self::enforce_statement_table_prefix($filepath, $old_table_prefix, $target_prefix);
+    }
+
+    /** In-flight staging prefix option (Stop & Reset / worker death). */
+    const OPTION_STAGING_PREFIX = 'ocm_restore_staging_prefix';
+    const MYSQL_IDENTIFIER_MAX_LEN = 64;
+
+    /**
+     * Prepare dump for staging: source→dest data swap, statement heads → staging,
+     * foreign tables under staging, CONSTRAINT names stripped inside CREATE TABLE only.
+     */
+    public static function prepare_sql_dump_for_staging($filepath, $dest_prefix, $staging_prefix, $source_prefix = '')
+    {
+        if (!is_string($filepath) || $filepath === ''
+            || !is_string($dest_prefix) || $dest_prefix === ''
+            || !is_string($staging_prefix) || $staging_prefix === ''
+            || $dest_prefix === $staging_prefix
+        ) {
+            return false;
+        }
+        if (!self::swap_table_prefix($filepath, $dest_prefix)) {
+            return false;
+        }
+        if (!self::enforce_statement_table_prefix($filepath, $dest_prefix, $staging_prefix)) {
+            return false;
+        }
+        if (!self::stage_foreign_table_statements($filepath, $staging_prefix, $dest_prefix, $source_prefix)) {
+            return false;
+        }
+        return self::strip_create_table_constraint_names($filepath);
+    }
+
+    /** Remap foreign-prefix statement heads onto `{staging}{original_table}`. */
+    public static function stage_foreign_table_statements($filepath, $staging_prefix, $dest_prefix, $source_prefix = '')
+    {
+        $base = basename((string) $filepath);
+        if (!preg_match('/^(.+)\.sql$/i', $base, $m)) {
+            return true;
+        }
+        $table = $m[1];
+        if ((is_string($source_prefix) && $source_prefix !== '' && strpos($table, $source_prefix) === 0)
+            || strpos($table, $staging_prefix) === 0
+            || strpos($table, $dest_prefix) === 0
+        ) {
+            return true;
+        }
+        $staged_name = $staging_prefix . $table;
+        if (strlen($staged_name) > self::MYSQL_IDENTIFIER_MAX_LEN) {
+            One_Click_Migration::write_to_log(sprintf(
+                'Error: Foreign table name "%s" is too long for staging prefix "%s" (MySQL identifier limit is %d).',
+                $table, $staging_prefix, self::MYSQL_IDENTIFIER_MAX_LEN
+            ));
+            return false;
+        }
+        return self::enforce_statement_table_prefix($filepath, $table, $staged_name);
+    }
+
+    /** Source-prefix dump suffixes (e.g. "options" from wp1_123_options.sql). */
+    public static function source_table_suffixes_from_dumps($sql_files, $source_prefix)
+    {
+        $suffixes = array();
+        if (!is_string($source_prefix) || $source_prefix === '' || !is_array($sql_files)) {
+            return $suffixes;
+        }
+        foreach ($sql_files as $filepath) {
+            $base = basename((string) $filepath);
+            if (preg_match('/^(.+)\.sql$/i', $base, $m) && strpos($m[1], $source_prefix) === 0) {
+                $suffixes[] = substr($m[1], strlen($source_prefix));
+            }
+        }
+        return array_values(array_unique($suffixes));
+    }
+
+    /**
+     * Require `{import_prefix}options` with siteurl + home. Ignores stray ktv_/nst_ options.
+     * $source_prefix is accepted for call-site clarity; the table identity is import_prefix + "options".
+     */
+    public static function resolve_main_options_table($wpdb, $source_prefix, $import_prefix)
+    {
+        if (!is_object($wpdb) || !is_string($import_prefix) || $import_prefix === '') {
+            return false;
+        }
+        unset($source_prefix);
+        $table_name = $import_prefix . 'options';
+        $db_url = $wpdb->get_results("SELECT option_value FROM `{$table_name}` WHERE option_name = 'siteurl'");
+        $db_home = $wpdb->get_results("SELECT option_value FROM `{$table_name}` WHERE option_name = 'home'");
+        if (!empty($db_url) && !empty($db_url[0]->option_value)
+            && !empty($db_home) && !empty($db_home[0]->option_value)
+        ) {
+            return $table_name;
+        }
+        return false;
+    }
+
+    /**
+     * Microtime when the previous CONSTRAINT strip finished (same PHP process /
+     * worker resume). Used to log idle time between resume runs.
+     *
+     * @var float|null
+     */
+    private static $constraint_strip_last_end = null;
+
+    /**
+     * Strip CONSTRAINT `name` only inside real CREATE TABLE … ; statements.
+     * Bounded fread chunks (never fgets / never loads a whole line). Quote state
+     * and a pending-escape flag span chunks so `\` at a 1 MiB boundary cannot
+     * close a string early. Offset/strpos scan — no per-line remainder re-copy.
+     */
+    public static function strip_create_table_constraint_names($filepath)
+    {
+        $t0 = microtime(true);
+        if (!is_string($filepath) || $filepath === '' || !is_file($filepath) || !is_readable($filepath)) {
+            One_Click_Migration::write_to_log(sprintf(
+                'Error: Could not read SQL file "%s" to strip CONSTRAINT names.',
+                is_string($filepath) ? basename($filepath) : ''
+            ));
+            return false;
+        }
+
+        $in = @fopen($filepath, 'rb');
+        $tmp = $filepath . '.ocm-stream.tmp';
+        $out = @fopen($tmp, 'wb');
+        if (!$in || !$out) {
+            if ($in) {
+                fclose($in);
+            }
+            if ($out) {
+                fclose($out);
+            }
+            @unlink($tmp);
+            One_Click_Migration::write_to_log(sprintf(
+                'Error: Could not stream SQL file "%s" to strip CONSTRAINT names.',
+                basename($filepath)
+            ));
+            return false;
+        }
+
+        $in_string = false;
+        $pending_escape = false;
+        $at_line_start = true;
+        $in_create = false;
+        $create_buf = '';
+        // Only an incomplete CREATE TABLE line-head prefix (≤64 bytes), never a chunk remainder.
+        $create_prefix = '';
+        $stripped = 0;
+        $ok = true;
+        $create_cap = self::SQL_STREAM_READ_BYTES;
+        // Optional post-CREATE tail processed via offset scan (not prepended onto the next fread).
+        $tail_chunk = null;
+
+        while ($ok) {
+            if ($tail_chunk !== null) {
+                $chunk = $tail_chunk;
+                $tail_chunk = null;
+            } else {
+                if (feof($in)) {
+                    break;
+                }
+                $chunk = fread($in, self::SQL_STREAM_READ_BYTES);
+                if ($chunk === false) {
+                    $ok = false;
+                    break;
+                }
+                if ($chunk === '') {
+                    break;
+                }
+            }
+
+            $len = strlen($chunk);
+            $i = 0;
+            while ($ok && $i < $len) {
+                if ($in_create) {
+                    $create_buf .= substr($chunk, $i);
+                    $i = $len;
+                    if (strlen($create_buf) > $create_cap) {
+                        if (!self::write_all($out, $create_buf)) {
+                            $ok = false;
+                            break;
+                        }
+                        self::sql_advance_string_state($create_buf, $in_string);
+                        $at_line_start = (substr($create_buf, -1) === "\n");
+                        $pending_escape = false;
+                        $in_create = false;
+                        $create_buf = '';
+                        break;
+                    }
+                    $tail = self::strip_flush_create_buffer($create_buf, $out, $stripped, $ok);
+                    if (!$ok) {
+                        break;
+                    }
+                    if ($tail === null) {
+                        break;
+                    }
+                    $in_create = false;
+                    $create_buf = '';
+                    $at_line_start = true;
+                    $pending_escape = false;
+                    if ($tail !== '') {
+                        $tail_chunk = $tail;
+                    }
+                    break;
+                }
+
+                // Escaped byte carried from a prior chunk (\\ or \' split on a 1 MiB boundary).
+                if ($pending_escape) {
+                    if (!self::write_all($out, $chunk[$i])) {
+                        $ok = false;
+                        break;
+                    }
+                    $i++;
+                    $pending_escape = false;
+                    $at_line_start = false;
+                    // Still inside the string after consuming the escaped byte.
+                    $in_string = true;
+                    continue;
+                }
+
+                // Real CREATE TABLE only at line head outside quotes.
+                if (!$in_string && $at_line_start) {
+                    $peek = $create_prefix . substr($chunk, $i, 64);
+                    if (preg_match('/^\s*CREATE\s+TABLE\b/i', $peek)) {
+                        $in_create = true;
+                        $create_buf = $create_prefix;
+                        $create_prefix = '';
+                        continue;
+                    }
+                    $still_prefix = (bool) preg_match(
+                        '/^\s*(?:C(?:R(?:E(?:A(?:T(?:E(?:\s+(?:T(?:A(?:B(?:L(?:E)?)?)?)?)?)?)?)?)?)?)?)?$/i',
+                        $peek
+                    );
+                    if ($still_prefix && strpos($peek, "\n") === false && strlen($peek) < 64) {
+                        $create_prefix .= substr($chunk, $i);
+                        $i = $len;
+                        break;
+                    }
+                    // Not CREATE — emit the small held prefix, then scan from $i (no remainder re-copy).
+                    if ($create_prefix !== '') {
+                        if (!self::write_all($out, $create_prefix)) {
+                            $ok = false;
+                            break;
+                        }
+                        $create_prefix = '';
+                    }
+                    $at_line_start = false;
+                    // Fall through to the offset scan at the same $i.
+                }
+
+                if ($in_string) {
+                    $start = $i;
+                    while ($i < $len) {
+                        $ch = $chunk[$i];
+                        if ($ch === '\\') {
+                            if ($i + 1 < $len) {
+                                $i += 2;
+                                continue;
+                            }
+                            // '\' is the last byte of this chunk — escape applies to the next chunk.
+                            $i++;
+                            if ($i > $start && !self::write_all($out, substr($chunk, $start, $i - $start))) {
+                                $ok = false;
+                                break 2;
+                            }
+                            $pending_escape = true;
+                            $i = $len;
+                            break 2;
+                        }
+                        if ($ch === "'") {
+                            if ($i + 1 < $len && $chunk[$i + 1] === "'") {
+                                $i += 2;
+                                continue;
+                            }
+                            $in_string = false;
+                            $i++;
+                            break;
+                        }
+                        $i++;
+                    }
+                    if ($ok && $i > $start && !self::write_all($out, substr($chunk, $start, $i - $start))) {
+                        $ok = false;
+                        break;
+                    }
+                    continue;
+                }
+
+                // Outside string: copy until ' or newline via strpos (flat peak, no re-queue).
+                $start = $i;
+                $q = strpos($chunk, "'", $i);
+                $nl = strpos($chunk, "\n", $i);
+                $next = false;
+                if ($q === false && $nl === false) {
+                    $i = $len;
+                    $at_line_start = false;
+                } elseif ($q === false || ($nl !== false && $nl < $q)) {
+                    $i = $nl + 1;
+                    $at_line_start = true;
+                    $next = true;
+                } else {
+                    // Enter quoted string at $q.
+                    $i = $q + 1;
+                    $in_string = true;
+                    $at_line_start = false;
+                    $next = true;
+                }
+                if ($i > $start && !self::write_all($out, substr($chunk, $start, $i - $start))) {
+                    $ok = false;
+                    break;
+                }
+                if (!$next && $i >= $len) {
+                    break;
+                }
+            }
+        }
+
+        if ($ok && $create_prefix !== '') {
+            if (!self::write_all($out, $create_prefix)) {
+                $ok = false;
+            }
+        }
+        if ($ok && $in_create && $create_buf !== '') {
+            if (!self::write_all($out, $create_buf)) {
+                $ok = false;
+            }
+        }
+
+        fclose($in);
+        if (!fflush($out) || !fclose($out)) {
+            $ok = false;
+        }
+
+        if (!$ok) {
+            @unlink($tmp);
+            One_Click_Migration::write_to_log(sprintf(
+                'Error: Failed while stripping CONSTRAINT names in "%s".',
+                basename($filepath)
+            ));
+            return false;
+        }
+
+        if (!@rename($tmp, $filepath)) {
+            @unlink($tmp);
+            One_Click_Migration::write_to_log(sprintf(
+                'Error: Could not replace "%s" after stripping CONSTRAINT names.',
+                basename($filepath)
+            ));
+            return false;
+        }
+
+        $elapsed_ms = (int) round((microtime(true) - $t0) * 1000);
+        $since_prev_ms = -1;
+        if (self::$constraint_strip_last_end !== null) {
+            $since_prev_ms = (int) round(($t0 - self::$constraint_strip_last_end) * 1000);
+            if ($since_prev_ms < 0) {
+                $since_prev_ms = 0;
+            }
+        }
+        self::$constraint_strip_last_end = microtime(true);
+        One_Click_Migration::write_to_log(sprintf(
+            'SYSLOG: CONSTRAINT strip on "%s": stripped=%d peak_bytes=%d memory_limit=%s elapsed_ms=%d since_prev_ms=%s',
+            basename($filepath),
+            $stripped,
+            (int) memory_get_peak_usage(true),
+            (string) ini_get('memory_limit'),
+            $elapsed_ms,
+            $since_prev_ms < 0 ? 'n/a' : (string) $since_prev_ms
+        ));
+        if ($stripped > 0) {
+            One_Click_Migration::write_to_log(sprintf(
+                'Notice: Stripped %d CONSTRAINT name(s) from "%s" so staging CREATE TABLE does not clash with live foreign-key names.',
+                $stripped,
+                basename($filepath)
+            ));
+        }
+        return true;
+    }
+
+    /**
+     * If $create_buf holds a full CREATE…; statement, strip CONSTRAINT names,
+     * write it, and return any trailing bytes after ";". Returns null when more
+     * input is needed. Sets $ok false on write/preg failure.
+     *
+     * @param string   $create_buf
+     * @param resource $out
+     * @param int      $stripped
+     * @param bool     $ok
+     * @return string|null
+     */
+    private static function strip_flush_create_buffer(&$create_buf, $out, &$stripped, &$ok)
+    {
+        $end = self::sql_statement_end_offset($create_buf);
+        if ($end === null) {
+            return null;
+        }
+        $stmt = substr($create_buf, 0, $end + 1);
+        $tail = substr($create_buf, $end + 1);
+        $rewritten = preg_replace('/\bCONSTRAINT\s+`[^`]+`\s+/i', '', $stmt, -1, $count);
+        if (!is_string($rewritten)) {
+            $ok = false;
+            return null;
+        }
+        $stripped += (int) $count;
+        if (!self::write_all($out, $rewritten)) {
+            $ok = false;
+            return null;
+        }
+        return is_string($tail) ? $tail : '';
+    }
+
+    /** Offset of terminating ";" ignoring semicolons inside single-quoted strings. */
+    private static function sql_statement_end_offset($sql)
+    {
+        $len = strlen($sql);
+        $in_string = false;
+        for ($i = 0; $i < $len; $i++) {
+            $ch = $sql[$i];
+            if ($in_string) {
+                if ($ch === '\\' && $i + 1 < $len) {
+                    $i++;
+                    continue;
+                }
+                if ($ch === "'") {
+                    if ($i + 1 < $len && $sql[$i + 1] === "'") {
+                        $i++;
+                        continue;
+                    }
+                    $in_string = false;
+                }
+                continue;
+            }
+            if ($ch === "'") {
+                $in_string = true;
+            } elseif ($ch === ';') {
+                return $i;
+            }
+        }
+        return null;
+    }
+
+    /** Advance $in_string across $chunk for single-quoted SQL string state. */
+    private static function sql_advance_string_state($chunk, &$in_string)
+    {
+        $len = strlen($chunk);
+        for ($i = 0; $i < $len; $i++) {
+            $ch = $chunk[$i];
+            if ($in_string) {
+                if ($ch === '\\' && $i + 1 < $len) {
+                    $i++;
+                    continue;
+                }
+                if ($ch === "'") {
+                    if ($i + 1 < $len && $chunk[$i + 1] === "'") {
+                        $i++;
+                        continue;
+                    }
+                    $in_string = false;
+                }
+                continue;
+            }
+            if ($ch === "'") {
+                $in_string = true;
+            }
+        }
+    }
+
+    /** Drop leftover ocmXXXX_ staging tables (optionally protect the current prefix). */
+    public static function drop_stale_temp_tables($wpdb, $protect_prefix = null, $live_prefix = null)
+    {
+        unset($live_prefix);
+        if (!is_object($wpdb) || !method_exists($wpdb, 'get_col')) {
+            return 0;
+        }
+        $tables = $wpdb->get_col('SHOW TABLES');
+        if (!is_array($tables) || !$tables) {
+            return 0;
+        }
+        $dropped = 0;
+        foreach ($tables as $table) {
+            $table = (string) $table;
+            if (!preg_match('/^(ocm[0-9a-f]{4}_)/', $table, $m)) {
+                continue;
+            }
+            if (is_string($protect_prefix) && $protect_prefix !== '' && $m[1] === $protect_prefix) {
+                continue;
+            }
+            $wpdb->query('DROP TABLE IF EXISTS `' . str_replace('`', '``', $table) . '`');
+            $dropped++;
+        }
+        if ($dropped > 0) {
+            One_Click_Migration::write_to_log(sprintf(
+                'Notice: Dropped %d stale temporary staging table(s) left by an earlier restore.',
+                $dropped
+            ));
+        }
+        return $dropped;
+    }
+
+    /** Allocate unique staging prefix ocmXXXX_. */
+    public static function allocate_staging_prefix($wpdb)
+    {
+        $existing = array();
+        if (is_object($wpdb) && method_exists($wpdb, 'get_col')) {
+            $tables = $wpdb->get_col('SHOW TABLES');
+            if (is_array($tables)) {
+                foreach ($tables as $table) {
+                    $existing[(string) $table] = true;
+                }
+            }
+        }
+        for ($attempt = 0; $attempt < 12; $attempt++) {
+            $prefix = 'ocm' . substr(bin2hex(random_bytes(2)), 0, 4) . '_';
+            foreach ($existing as $table => $_) {
+                if (strpos($table, $prefix) === 0) {
+                    continue 2;
+                }
+            }
+            return $prefix;
+        }
+        One_Click_Migration::write_to_log('Error: Could not allocate a unique staging table prefix for database import.');
+        return false;
+    }
+
+    /** Fail early when staging+suffix would exceed MySQL's 64-char identifier limit. */
+    public static function assert_staging_identifier_headroom($sql_files, $staging_prefix, $source_prefix)
+    {
+        if (!is_string($staging_prefix) || $staging_prefix === '') {
+            return false;
+        }
+        $source_prefix = is_string($source_prefix) ? $source_prefix : '';
+        foreach ($sql_files as $filepath) {
+            $base = basename((string) $filepath);
+            if (!preg_match('/^(.+)\.sql$/i', $base, $m)) {
+                continue;
+            }
+            $table = $m[1];
+            $suffix = ($source_prefix !== '' && strpos($table, $source_prefix) === 0)
+                ? substr($table, strlen($source_prefix))
+                : $table;
+            if (strlen($staging_prefix . $suffix) > self::MYSQL_IDENTIFIER_MAX_LEN) {
+                One_Click_Migration::write_to_log(sprintf(
+                    'Error: Table name "%s" is too long for staging prefix "%s" (MySQL identifier limit is %d). Shorten the table prefix on the source site and take a new backup.',
+                    $table, $staging_prefix, self::MYSQL_IDENTIFIER_MAX_LEN
+                ));
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /** Drop every table whose name starts with $prefix. */
+    public static function drop_tables_with_prefix($prefix)
+    {
+        global $wpdb;
+        if (!is_string($prefix) || $prefix === '' || !is_object($wpdb)) {
+            return;
+        }
+        $tables = method_exists($wpdb, 'get_col') ? $wpdb->get_col('SHOW TABLES') : array();
+        if (!is_array($tables)) {
+            return;
+        }
+        foreach ($tables as $table) {
+            $table = (string) $table;
+            if (strpos($table, $prefix) === 0) {
+                $wpdb->query('DROP TABLE IF EXISTS `' . str_replace('`', '``', $table) . '`');
+            }
+        }
+    }
+
+    /**
+     * Atomic promote: source suffixes → `{dest}{suffix}`; foreign staged tables → bare
+     * original names. Existing same-named live tables (including stray ktv_options)
+     * are moved aside in the same RENAME, then dropped.
+     */
+    public static function promote_staging_tables($staging_prefix, $dest_prefix, $source_suffixes = array())
+    {
+        global $wpdb;
+        if (!is_string($staging_prefix) || $staging_prefix === ''
+            || !is_string($dest_prefix) || $dest_prefix === ''
+            || $staging_prefix === $dest_prefix || !is_object($wpdb)
+        ) {
+            return false;
+        }
+        $source_suffix_set = array();
+        if (is_array($source_suffixes)) {
+            foreach ($source_suffixes as $suffix) {
+                if (is_string($suffix) && $suffix !== '') {
+                    $source_suffix_set[$suffix] = true;
+                }
+            }
+        }
+        $tables = method_exists($wpdb, 'get_col') ? $wpdb->get_col('SHOW TABLES') : array();
+        if (!is_array($tables)) {
+            One_Click_Migration::write_to_log('Error: Could not list tables while promoting the staging import.');
+            return false;
+        }
+        $staged = array();
+        $live = array();
+        $dest_only = array();
+        foreach ($tables as $table) {
+            $table = (string) $table;
+            if (strpos($table, $staging_prefix) === 0) {
+                $staged[] = $table;
+            } else {
+                $live[$table] = true;
+                if (strpos($table, $dest_prefix) === 0) {
+                    $dest_only[$table] = true;
+                }
+            }
+        }
+        if (!$staged) {
+            One_Click_Migration::write_to_log(sprintf(
+                'Error: Staging import under prefix "%s" produced no tables to promote.',
+                $staging_prefix
+            ));
+            return false;
+        }
+
+        if (!self::keep_destination_plugin_state($wpdb, $staging_prefix, $dest_prefix, $staged, $live)) {
+            return false;
+        }
+
+        $trash_prefix = 'ocd' . substr(bin2hex(random_bytes(2)), 0, 4) . '_';
+        $renames = array();
+        $trash_targets = array();
+        foreach ($staged as $staging_table) {
+            $suffix = substr($staging_table, strlen($staging_prefix));
+            $dest_table = ($source_suffix_set && !isset($source_suffix_set[$suffix]))
+                ? $suffix
+                : $dest_prefix . $suffix;
+            if (isset($live[$dest_table])) {
+                $trash_table = $trash_prefix . substr(sha1($dest_table), 0, 10);
+                $renames[] = self::sql_rename_pair($dest_table, $trash_table);
+                $trash_targets[] = $trash_table;
+                unset($live[$dest_table], $dest_only[$dest_table]);
+            }
+            $renames[] = self::sql_rename_pair($staging_table, $dest_table);
+        }
+        foreach ($dest_only as $dest_table => $_) {
+            $trash_table = $trash_prefix . substr(sha1($dest_table), 0, 10);
+            $renames[] = self::sql_rename_pair($dest_table, $trash_table);
+            $trash_targets[] = $trash_table;
+        }
+
+        $wpdb->last_error = '';
+        $result = self::query_imported_sql($wpdb, 'RENAME TABLE ' . implode(', ', $renames));
+        if ($result === false || !empty($wpdb->last_error)) {
+            One_Click_Migration::write_to_log(sprintf(
+                'Error: Atomic promote of staging prefix "%s" to "%s" failed: %s',
+                $staging_prefix,
+                $dest_prefix,
+                !empty($wpdb->last_error) ? $wpdb->last_error : 'RENAME TABLE rejected'
+            ));
+            return false;
+        }
+        foreach ($trash_targets as $trash_table) {
+            $wpdb->query('DROP TABLE IF EXISTS `' . str_replace('`', '``', $trash_table) . '`');
+        }
+        if (function_exists('delete_option')) {
+            delete_option(self::OPTION_STAGING_PREFIX);
+        }
+        One_Click_Migration::write_to_log(sprintf(
+            'SYSLOG: Promoted %d staging table(s) from "%s" to live prefix "%s".',
+            count($staged), $staging_prefix, $dest_prefix
+        ));
+        return true;
+    }
+
+    /**
+     * The source dumps its options while its own backup is running, so every
+     * backup carries the source's in-flight plugin state: start flags, run id,
+     * presigned PUT URLs for the source bucket, heartbeat and queue rows. Left
+     * in place, the destination's watchdog revives that backup after promote
+     * and uploads into the source's bucket (#78). Plugin state belongs to the
+     * site running the plugin, so swap the staged plugin rows for the
+     * destination's live ones before the RENAME.
+     *
+     * @param \wpdb    $wpdb
+     * @param string   $staging_prefix
+     * @param string   $dest_prefix
+     * @param string[] $staged Staged table names.
+     * @param array    $live   Live table name => true.
+     * @return bool False when the staged state could not be cleared; promote must stop.
+     */
+    private static function keep_destination_plugin_state($wpdb, $staging_prefix, $dest_prefix, array $staged, array $live)
+    {
+        $tables = array(
+            'options' => array('option_name', array('option_name', 'option_value', 'autoload')),
+            'sitemeta' => array('meta_key', array('site_id', 'meta_key', 'meta_value')),
+        );
+        foreach ($tables as $suffix => $spec) {
+            list($key_column, $columns) = $spec;
+            $staging_table = $staging_prefix . $suffix;
+            if (!in_array($staging_table, $staged, true)) {
+                continue;
+            }
+            $where = self::plugin_state_where($key_column);
+            $staging_sql = '`' . str_replace('`', '``', $staging_table) . '`';
+
+            $wpdb->last_error = '';
+            $dropped = $wpdb->query("DELETE FROM {$staging_sql} WHERE {$where}");
+            if ($dropped === false || !empty($wpdb->last_error)) {
+                One_Click_Migration::write_to_log(sprintf(
+                    'Error: Could not clear the source site\'s plugin state from staging table "%s": %s',
+                    $staging_table,
+                    !empty($wpdb->last_error) ? $wpdb->last_error : 'DELETE rejected'
+                ));
+                return false;
+            }
+
+            $kept = 0;
+            $live_table = $dest_prefix . $suffix;
+            if (isset($live[$live_table])) {
+                $column_list = '`' . implode('`, `', $columns) . '`';
+                $live_sql = '`' . str_replace('`', '``', $live_table) . '`';
+                $wpdb->last_error = '';
+                $kept = $wpdb->query(
+                    "INSERT INTO {$staging_sql} ({$column_list}) SELECT {$column_list} FROM {$live_sql} WHERE {$where}"
+                );
+                if ($kept === false || !empty($wpdb->last_error)) {
+                    One_Click_Migration::write_to_log(sprintf(
+                        'Error: Could not carry this site\'s plugin state into staging table "%s": %s',
+                        $staging_table,
+                        !empty($wpdb->last_error) ? $wpdb->last_error : 'INSERT rejected'
+                    ));
+                    return false;
+                }
+            }
+
+            One_Click_Migration::write_to_log(sprintf(
+                'SYSLOG: Plugin state on "%s": dropped %d imported row(s), kept %d row(s) from "%s".',
+                $staging_table,
+                (int) $dropped,
+                (int) $kept,
+                $live_table
+            ));
+        }
+        return true;
+    }
+
+    /**
+     * WHERE clause matching rows owned by this plugin's runtime: ocm_* options,
+     * background-process queue/status/lock rows, step checkpoints and ocm
+     * transients. Constant patterns only; no user input.
+     *
+     * @param string $column option_name or meta_key.
+     * @return string
+     */
+    public static function plugin_state_where($column)
+    {
+        $column = '`' . str_replace('`', '``', $column) . '`';
+        $likes = array(
+            'ocm\_%',
+            '%ocm\_background\_%',
+            '\_transient\_ocm\_%',
+            '\_transient\_timeout\_ocm\_%',
+            '\_site\_transient\_ocm\_%',
+            '\_site\_transient\_timeout\_ocm\_%',
+        );
+        $parts = array();
+        foreach ($likes as $like) {
+            $parts[] = "{$column} LIKE '{$like}'";
+        }
+        $parts[] = "{$column} IN ('backup_steps', 'restore_steps')";
+        return '(' . implode(' OR ', $parts) . ')';
+    }
+
+    private static function sql_rename_pair($from, $to)
+    {
+        return '`' . str_replace('`', '``', $from) . '` TO `' . str_replace('`', '``', $to) . '`';
     }
 
     /**
@@ -1550,6 +2373,921 @@ class OCM_SQL_Utils
             }
         }
         return 0;
+    }
+
+    /**
+     * Option storing the SOURCE backup's plugin version (from the remote log).
+     */
+    const OPTION_BACKUP_PLUGIN_VERSION = 'ocm_backup_plugin_version';
+
+    /**
+     * Reject dumps whose BINARY/BLOB INSERT values cannot round-trip on a
+     * utf8mb4 connection. Pre-3.1.19 PHP export put those bytes in quoted
+     * strings (NUL as the escape `\0`, other bytes raw), which breaks restore.
+     * Refuses only when a value of a column declared binary/blob/varbinary in
+     * CREATE TABLE is unsafe — never because the dump merely mentions "blob"
+     * in text, or because a BLOB holds plain UTF-8.
+     *
+     * Always scans dump contents. Plugin version (when known) is used only to
+     * word the refusal message — never to skip the scan. 3.1.19 hex dumps pass
+     * the value check on their own.
+     *
+     * Stops before import; does not modify the database.
+     *
+     * @param array<int, string> $sql_files
+     * @return bool True when safe to proceed; false when restore must abort.
+     */
+    public static function preflight_reject_unsafe_binary_dumps($sql_files)
+    {
+        $result = self::preflight_reject_unsafe_binary_dumps_resumable(
+            $sql_files,
+            array('status' => 'pending', 'file_index' => 0, 'byte_offset' => 0),
+            null
+        );
+        return isset($result['status']) && $result['status'] === 'pass';
+    }
+
+    /**
+     * Resumable binary dump preflight. $deadline is microtime(true) or null (no limit).
+     * Returns ['status' => 'pass'|'refuse'|'continue', 'state' => array].
+     *
+     * @param array<int, string> $sql_files
+     * @param array              $state
+     * @param float|null         $deadline
+     * @return array{status: string, state: array}
+     */
+    public static function preflight_reject_unsafe_binary_dumps_resumable($sql_files, $state, $deadline = null)
+    {
+        $version = self::backup_source_plugin_version();
+        $file_index = isset($state['file_index']) ? (int) $state['file_index'] : 0;
+        $byte_offset = isset($state['byte_offset']) ? (int) $state['byte_offset'] : 0;
+        $sql_files = array_values($sql_files);
+
+        for ($i = $file_index; $i < count($sql_files); $i++) {
+            $filepath = $sql_files[$i];
+            if (!is_string($filepath) || $filepath === '') {
+                return array(
+                    'status' => 'refuse',
+                    'state' => array('file_index' => $i, 'byte_offset' => 0, 'status' => 'refuse'),
+                );
+            }
+            if (!is_file($filepath) || !is_readable($filepath)) {
+                One_Click_Migration::write_to_log(sprintf(
+                    'Error: Database dump "%s" is missing or unreadable during binary preflight.',
+                    basename($filepath)
+                ));
+                One_Click_Migration::write_to_log(
+                    'Restore stopped before import: backup needs a fresh 3.1.19 backup. No changes were made.'
+                );
+                return array(
+                    'status' => 'refuse',
+                    'state' => array('file_index' => $i, 'byte_offset' => 0, 'status' => 'refuse'),
+                );
+            }
+
+            $scan = self::sql_dump_scan_unsafe_binary_resumable(
+                $filepath,
+                $i === $file_index ? $byte_offset : 0,
+                $deadline,
+                $i === $file_index ? $state : array()
+            );
+            if ($scan['status'] === 'continue') {
+                One_Click_Migration::write_to_log(sprintf(
+                    'SYSLOG: Binary preflight progress file=%s offset=%d',
+                    basename($filepath),
+                    (int) $scan['byte_offset']
+                ));
+                return array(
+                    'status' => 'continue',
+                    'state' => array(
+                        'file_index' => $i,
+                        'byte_offset' => (int) $scan['byte_offset'],
+                        'status' => 'pending',
+                        'binary_indexes' => isset($scan['binary_indexes']) ? $scan['binary_indexes'] : array(),
+                        'binary_names' => isset($scan['binary_names']) ? $scan['binary_names'] : array(),
+                        'create_unparsed' => !empty($scan['create_unparsed']),
+                    ),
+                );
+            }
+            if ($scan['status'] === 'refuse' || !empty($scan['unsafe'])) {
+                One_Click_Migration::write_to_log(sprintf(
+                    'Error: This backup was made with plugin version %s and contains binary/BLOB column values that cannot be restored safely (not hex-encoded). Update 1-Click Migration on the source site to 3.1.19 or later, take a new backup, then restore that.',
+                    $version !== null ? $version : 'before 3.1.19'
+                ));
+                if (!empty($scan['reason'])) {
+                    One_Click_Migration::write_to_log('Error: ' . $scan['reason']);
+                }
+                One_Click_Migration::write_to_log(
+                    'Restore stopped before import: backup needs a fresh 3.1.19 backup. No changes were made.'
+                );
+                return array(
+                    'status' => 'refuse',
+                    'state' => array('file_index' => $i, 'byte_offset' => 0, 'status' => 'refuse'),
+                );
+            }
+            $file_index = $i + 1;
+            $byte_offset = 0;
+        }
+
+        return array(
+            'status' => 'pass',
+            'state' => array('file_index' => count($sql_files), 'byte_offset' => 0, 'status' => 'pass'),
+        );
+    }
+
+    /**
+     * Source backup plugin version from the option set when the remote backup
+     * log was stored. Does not read the local debug log — that may already
+     * contain the destination's own version line when no remote log was merged.
+     *
+     * @return string|null
+     */
+    public static function backup_source_plugin_version()
+    {
+        if (function_exists('get_option')) {
+            $stored = get_option(self::OPTION_BACKUP_PLUGIN_VERSION, null);
+            if (is_string($stored) && preg_match('/^[0-9]+(?:\.[0-9]+){0,3}$/', $stored)) {
+                return $stored;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Persist the source backup's plugin version from the remote (backup-side)
+     * log body. Call with the remote log only — never the destination's local log.
+     *
+     * @param string $remote_log
+     * @return string|null
+     */
+    public static function store_backup_plugin_version_from_log($remote_log)
+    {
+        $version = null;
+        if (is_string($remote_log) && preg_match('/OCM Plugin Version:\s*([0-9]+(?:\.[0-9]+){0,3})/i', $remote_log, $m)) {
+            $version = $m[1];
+        }
+        if (function_exists('update_option')) {
+            if ($version !== null) {
+                update_option(self::OPTION_BACKUP_PLUGIN_VERSION, $version, false);
+            } else {
+                delete_option(self::OPTION_BACKUP_PLUGIN_VERSION);
+            }
+        }
+        return $version;
+    }
+
+    /**
+     * First "OCM Plugin Version:" in the debug log (source backup is prepended
+     * ahead of destination lines). Kept for tests that explicitly exercise log
+     * parsing; restore wording uses backup_source_plugin_version() instead.
+     *
+     * @return string|null
+     */
+    public static function backup_plugin_version_from_log()
+    {
+        $file = defined('OCM_DEBUG_LOG_FILE') ? OCM_DEBUG_LOG_FILE : '';
+        if ($file === '' || !is_readable($file)) {
+            return null;
+        }
+        $fh = @fopen($file, 'rb');
+        if (!$fh) {
+            return null;
+        }
+        $found = null;
+        while (($line = fgets($fh)) !== false) {
+            if (preg_match('/OCM Plugin Version:\s*([0-9]+(?:\.[0-9]+){0,3})/i', $line, $m)) {
+                $found = $m[1];
+                break;
+            }
+        }
+        fclose($fh);
+        return $found;
+    }
+
+    /**
+     * True when CREATE TABLE declares binary/blob columns whose INSERT values
+     * look like the broken 3.1.18 PHP exporter output (quoted literals with
+     * `\0` / invalid UTF-8), not hex literals and not plain UTF-8 text.
+     * Fail-closed: unreadable files, unparsed CREATE with INSERTs, and oversized
+     * statements in binary-column tables are unsafe.
+     *
+     * @param string $filepath
+     * @return bool
+     */
+    public static function sql_dump_has_unsafe_binary_insert_values($filepath)
+    {
+        $scan = self::sql_dump_scan_unsafe_binary_resumable($filepath, 0, null);
+        return !empty($scan['unsafe']) || (isset($scan['status']) && $scan['status'] === 'refuse');
+    }
+
+    /**
+     * Resumable scan of one dump. Returns status pass|refuse|continue.
+     *
+     * @param string     $filepath
+     * @param int        $byte_offset
+     * @param float|null $deadline
+     * @param array      $resume     Prior binary-column parse state for mid-file resume.
+     * @return array
+     */
+    public static function sql_dump_scan_unsafe_binary_resumable($filepath, $byte_offset = 0, $deadline = null, $resume = array())
+    {
+        $in = @fopen($filepath, 'rb');
+        if (!$in) {
+            return array(
+                'status' => 'refuse',
+                'unsafe' => true,
+                'byte_offset' => 0,
+                'reason' => 'Could not open SQL dump for binary preflight.',
+            );
+        }
+
+        if ($byte_offset > 0) {
+            if (@fseek($in, $byte_offset) !== 0) {
+                fclose($in);
+                return array(
+                    'status' => 'refuse',
+                    'unsafe' => true,
+                    'byte_offset' => 0,
+                    'reason' => 'Could not seek in SQL dump for binary preflight resume.',
+                );
+            }
+        }
+
+        $binary_indexes = isset($resume['binary_indexes']) && is_array($resume['binary_indexes'])
+            ? $resume['binary_indexes']
+            : array();
+        $binary_names = isset($resume['binary_names']) && is_array($resume['binary_names'])
+            ? $resume['binary_names']
+            : array();
+        $create_unparsed = !empty($resume['create_unparsed']);
+        $buf = '';
+        $unsafe = false;
+        $reason = '';
+        $pos = $byte_offset;
+
+        while (!feof($in) && !$unsafe) {
+            if ($deadline !== null && microtime(true) >= $deadline) {
+                fclose($in);
+                // Resume at the start of the unprocessed buffer — $pos is bytes
+                // READ, but a partial statement may still sit in $buf. Saving
+                // $pos alone skips those bytes on the next pass.
+                $resume_offset = $pos - strlen($buf);
+                if ($resume_offset < 0) {
+                    $resume_offset = 0;
+                }
+                return array(
+                    'status' => 'continue',
+                    'byte_offset' => $resume_offset,
+                    'binary_indexes' => $binary_indexes,
+                    'binary_names' => $binary_names,
+                    'create_unparsed' => $create_unparsed,
+                );
+            }
+            $chunk = fread($in, self::SQL_STREAM_READ_BYTES);
+            if ($chunk === false) {
+                fclose($in);
+                return array(
+                    'status' => 'refuse',
+                    'unsafe' => true,
+                    'byte_offset' => $pos,
+                    'reason' => 'Failed reading SQL dump during binary preflight.',
+                );
+            }
+            if ($chunk === '') {
+                break;
+            }
+            $pos += strlen($chunk);
+            $buf .= $chunk;
+
+            while (!$unsafe) {
+                $stmt = self::sql_buffer_shift_statement(
+                    $buf,
+                    !feof($in),
+                    !empty($binary_indexes) || !empty($binary_names) || $create_unparsed
+                );
+                if ($stmt === false) {
+                    $unsafe = true;
+                    $reason = 'SQL statement exceeded the binary-preflight scan window in a binary-column table.';
+                    break;
+                }
+                if ($stmt === null) {
+                    break;
+                }
+                $code = self::sql_ltrim_comments_and_whitespace($stmt);
+                if ($code === '') {
+                    continue;
+                }
+                if (preg_match('/^(?:\/\*!\d+\s+)?CREATE\s+TABLE\b/i', $code)) {
+                    $parsed = self::binary_columns_from_create_table($code);
+                    $binary_indexes = $parsed[0];
+                    $binary_names = $parsed[1];
+                    $create_unparsed = empty($parsed[2]);
+                    continue;
+                }
+                if (!preg_match('/^INSERT\s+(?:IGNORE\s+)?INTO\b/i', $code)) {
+                    continue;
+                }
+                if ($create_unparsed) {
+                    $unsafe = true;
+                    $reason = 'CREATE TABLE could not be parsed for a dump that contains INSERT statements.';
+                    break;
+                }
+                if (!$binary_indexes && !$binary_names) {
+                    continue;
+                }
+                if (self::insert_has_unsafe_binary_values($code, $binary_indexes, $binary_names)) {
+                    $unsafe = true;
+                    $reason = 'Unsafe binary/BLOB INSERT values detected.';
+                }
+            }
+        }
+
+        fclose($in);
+        if ($unsafe) {
+            return array(
+                'status' => 'refuse',
+                'unsafe' => true,
+                'byte_offset' => $pos,
+                'reason' => $reason,
+            );
+        }
+        return array(
+            'status' => 'pass',
+            'unsafe' => false,
+            'byte_offset' => $pos,
+        );
+    }
+
+    /**
+     * Strip leading whitespace, hash/dash line comments, and C-style block
+     * comments so CREATE/INSERT detection still works when comment padding
+     * precedes the statement in the same semicolon-terminated chunk.
+     *
+     * @param string $stmt
+     * @return string
+     */
+    public static function sql_ltrim_comments_and_whitespace($stmt)
+    {
+        $stmt = (string) $stmt;
+        while ($stmt !== '') {
+            if (preg_match('/^\s+/', $stmt, $m)) {
+                $stmt = substr($stmt, strlen($m[0]));
+                continue;
+            }
+            if (preg_match('/^#[^\n]*(?:\n|$)/', $stmt, $m)) {
+                $stmt = substr($stmt, strlen($m[0]));
+                continue;
+            }
+            if (preg_match('/^--[^\n]*(?:\n|$)/', $stmt, $m)) {
+                $stmt = substr($stmt, strlen($m[0]));
+                continue;
+            }
+            if (preg_match('/^\/\*.*?\*\//s', $stmt, $m)) {
+                $stmt = substr($stmt, strlen($m[0]));
+                continue;
+            }
+            break;
+        }
+        return $stmt;
+    }
+
+    /**
+     * Pull one complete SQL statement (ending in `;`) from $buf, respecting
+     * quotes. Returns null when incomplete (and $may_need_more is true).
+     * Returns false when the buffer exceeds 8MB while $fail_closed_oversized
+     * is set (binary-column / unparsed CREATE context) — callers must refuse.
+     *
+     * @param string $buf
+     * @param bool   $may_need_more
+     * @param bool   $fail_closed_oversized
+     * @return string|null|false
+     */
+    private static function sql_buffer_shift_statement(&$buf, $may_need_more, $fail_closed_oversized = false)
+    {
+        $len = strlen($buf);
+        if ($len === 0) {
+            return null;
+        }
+        $in_single = false;
+        $in_double = false;
+        $in_backtick = false;
+        $escaped = false;
+        for ($i = 0; $i < $len; $i++) {
+            $ch = $buf[$i];
+            if ($in_single) {
+                if ($escaped) {
+                    $escaped = false;
+                    continue;
+                }
+                if ($ch === '\\') {
+                    $escaped = true;
+                    continue;
+                }
+                if ($ch === "'") {
+                    $in_single = false;
+                }
+                continue;
+            }
+            if ($in_double) {
+                if ($escaped) {
+                    $escaped = false;
+                    continue;
+                }
+                if ($ch === '\\') {
+                    $escaped = true;
+                    continue;
+                }
+                if ($ch === '"') {
+                    $in_double = false;
+                }
+                continue;
+            }
+            if ($in_backtick) {
+                if ($ch === '`') {
+                    $in_backtick = false;
+                }
+                continue;
+            }
+            if ($ch === "'") {
+                $in_single = true;
+                continue;
+            }
+            if ($ch === '"') {
+                $in_double = true;
+                continue;
+            }
+            if ($ch === '`') {
+                $in_backtick = true;
+                continue;
+            }
+            if ($ch === ';') {
+                $stmt = substr($buf, 0, $i + 1);
+                $buf = substr($buf, $i + 1);
+                return $stmt;
+            }
+        }
+        if (!$may_need_more) {
+            $stmt = $buf;
+            $buf = '';
+            return $stmt === '' ? null : $stmt;
+        }
+        // Bound memory: fail closed for binary-column tables; otherwise keep a window.
+        if ($len > 8 * 1024 * 1024) {
+            if ($fail_closed_oversized) {
+                return false;
+            }
+            $buf = substr($buf, -1024 * 1024);
+        }
+        return null;
+    }
+
+    /**
+     * @param string $create_sql
+     * @return array{0: array<int, int>, 1: array<string, int>, 2: bool} indexes, name map, parsed_ok
+     */
+    public static function binary_columns_from_create_table($create_sql)
+    {
+        $indexes = array();
+        $names = array();
+        if (!preg_match('/CREATE\s+TABLE\b[^;(]*\((.*)\)\s*(?:ENGINE|TYPE|DEFAULT|COLLATE|COMMENT|AUTO_INCREMENT|\/\*|;)/is', $create_sql, $m)) {
+            // Fallback: outermost parens after table name.
+            if (!preg_match('/CREATE\s+TABLE\b[^;(]*\((.*)\)\s*;/is', $create_sql, $m)) {
+                return array($indexes, $names, false);
+            }
+        }
+        $cols = self::split_sql_column_defs($m[1]);
+        $col_i = 0;
+        foreach ($cols as $def) {
+            $def = trim($def);
+            if ($def === '' || preg_match('/^(?:PRIMARY\s+KEY|UNIQUE|KEY|INDEX|CONSTRAINT|FULLTEXT|SPATIAL|FOREIGN\s+KEY)\b/i', $def)) {
+                continue;
+            }
+            if (!preg_match('/^`([^`]+)`\s+(.+)$/s', $def, $cm) && !preg_match('/^([^\s]+)\s+(.+)$/s', $def, $cm)) {
+                $col_i++;
+                continue;
+            }
+            $name = strtolower($cm[1]);
+            $type = strtolower($cm[2]);
+            // Only the column type token — not COMMENT/'blob' text elsewhere.
+            if (self::is_binary_column_type($type)) {
+                $indexes[] = $col_i;
+                $names[$name] = $col_i;
+            }
+            $col_i++;
+        }
+        return array($indexes, $names, true);
+    }
+
+    /**
+     * Split CREATE TABLE column list on commas at parentheses depth 0.
+     *
+     * @param string $body
+     * @return array<int, string>
+     */
+    private static function split_sql_column_defs($body)
+    {
+        $parts = array();
+        $depth = 0;
+        $current = '';
+        $in_single = false;
+        $escaped = false;
+        $len = strlen($body);
+        for ($i = 0; $i < $len; $i++) {
+            $ch = $body[$i];
+            if ($in_single) {
+                $current .= $ch;
+                if ($escaped) {
+                    $escaped = false;
+                    continue;
+                }
+                if ($ch === '\\') {
+                    $escaped = true;
+                    continue;
+                }
+                if ($ch === "'") {
+                    $in_single = false;
+                }
+                continue;
+            }
+            if ($ch === "'") {
+                $in_single = true;
+                $current .= $ch;
+                continue;
+            }
+            if ($ch === '(') {
+                $depth++;
+                $current .= $ch;
+                continue;
+            }
+            if ($ch === ')') {
+                $depth = max(0, $depth - 1);
+                $current .= $ch;
+                continue;
+            }
+            if ($ch === ',' && $depth === 0) {
+                $parts[] = $current;
+                $current = '';
+                continue;
+            }
+            $current .= $ch;
+        }
+        if (trim($current) !== '') {
+            $parts[] = $current;
+        }
+        return $parts;
+    }
+
+    /**
+     * @param string             $insert_sql
+     * @param array<int, int>    $binary_indexes
+     * @param array<string, int> $binary_names
+     * @return bool
+     */
+    public static function insert_has_unsafe_binary_values($insert_sql, $binary_indexes, $binary_names)
+    {
+        $column_order = null;
+        if (preg_match('/INSERT\s+(?:IGNORE\s+)?INTO\s+`?[^`\s(]+`?\s*\(([^)]+)\)\s*VALUES/is', $insert_sql, $m)) {
+            $column_order = array();
+            foreach (preg_split('/\s*,\s*/', $m[1]) as $col) {
+                $column_order[] = strtolower(trim($col, " \t\n\r\0\x0B`"));
+            }
+        }
+
+        if (!preg_match('/\bVALUES\s*(.*)$/is', $insert_sql, $vm)) {
+            return false;
+        }
+        $values_blob = rtrim($vm[1], " \t\n\r;");
+        $rows = self::split_sql_value_tuples($values_blob);
+        foreach ($rows as $row_vals) {
+            $check_indexes = $binary_indexes;
+            if (is_array($column_order)) {
+                $check_indexes = array();
+                foreach ($column_order as $pos => $name) {
+                    if (isset($binary_names[$name])) {
+                        $check_indexes[] = $pos;
+                    }
+                }
+            }
+            foreach ($check_indexes as $idx) {
+                if (!isset($row_vals[$idx])) {
+                    continue;
+                }
+                if (self::sql_literal_is_unsafe_binary_value($row_vals[$idx])) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Split `(...), (...)` tuples at depth 0.
+     *
+     * @param string $values_blob
+     * @return array<int, array<int, string>>
+     */
+    private static function split_sql_value_tuples($values_blob)
+    {
+        $rows = array();
+        $len = strlen($values_blob);
+        $i = 0;
+        while ($i < $len) {
+            while ($i < $len && ($values_blob[$i] === ',' || ctype_space($values_blob[$i]))) {
+                $i++;
+            }
+            if ($i >= $len) {
+                break;
+            }
+            if ($values_blob[$i] !== '(') {
+                $i++;
+                continue;
+            }
+            $i++; // past (
+            $depth = 1;
+            $current = '';
+            $vals = array();
+            $in_single = false;
+            $escaped = false;
+            for (; $i < $len; $i++) {
+                $ch = $values_blob[$i];
+                if ($in_single) {
+                    $current .= $ch;
+                    if ($escaped) {
+                        $escaped = false;
+                        continue;
+                    }
+                    if ($ch === '\\') {
+                        $escaped = true;
+                        continue;
+                    }
+                    if ($ch === "'") {
+                        $in_single = false;
+                    }
+                    continue;
+                }
+                if ($ch === "'") {
+                    $in_single = true;
+                    $current .= $ch;
+                    continue;
+                }
+                if ($ch === '(') {
+                    $depth++;
+                    $current .= $ch;
+                    continue;
+                }
+                if ($ch === ')') {
+                    $depth--;
+                    if ($depth === 0) {
+                        $vals[] = trim($current);
+                        $i++;
+                        break;
+                    }
+                    $current .= $ch;
+                    continue;
+                }
+                if ($ch === ',' && $depth === 1) {
+                    $vals[] = trim($current);
+                    $current = '';
+                    continue;
+                }
+                $current .= $ch;
+            }
+            if ($vals) {
+                $rows[] = $vals;
+            }
+        }
+        return $rows;
+    }
+
+    /**
+     * A binary-column SQL literal is unsafe when it is a quoted string whose
+     * unescaped payload is not valid UTF-8 — the 3.1.18 PHP exporter shape
+     * for raw binary (e.g. Wordfence `\x00\x01\x1B…`). Hex literals (`0x…`),
+     * bit-string literals (`b'…'`), and valid UTF-8 text (including NULs) in
+     * BLOB columns are safe.
+     *
+     * @param string $literal
+     * @return bool
+     */
+    public static function sql_literal_is_unsafe_binary_value($literal)
+    {
+        $literal = trim((string) $literal);
+        if ($literal === '' || strcasecmp($literal, 'NULL') === 0) {
+            return false;
+        }
+        // 3.1.19 hex form (and mysqldump --hex-blob).
+        if (preg_match('/^0x[0-9a-fA-F]*$/i', $literal)) {
+            return false;
+        }
+        // BIT / bit-string literals from mysqldump.
+        if (preg_match("/^[bB]'[01]*'$/", $literal)) {
+            return false;
+        }
+        // MySQL _binary '...' introducer and X'ABCD' hex literals.
+        if (preg_match("/^_binary\s+'/i", $literal)) {
+            return false;
+        }
+        if (preg_match("/^[xX]'[0-9a-fA-F]*'$/", $literal)) {
+            return false;
+        }
+        if ($literal[0] !== "'" || substr($literal, -1) !== "'") {
+            // Unquoted non-NULL binary is unexpected; treat as unsafe.
+            return true;
+        }
+        $inner = substr($literal, 1, -1);
+        $bytes = self::mysql_unescape_string_literal($inner);
+        // Empty quoted string is fine.
+        if ($bytes === '') {
+            return false;
+        }
+        // Valid UTF-8 (NUL bytes allowed) round-trips on utf8mb4; allow.
+        // Invalid UTF-8 is the rolw/wffilemods failure mode — refuse.
+        if (preg_match('//u', $bytes)) {
+            return false;
+        }
+        return true;
+    }
+
+    /**
+     * Reverse the escapes used by the pre-3.1.19 PHP exporter:
+     * `\\`, `\'`, `\0`, `\n`, `\r`, `\Z` (and leave other `\x` as `x`).
+     *
+     * @param string $inner Bytes between the quotes.
+     * @return string
+     */
+    public static function mysql_unescape_string_literal($inner)
+    {
+        $out = '';
+        $len = strlen($inner);
+        for ($i = 0; $i < $len; $i++) {
+            if ($inner[$i] !== '\\' || $i + 1 >= $len) {
+                $out .= $inner[$i];
+                continue;
+            }
+            $next = $inner[$i + 1];
+            $i++;
+            switch ($next) {
+                case '0':
+                    $out .= "\0";
+                    break;
+                case 'n':
+                    $out .= "\n";
+                    break;
+                case 'r':
+                    $out .= "\r";
+                    break;
+                case 'Z':
+                    $out .= "\x1a";
+                    break;
+                case '\\':
+                    $out .= '\\';
+                    break;
+                case "'":
+                    $out .= "'";
+                    break;
+                case '"':
+                    $out .= '"';
+                    break;
+                default:
+                    // MySQL: unknown escape → the character itself.
+                    $out .= $next;
+                    break;
+            }
+        }
+        return $out;
+    }
+
+    /**
+     * Build a 3.1.18-style quoted SQL literal (same escape order as export_table).
+     * Exposed for tests.
+     *
+     * @param string $value
+     * @return string Including surrounding quotes.
+     */
+    public static function php_exporter_quote_318($value)
+    {
+        $search = array("\x00", "\x0a", "\x0d", "\x1a");
+        $replace = array('\0', '\n', '\r', '\Z');
+        return "'" . str_replace($search, $replace, str_replace('\'', '\\\'', str_replace('\\', '\\\\', $value))) . "'";
+    }
+
+    /**
+     * @param string $type Lowercased MySQL column type.
+     * @return bool
+     */
+    public static function is_bit_column_type($type)
+    {
+        $type = strtolower(trim((string) $type));
+        return (bool) preg_match('/^bit\b/', $type);
+    }
+
+    /**
+     * Emit a BIT literal for values forced to decimal via ``col+0`` in the
+     * PHP exporter SELECT. Unquoted integers round-trip; quoted strings do not.
+     *
+     * @param mixed $value
+     * @return string
+     */
+    public static function sql_bit_literal($value)
+    {
+        if (null === $value) {
+            return 'NULL';
+        }
+        if (is_int($value) || is_float($value)) {
+            return (string) (int) $value;
+        }
+        if (!is_string($value)) {
+            $value = (string) $value;
+        }
+        if ($value === '') {
+            return '0';
+        }
+        // Already a bit-string literal from some drivers / tooling.
+        if (preg_match("/^b'[01]+'$/i", $value)) {
+            return $value;
+        }
+        // Decimal text from ``col+0`` (or a numeric driver).
+        if (ctype_digit($value)) {
+            return $value;
+        }
+        // Unexpected raw bytes — hex literal (should not occur when SELECT uses +0).
+        return '0x' . bin2hex($value);
+    }
+
+    /**
+     * @param string $type Lowercased MySQL column type.
+     * @return bool
+     */
+    public static function is_binary_column_type($type)
+    {
+        $type = strtolower(trim((string) $type));
+        if ($type === '') {
+            return false;
+        }
+        // Match BINARY/VARBINARY and *BLOB, but not "bigint" etc.
+        // BIT is excluded: mysqldump emits b'…' / 0x… which are safe, and
+        // treating BIT as binary caused false refusals on bit columns.
+        if (preg_match('/^(?:var)?binary\b/', $type)) {
+            return true;
+        }
+        if (preg_match('/^(?:tiny|medium|long)?blob\b/', $type)) {
+            return true;
+        }
+        return false;
+    }
+
+    /**
+     * Emit a MySQL hex literal that round-trips arbitrary bytes.
+     *
+     * @param mixed $value
+     * @return string
+     */
+    public static function sql_binary_literal($value)
+    {
+        if (null === $value) {
+            return 'NULL';
+        }
+        if (!is_string($value)) {
+            $value = (string) $value;
+        }
+        if ($value === '') {
+            return "''";
+        }
+        return '0x' . bin2hex($value);
+    }
+
+    /**
+     * Case-insensitive list of `*.sql` dumps under a restore DB directory.
+     * Shared by binary preflight and import so `.Sql` / `.SQL` are never missed.
+     *
+     * @param string $dbfiles_dir
+     * @return array<int, string>
+     */
+    public static function list_restore_sql_dump_files($dbfiles_dir)
+    {
+        $dbfiles_dir = (string) $dbfiles_dir;
+        if ($dbfiles_dir === '' || !is_dir($dbfiles_dir)) {
+            return array();
+        }
+        $files = array();
+        $dir = @scandir($dbfiles_dir);
+        if (!is_array($dir)) {
+            return array();
+        }
+        foreach ($dir as $name) {
+            if ($name === '.' || $name === '..') {
+                continue;
+            }
+            if (strtolower(substr($name, -4)) !== '.sql') {
+                continue;
+            }
+            $path = rtrim($dbfiles_dir, '/\\') . '/' . $name;
+            if (is_file($path)) {
+                $files[] = $path;
+            }
+        }
+        sort($files);
+        return $files;
     }
 
     /**

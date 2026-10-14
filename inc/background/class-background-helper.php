@@ -4,6 +4,13 @@ namespace OCM;
 
 class OCM_BackgroundHelper
 {
+    /**
+     * WP_Background_Process keys its queue rows as "{prefix}_{action}_batch_*"
+     * with the library's fixed "wp" prefix, not the site's table prefix: a site
+     * on db_ or rt_ still stores wp_ocm_background_backup_batch_*.
+     */
+    const QUEUE_KEY_PREFIX = 'wp_ocm_background_';
+
     public static function delete_all_batch_process()
     {
         global $wpdb;
@@ -16,7 +23,9 @@ class OCM_BackgroundHelper
             $column = 'meta_key';
         }
 
-        $wpdb->get_results($wpdb->prepare("DELETE FROM {$table} where {$column} LIKE %s", $wpdb->base_prefix . 'ocm_background_%_batch_%'));
+        foreach (self::queue_batch_like_patterns($wpdb, '%') as $like) {
+            $wpdb->query($wpdb->prepare("DELETE FROM {$table} WHERE {$column} LIKE %s", $like));
+        }
         $wpdb->get_results($wpdb->prepare("DELETE FROM {$table} where {$column} LIKE %s", '_transient_ocm_%'));
         $wpdb->get_results($wpdb->prepare("DELETE FROM {$table} where {$column} LIKE %s", '_site_transient_ocm_%'));
         $wpdb->get_results("DELETE FROM {$table} where {$column} = 'backup_steps'");
@@ -35,12 +44,56 @@ class OCM_BackgroundHelper
             $column = 'meta_key';
         }
 
-        $like_upload = $wpdb->base_prefix . 'ocm_background_upload_batch_%';
-        $like_backup = $wpdb->base_prefix . 'ocm_background_backup_batch_%';
-        $like_download = $wpdb->base_prefix . 'ocm_background_download_batch_%';
-        $wpdb->query($wpdb->prepare(
-            "DELETE FROM {$table} WHERE {$column} LIKE %s OR {$column} LIKE %s OR {$column} LIKE %s",
-            $like_upload, $like_backup, $like_download
-        ));
+        $likes = array();
+        foreach (array('upload', 'backup', 'download') as $action) {
+            $likes = array_merge($likes, self::queue_batch_like_patterns($wpdb, $action));
+        }
+        $where = implode(' OR ', array_fill(0, count($likes), "{$column} LIKE %s"));
+        $wpdb->query($wpdb->prepare("DELETE FROM {$table} WHERE {$where}", $likes));
+    }
+
+    /**
+     * Drop only the backup queue, leaving a running restore's queue and
+     * status untouched.
+     */
+    public static function delete_backup_batch_process()
+    {
+        global $wpdb;
+
+        $table  = $wpdb->options;
+        $column = 'option_name';
+
+        if ( is_multisite() ) {
+            $table  = $wpdb->sitemeta;
+            $column = 'meta_key';
+        }
+
+        foreach (self::queue_batch_like_patterns($wpdb, 'backup') as $like) {
+            $wpdb->query($wpdb->prepare("DELETE FROM {$table} WHERE {$column} LIKE %s", $like));
+        }
+    }
+
+    /**
+     * LIKE patterns for an action's queue rows: the library's real key, plus
+     * the legacy table-prefix key older cleanup code targeted.
+     *
+     * @param \wpdb  $wpdb
+     * @param string $action 'backup', 'restore', ... or '%' for any action.
+     * @return string[]
+     */
+    private static function queue_batch_like_patterns($wpdb, $action)
+    {
+        $action_like = $action === '%' ? '%' : $wpdb->esc_like($action);
+        $prefixes = array(self::QUEUE_KEY_PREFIX);
+        $legacy = $wpdb->base_prefix . 'ocm_background_';
+        if ($legacy !== self::QUEUE_KEY_PREFIX) {
+            $prefixes[] = $legacy;
+        }
+
+        $patterns = array();
+        foreach ($prefixes as $prefix) {
+            $patterns[] = $wpdb->esc_like($prefix) . $action_like . $wpdb->esc_like('_batch_') . '%';
+        }
+        return $patterns;
     }
 }

@@ -121,10 +121,15 @@ class OCM_Restore_Precheck {
     }
 
     public static function replacement_args($plan, $source, $destination) {
-        $pairs = array(array('search' => $source, 'replace' => $destination));
+        $pairs = OCM_Extra_Domains::primary_replacement_pairs($source, $destination);
         if (is_array($plan) && !empty($plan['reviewed']) && ($plan['destination'] ?? '') === $destination) {
             foreach ($plan['selected'] as $row) {
-                $pairs = array_merge($pairs, OCM_Extra_Domains::replacement_pairs($row, $destination));
+                $pairs = array_merge(
+                    $pairs,
+                    OCM_Extra_Domains::with_json_escaped_variants(
+                        OCM_Extra_Domains::replacement_pairs($row, $destination)
+                    )
+                );
             }
         }
         return array('pairs' => $pairs);

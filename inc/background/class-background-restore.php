@@ -84,12 +84,33 @@ class OCM_BackgroundRestore extends WP_Background_Process
             wp_die();
         }
 
+        // The advisory lock belongs to this request's MySQL connection. A long
+        // download runs no queries, so a host with a short wait_timeout can drop
+        // the connection and free the lock while this worker is still busy. The
+        // file lock lives as long as this PHP process, however long it runs (#79).
+        if ( ! self::acquire_worker_file_lock() ) {
+            $wpdb->query( $wpdb->prepare( "SELECT RELEASE_LOCK(%s)", $lock_name ) );
+            One_Click_Migration::write_to_log(' SYSLOG: Another restore worker is still running - this instance will exit');
+            wp_die();
+        }
+
         One_Click_Migration::worker_heartbeat();
         $this->lock_process();
         $isStopProcess = false;
+        $drainedElsewhere = false;
 
         do {
             $batch = $this->get_batch();
+            if ( ! OCM_BackgroundBackup::is_usable_batch( $batch ) ) {
+                if ( is_object( $batch ) && isset( $batch->key ) && $batch->key !== '' ) {
+                    One_Click_Migration::write_to_log(' SYSLOG: Dropping unreadable restore batch row.');
+                    $this->delete( $batch->key );
+                    continue;
+                }
+                // The worker that released these locks finished the queue (#72).
+                $drainedElsewhere = true;
+                break;
+            }
 
             foreach ( $batch->data as $key => $value ) {
                 One_Click_Migration::worker_heartbeat();
@@ -127,18 +148,148 @@ class OCM_BackgroundRestore extends WP_Background_Process
         // Release the advisory lock before dispatching next process or completing.
         $wpdb->query( $wpdb->prepare( "SELECT RELEASE_LOCK(%s)", $lock_name ) );
 
+        if ( $drainedElsewhere ) {
+            One_Click_Migration::write_to_log(' SYSLOG: Restore queue already drained by another worker - this instance will exit');
+            wp_die();
+        }
+
         if (self::RETURN_TYPE_STOP_PROCESSS === $isStopProcess) {
             wp_die();
         }
 
         // Start next batch or complete process.
         if ( !$this->is_queue_empty() ) {
+            // The dispatched worker must be able to take the file lock.
+            self::release_worker_file_lock();
             $this->dispatch();
         } else {
+            // Keep the file lock through complete(); process exit releases it.
             $this->complete();
         }
 
         wp_die();
+    }
+
+    /** @var resource|null Open handle holding the restore worker's flock(). */
+    private static $worker_lock_handle = null;
+
+    /**
+     * Path of the restore worker lock file. Kept beside the private debug log,
+     * outside the web root, and never inside wp-content/ocm_restore (that
+     * directory is deleted during cleanup).
+     *
+     * @return string
+     */
+    public static function worker_lock_path()
+    {
+        $dir = defined('OCM_DEBUG_LOG_DIR') ? OCM_DEBUG_LOG_DIR : WP_CONTENT_DIR;
+        return rtrim($dir, '/\\') . '/restore-worker.lock';
+    }
+
+    /**
+     * Take an exclusive, non-blocking flock() for this PHP process. The OS
+     * releases it when the process exits, including on fatals and timeouts, so
+     * a dead worker can never hold it.
+     *
+     * Returns false only when another live process holds the lock. If the lock
+     * file can't be used at all (unwritable dir, no flock support), it returns
+     * true and the advisory lock remains the guard.
+     *
+     * @return bool
+     */
+    public static function acquire_worker_file_lock()
+    {
+        if (is_resource(self::$worker_lock_handle)) {
+            return true;
+        }
+
+        $path = self::worker_lock_path();
+        $dir = dirname($path);
+        if (!is_dir($dir) && !@mkdir($dir, 0700, true) && !is_dir($dir)) {
+            return true;
+        }
+        $handle = @fopen($path, 'c');
+        if (!$handle) {
+            return true;
+        }
+
+        $would_block = 0;
+        if (@flock($handle, LOCK_EX | LOCK_NB, $would_block)) {
+            self::$worker_lock_handle = $handle;
+            return true;
+        }
+        fclose($handle);
+
+        // flock() also fails on filesystems without lock support; only a held
+        // lock means another worker is alive.
+        return !self::lock_is_contended($would_block, $dir);
+    }
+
+    /**
+     * After a failed non-blocking flock(): contention, or no lock support here?
+     * Not every platform reports would-block, so when it's unset, lock a private
+     * probe file. If that works, flock() works and the lock file is held.
+     *
+     * @param int    $would_block
+     * @param string $dir
+     * @return bool
+     */
+    private static function lock_is_contended($would_block, $dir)
+    {
+        if ($would_block) {
+            return true;
+        }
+        $probe = rtrim($dir, '/\\') . '/restore-worker.probe.' . getmypid() . '.' . mt_rand();
+        $handle = @fopen($probe, 'c');
+        if (!$handle) {
+            return false;
+        }
+        $supported = @flock($handle, LOCK_EX | LOCK_NB);
+        if ($supported) {
+            @flock($handle, LOCK_UN);
+        }
+        fclose($handle);
+        @unlink($probe);
+        return $supported;
+    }
+
+    /**
+     * True while a live process (not this one) holds the restore worker lock.
+     *
+     * @return bool
+     */
+    public static function is_worker_file_lock_held()
+    {
+        if (is_resource(self::$worker_lock_handle)) {
+            return false;
+        }
+        $path = self::worker_lock_path();
+        if (!is_file($path)) {
+            return false;
+        }
+        $handle = @fopen($path, 'c');
+        if (!$handle) {
+            return false;
+        }
+        $would_block = 0;
+        if (@flock($handle, LOCK_EX | LOCK_NB, $would_block)) {
+            @flock($handle, LOCK_UN);
+            fclose($handle);
+            return false;
+        }
+        fclose($handle);
+        return self::lock_is_contended($would_block, dirname($path));
+    }
+
+    public static function release_worker_file_lock()
+    {
+        if (!is_resource(self::$worker_lock_handle)) {
+            self::$worker_lock_handle = null;
+            return;
+        }
+        @flock(self::$worker_lock_handle, LOCK_UN);
+        fclose(self::$worker_lock_handle);
+        self::$worker_lock_handle = null;
     }
 
     /**
@@ -268,6 +419,7 @@ class OCM_BackgroundRestore extends WP_Background_Process
         global $wpdb;
         $lock_name = $this->identifier . '_handle_lock';
         $wpdb->query( $wpdb->prepare( "SELECT RELEASE_LOCK(%s)", $lock_name ) );
+        self::release_worker_file_lock();
 
         if ( !$this->is_queue_empty() ) {
             One_Click_Migration::write_to_log(OCM_Backup::LOG_MESSAGE_BG_PROCESS_RESTARTING);

@@ -96,16 +96,16 @@ class OCM_Backup
         ['URL generated: uploads', '9%'],
         ['URL generated: themes', '14%'],
         ['URL generated: plugins', '18%'],
-        ['URL generated: log', '23%'],
         ['URL generated: log_download', '27%'],
+        ['URL generated: log', '23%'],
 
 
         ['URL generated: db', '5%'],
         ['URL generated: uploads', '9%'],
         ['URL generated: themes', '14%'],
         ['URL generated: plugins', '18%'],
-        ['URL generated: log', '23%'],
         ['URL generated: log_download', '27%'],
+        ['URL generated: log', '23%'],
 
         ['db added to queue', '28%'],
         ['themes added to queue', '29%'],
@@ -279,7 +279,12 @@ class OCM_Backup
         ['SYSLOG: Low memory available (', '84%'],
         ['SYSLOG: Low memory - Page Size reduced', '84%'],
         ['Cleaning up.', '92%'],
+        ['Restore completed with warnings:', '100%'],
         ['Restore completed.', '100%'],
+        ['Restore stopped before import: backup needs a fresh 3.1.19 backup. No changes were made.', '0%'],
+        ['Restore stopped: database part could not be downloaded or unpacked. No changes were made.', '0%'],
+        ['Restore stopped: the backup\'s main options table didn\'t pass the check. No changes were made.', '0%'],
+        ['Restore stopped: the database could not be imported. No changes were made.', '0%'],
         ['Error:', '0%'],
         ['Backup failed:', '0%'],
         ['Restore failed:', '0%'],
@@ -296,7 +301,46 @@ class OCM_Backup
     ];
 
     private static  $restore_site_url = '';
+
+    /**
+     * Set when the unsafe-binary preflight refuses the dump. Early gate runs
+     * after DB extract and before themes/plugins/uploads are replaced, so a
+     * refusal leaves files and the database untouched.
+     */
+    private static $db_restore_refused_binary = false;
+    /** Set when the options/prefix gate rejects the staging import. */
+    private static $db_restore_refused_options = false;
+    /**
+     * When true, a fatal during staging import / URL rewrite is converted into
+     * LOG_RESTORE_STOPPED_IMPORT (live site untouched; no worker retry loop).
+     * @var bool
+     */
+    private static $import_oom_guard_active = false;
+    /** @var bool Prevents writing the import-stop line more than once from the OOM guard. */
+    private static $import_oom_stop_written = false;
+    /**
+     * Staging table name when URL rewrite hit a dedicated stop (keyless/unpageable
+     * or oversized row). Used so discard staging does not insert a log line between
+     * that Error and LOG_RESTORE_STOPPED_IMPORT.
+     * @var string|null
+     */
+    private static $url_rewrite_unpageable_table = null;
+    /** @var bool Memo for ensure_binary_preflight_before_file_replace() in one request. */
+    private static $binary_preflight_passed = false;
     private static $restore_files = [];
+
+    /** Mid-restore db download/decrypt/extract failure (not a user exclude). */
+    const OPTION_RESTORE_DB_PART_FAILED = 'ocm_restore_db_part_failed';
+    const LOG_RESTORE_STOPPED_DB_PART = 'Restore stopped: database part could not be downloaded or unpacked. No changes were made.';
+    const LOG_RESTORE_STOPPED_IMPORT = 'Restore stopped: the database could not be imported. No changes were made.';
+    const LOG_RESTORE_STOPPED_OPTIONS = 'Restore stopped: the backup\'s main options table didn\'t pass the check. No changes were made.';
+    const LOG_RESTORE_COMPLETED_WARNINGS_PREFIX = 'Restore completed with warnings:';
+    const OPTION_RESTORE_WAS_WARNED = 'ocm_restore_was_warned';
+    /** part => reason (timeout|not found|partially copied|not in backup|copied, old copy not removed). */
+    const OPTION_RESTORE_PART_WARNINGS = 'ocm_restore_part_warnings';
+    /** Persisted binary-preflight verdict for this restore's dump fingerprint. */
+    const OPTION_BINARY_PREFLIGHT = 'ocm_binary_preflight_verdict';
+    const OPTION_RESTORE_PLUGINS_ISOLATED = 'ocm_restore_plugins_isolated';
 
 
     public static function cancel_actions()
@@ -673,6 +717,7 @@ class OCM_Backup
         // later block the merge-in of the backup log from the new bucket).
         delete_option('ocm_presigned_urls');
         delete_option('ocm_log_merged_bucket');
+        delete_option(self::OPTION_RESTORE_DB_PART_FAILED);
         One_Click_Migration::delete_log_file();
         $exluded_folders = self::get_excluded_folders();
 
@@ -697,7 +742,21 @@ class OCM_Backup
         update_option('ocm_action_start_restore', true, true);
         update_option('ocm_is_stopped', false, true);
 
-
+        // Cleared at restore start so a prior failed attempt cannot block a new run.
+        // Mid-restore db skip paths set this; user-excluded db never does.
+        // Do NOT clear ocm_backup_*_parts here: a worker restart after the backup
+        // log was merged (ocm_log_merged_bucket set) would wipe exclusions while
+        // skipping re-read, causing excluded parts to be requested again. Fresh
+        // restores already clear those via delete_restore_options() at kickoff.
+        if (!self::check_is_complete_restore_step('init', self::STEP_RESTORE_CHILD_INITIATE)) {
+            delete_option(self::OPTION_RESTORE_DB_PART_FAILED);
+            delete_option(self::OPTION_BINARY_PREFLIGHT);
+            delete_option(self::OPTION_RESTORE_PART_WARNINGS);
+            delete_option(self::OPTION_RESTORE_PLUGINS_ISOLATED);
+            delete_option(self::OPTION_RESTORE_WAS_WARNED);
+            self::$db_restore_refused_binary = false;
+            self::$binary_preflight_passed = false;
+        }
 
         $content_dir = WP_CONTENT_DIR . '/ocm_restore';
         $excluded_restore_files = get_option('ocm_excluded_folders', []);
@@ -752,7 +811,19 @@ class OCM_Backup
                 ));
             }
 
+            // Promote backup-log =excluded parts into ocm_excluded_folders so the
+            // rest of restore matches 3.1.18 selective exclude (no download, and
+            // for db: complete_restore / no import / no URL rewrite).
+            // Call AFTER get_excluded_folders() so a $_GET selected list cannot wipe them.
             $excluded_for_check = self::get_excluded_folders();
+            self::apply_backup_excluded_parts_to_restore_exclusions();
+            $backup_excluded_for_disk = get_option('ocm_backup_excluded_parts', array());
+            $backup_excluded_for_disk = is_array($backup_excluded_for_disk) ? $backup_excluded_for_disk : array();
+            $excluded_for_check = array_values(array_unique(array_merge(
+                is_array($excluded_for_check) ? $excluded_for_check : array(),
+                get_option('ocm_excluded_folders', array()) ?: array(),
+                $backup_excluded_for_disk
+            )));
             $disk = self::check_restore_disk_space($presigned_urls, $excluded_for_check);
             if (!$disk['ok']) {
                 if (!empty($disk['reason']) && 'write_probe_failed' === $disk['reason']) {
@@ -778,11 +849,18 @@ class OCM_Backup
             $all_plugins = is_array($all_plugins) ? $all_plugins : [];
             $other_count = count($all_plugins) - 1;
             One_Click_Migration::write_to_log('Other active plugins: ' . max(0, $other_count));
-            self::force_only_ocm_plugin_active('starting restore');
+            // Plugin deactivation waits until binary preflight / db-part checks
+            // pass (gate_restore_before_file_replace). Stops that say
+            // "No changes were made" must not have deactivated anything.
             OCM_Debug_Mode::enable();
             One_Click_Migration::write_to_log(' SYSLOG: Debug mode enabled for restore run');
             One_Click_Migration::enable_maintenance_mode();
             $excluded_restore_files = get_option('ocm_excluded_folders', []);
+
+            // Item A: backup-skipped / failed db → stop unless db is excluded for
+            // this restore (user selection OR backup-log db=excluded files-only).
+            $excluded_restore_files = get_option('ocm_excluded_folders', []);
+            self::stop_if_db_unavailable_for_restore($excluded_restore_files);
 
             $exluding = implode(", ", $excluded_restore_files);
 
@@ -813,7 +891,14 @@ class OCM_Backup
         }
 
         $presigned_urls = self::get_restore_step_value('init', self::STEP_RESTORE_CHILD_PRESIGNED_URLS);
+        // Resume path: get_excluded_folders may no-op (no $_GET); still re-apply
+        // backup exclusions so a resumed files-only restore never re-requests db.
         $excluded_folders = self::get_excluded_folders();
+        self::apply_backup_excluded_parts_to_restore_exclusions();
+
+        // Process db first so the binary preflight can run after DB extract and
+        // before themes/plugins/uploads replace destination files.
+        $presigned_urls = self::presigned_urls_db_first($presigned_urls);
 
         // Download each of the zip files
         foreach ($presigned_urls as $key => $download_url) {
@@ -826,6 +911,12 @@ class OCM_Backup
             if(!in_array($key, $excluded_restore_files)){
 
             if (in_array($key, array('log', 'log_download'))) {
+                continue;
+            }
+
+            // Never request a part the backup log marked =excluded (including
+            // db=excluded files-only moves).
+            if (self::maybe_skip_backup_excluded_restore_part($key, $excluded_restore_files)) {
                 continue;
             }
 
@@ -859,8 +950,7 @@ class OCM_Backup
                         self::set_complete_restore_step($key, self::STEP_RESTORE_CHILD_DECRYPT);
                         self::set_complete_restore_step($key, self::STEP_RESTORE_CHILD_EXTRACT);
                         self::set_complete_restore_step($key, self::STEP_RESTORE_CHILD_DELETE_OLD_AND_MOVE_NEW);
-                        self::capture_failed_folder($excluded_restore_files, $key, 'ocm_excluded_folders');
-                        self::capture_failed_folder($skipped_restore_files, $key, 'ocm_skipped_folders');
+                        self::capture_skipped_restore_part($excluded_restore_files, $skipped_restore_files, $key);
                         continue;
 
                       }
@@ -872,34 +962,25 @@ class OCM_Backup
 
                     One_Click_Migration::write_to_log(sprintf('Downloading file: "%s.zip.crypt"', $key));
 
+                    self::$restore_download_requests[] = $key;
                     $downloadTmpPathFile = self::download_restore_file($download_url, $file_path, $key);
 
                     if(is_wp_error($downloadTmpPathFile)){
                       $error_message = $downloadTmpPathFile->get_error_message();
                       if($error_message === 'Not Found'){
 
-                        $backup_missing_parts = get_option('ocm_backup_missing_parts', []);
-                        $backup_missing_parts = is_array($backup_missing_parts) ? $backup_missing_parts : [];
-
-                        if (in_array($key, $backup_missing_parts, true)) {
-                            One_Click_Migration::write_to_log("Notice: $key was not included in this backup (skipped while the backup was created); continuing without it.");
-                        } elseif (get_option('ocm_backup_parts_known')) {
-                            // The backup manifest says this part was uploaded, so its
-                            // absence means the stored backup is damaged or expired.
+                        $not_found = self::handle_restore_part_download_not_found(
+                            $key,
+                            $keyZipCrypt,
+                            $excluded_restore_files,
+                            $eexcluded_restore_files
+                        );
+                        if ($not_found === 'fail_restore') {
                             return self::fail_restore(sprintf(
                                 'Error: Restore failed because "%s" should exist in this backup but is missing from storage. Create a fresh backup and restore with the new code.',
                                 $keyZipCrypt
                             ));
-                        } else {
-                            One_Click_Migration::write_to_log("Notice: file $keyZipCrypt not found");
                         }
-
-                        array_push($excluded_restore_files, $key);
-                        $excluded_restore_files = array_unique($excluded_restore_files);
-
-                        update_option( 'ocm_excluded_folders', $excluded_restore_files);
-                        self::capture_failed_folder($eexcluded_restore_files, $key, 'ocm_eexcluded_folders');
-
                         continue;
                       }
 
@@ -931,8 +1012,7 @@ class OCM_Backup
                           self::set_complete_restore_step($key, self::STEP_RESTORE_CHILD_DECRYPT);
                           self::set_complete_restore_step($key, self::STEP_RESTORE_CHILD_EXTRACT);
                           self::set_complete_restore_step($key, self::STEP_RESTORE_CHILD_DELETE_OLD_AND_MOVE_NEW);
-                          self::capture_failed_folder($excluded_restore_files, $key, 'ocm_excluded_folders');
-                          self::capture_failed_folder($skipped_restore_files, $key, 'ocm_skipped_folders');
+                          self::capture_skipped_restore_part($excluded_restore_files, $skipped_restore_files, $key);
                           continue;
                         }
                     }
@@ -959,14 +1039,13 @@ class OCM_Backup
                   }else{
                       if (!self::check_is_complete_restore_step($key, self::STEP_RESTORE_CHILD_DECRYPT)) {
 
-                        One_Click_Migration::write_to_log(sprintf('Skipping ' .$key.  ' Decypting'));
+                        One_Click_Migration::write_to_log(sprintf('Skipping ' .$key.  ' Decrypting'));
                         One_Click_Migration::write_to_log(sprintf('Skipping ' .$key.  ' Extraction'));
 
                         self::set_complete_restore_step($key, self::STEP_RESTORE_CHILD_DECRYPT);
                         self::set_complete_restore_step($key, self::STEP_RESTORE_CHILD_EXTRACT);
                         self::set_complete_restore_step($key, self::STEP_RESTORE_CHILD_DELETE_OLD_AND_MOVE_NEW);
-                        self::capture_failed_folder($excluded_restore_files, $key, 'ocm_excluded_folders');
-                        self::capture_failed_folder($skipped_restore_files, $key, 'ocm_skipped_folders');
+                        self::capture_skipped_restore_part($excluded_restore_files, $skipped_restore_files, $key);
                         continue;
                       }
                     }
@@ -995,6 +1074,14 @@ class OCM_Backup
                   $aes_key = $aes_key_b64 ? base64_decode($aes_key_b64) : '';
                   $unencrypted_zip = self::decryptZipFile($file_path, $aes_key);
                   if (!$unencrypted_zip) {
+                      clearstatcache(true, $file_path);
+                      if (!file_exists($file_path)) {
+                          // The file vanished mid-step; that's not a quota or permission problem.
+                          return self::fail_restore(sprintf(
+                              'Error: Restore failed because downloaded file for "%s.zip.crypt" was missing.',
+                              $key
+                          ));
+                      }
                       return self::fail_restore(sprintf(
                           'Error: Restore failed while decrypting "%s.zip.crypt". Please check disk quota and write permissions.',
                           $key
@@ -1009,14 +1096,13 @@ class OCM_Backup
                         One_Click_Migration::$process_restore_single->restart_task();
                       }
                       else{
-                        One_Click_Migration::write_to_log(sprintf('Skipping ' .$key.  ' Decypting'));
+                        One_Click_Migration::write_to_log(sprintf('Skipping ' .$key.  ' Decrypting'));
                         One_Click_Migration::write_to_log(sprintf('Skipping ' .$key.  ' Extraction'));
 
                         self::set_complete_restore_step($key, self::STEP_RESTORE_CHILD_DECRYPT);
                         self::set_complete_restore_step($key, self::STEP_RESTORE_CHILD_EXTRACT);
                         self::set_complete_restore_step($key, self::STEP_RESTORE_CHILD_DELETE_OLD_AND_MOVE_NEW);
-                        self::capture_failed_folder($excluded_restore_files, $key, 'ocm_excluded_folders');
-                        self::capture_failed_folder($skipped_restore_files, $key, 'ocm_skipped_folders');
+                        self::capture_skipped_restore_part($excluded_restore_files, $skipped_restore_files, $key);
                         continue;
                       }
                     }
@@ -1061,8 +1147,7 @@ class OCM_Backup
 
                         self::set_complete_restore_step($key, self::STEP_RESTORE_CHILD_EXTRACT);
                         self::set_complete_restore_step($key, self::STEP_RESTORE_CHILD_DELETE_OLD_AND_MOVE_NEW);
-                        self::capture_failed_folder($excluded_restore_files, $key, 'ocm_excluded_folders');
-                        self::capture_failed_folder($skipped_restore_files, $key, 'ocm_skipped_folders');
+                        self::capture_skipped_restore_part($excluded_restore_files, $skipped_restore_files, $key);
                         continue;
                       }
                     }
@@ -1132,8 +1217,7 @@ class OCM_Backup
 
                         self::set_complete_restore_step($key, self::STEP_RESTORE_CHILD_EXTRACT);
                         self::set_complete_restore_step($key, self::STEP_RESTORE_CHILD_DELETE_OLD_AND_MOVE_NEW);
-                        self::capture_failed_folder($excluded_restore_files, $key, 'ocm_excluded_folders');
-                        self::capture_failed_folder($skipped_restore_files, $key, 'ocm_skipped_folders');
+                        self::capture_skipped_restore_part($excluded_restore_files, $skipped_restore_files, $key);
                         continue;
                       }
                     }
@@ -1166,52 +1250,31 @@ class OCM_Backup
                   }else{
                       if (!self::check_is_complete_restore_step($key, self::STEP_RESTORE_CHILD_DELETE_OLD_AND_MOVE_NEW)) {
 
-                        One_Click_Migration::write_to_log(sprintf('Skipping Old ' .$key.  ' Deletion'));
+                        One_Click_Migration::write_to_log(sprintf('Skipping %s restore after repeated timeouts (folder replace incomplete).', $key));
 
                         self::set_complete_restore_step($key, self::STEP_RESTORE_CHILD_DELETE_OLD_AND_MOVE_NEW);
-                        self::capture_failed_folder($excluded_restore_files, $key, 'ocm_excluded_folders');
+                        self::record_restore_part_warning($key, 'timeout');
+                        self::capture_skipped_restore_part($excluded_restore_files, $skipped_restore_files, $key);
                         continue;
                       }
                     }
                   }
                 if (!self::check_is_complete_restore_step($key, self::STEP_RESTORE_CHILD_DELETE_OLD_AND_MOVE_NEW)) {
-                    if (!in_array($key, array('db', 'plugins')) && is_dir($extract_path)) {
-
-                        $directory = WP_CONTENT_DIR . '/' . $key;
-
-                        One_Click_Migration::write_to_log(sprintf('Restoring "%s" to directory "%s"', ucfirst($key), $directory));
-
-                        if (!self::replaceDirectoryFromExtract($extract_path, $directory, $key)) {
-                            One_Click_Migration::write_to_log(sprintf(
-                                'Downloading restore files. Error: "%s" directory could not be moved or copied to "%s" directory. Please check the write permission for these directories.',
-                                $extract_path, $directory
-                            ));
-                            One_Click_Migration::write_to_log(sprintf('Restore failed: restored "%s" files could not be moved into place (write permission).', $key));
-
-                            update_option('ocm_is_stopped', true, true);
-                            die();
-                        }
-
-
-                      if (One_Click_Migration::$process_restore_single->time_exceeded()) {
-                        $next_retry_count = get_option('ocm_restore_child_delete_retry_' . $key, 1);
-                        if($next_retry_count && $next_retry_count <= self::MAX_STEP_RETRIES){
-                          One_Click_Migration::write_to_log("Process is Restarting");
-                          update_option('ocm_restore_child_delete_retry_' . $key, $next_retry_count, true);
-                          One_Click_Migration::$process_restore_single->restart_task();
-                        }
-                        else{
-
-                          One_Click_Migration::write_to_log(sprintf('Skipping Old ' .$key.  ' Deletion'));
-
-                          self::set_complete_restore_step($key, self::STEP_RESTORE_CHILD_DELETE_OLD_AND_MOVE_NEW);
-                          self::capture_failed_folder($excluded_restore_files, $key, 'ocm_excluded_folders');
-                          continue;
-                        }
-                      }
+                    // themes/uploads/plugins file swaps wait until DB import AND
+                    // options/prefix validation succeed (or until files-only path).
+                    // Mark db/plugins extract-side steps only; deferred swap owns
+                    // themes/uploads DELETE_OLD_AND_MOVE_NEW.
+                    if (in_array($key, array('db', 'plugins'), true)) {
+                        self::set_complete_restore_step($key, self::STEP_RESTORE_CHILD_DELETE_OLD_AND_MOVE_NEW);
                     }
+                }
 
-                    self::set_complete_restore_step($key, self::STEP_RESTORE_CHILD_DELETE_OLD_AND_MOVE_NEW);
+                // After DB extract (db-first ordering), refuse before any later
+                // themes/plugins/uploads replacement in this or a resumed run.
+                if ($key === 'db'
+                    && self::check_is_complete_restore_step('db', self::STEP_RESTORE_CHILD_EXTRACT)
+                ) {
+                    self::gate_restore_before_file_replace();
                 }
 
               }
@@ -1223,27 +1286,14 @@ class OCM_Backup
 
         }
 
-        if(!in_array('themes', $excluded_restore_files)){
-          if (!self::check_is_complete_restore_step('themes', self::STEP_RESTORE_CHILD_THEMES_RESTORED)) {
-              One_Click_Migration::write_to_log('Themes have been restored');
-              self::set_complete_restore_step('themes', self::STEP_RESTORE_CHILD_THEMES_RESTORED);
-          }
-        }
-        if(!in_array('uploads', $excluded_restore_files)){
-          if (!self::check_is_complete_restore_step('uploads', self::STEP_RESTORE_CHILD_UPLOADS_RESTORED)) {
-              One_Click_Migration::write_to_log('Uploads have been restored');
-              self::set_complete_restore_step('uploads', self::STEP_RESTORE_CHILD_UPLOADS_RESTORED);
-          }
-        }
-
-        if(!in_array('plugins', $excluded_restore_files)){
-          if (!self::check_is_complete_restore_step('plugins', self::STEP_RESTORE_CHILD_RESTORE)) {
-
-            self::restore_plugins($presigned_urls);
-          }
-
+        // Mid-restore db download/decrypt/extract failure must never fall through
+        // to complete_restore() (which would replace nothing but still report success).
+        if (get_option(self::OPTION_RESTORE_DB_PART_FAILED)) {
+            self::stop_restore_after_db_part_failure();
         }
         if(in_array('db', $excluded_restore_files)){
+          // Files-only: no DB import — swap extracted files now, then complete.
+          self::apply_deferred_file_swaps($presigned_urls);
           self::complete_restore();
         }else{
           self::finish_restore_db_phase();
@@ -1344,32 +1394,16 @@ class OCM_Backup
 
         One_Click_Migration::disable_maintenance_mode();
         OCM_Debug_Mode::disable();
-        One_Click_Migration::write_to_log('Restore completed.');
         // Durable flag so the admin UI can show the success modal after
         // post-restore logout / re-login (session cookies often invalidate).
-        // "Clean" means no backup-missing parts AND no parts that failed during
-        // this restore (skipped after max retries, or not found in storage).
-        // These options are reset at restore start (delete_restore_options), so
-        // they reflect only the current run. Hard failures never reach here at
-        // all — fail_restore() and finish_restore_db_phase() exit first.
-        $missing_parts = get_option('ocm_backup_missing_parts', []);
-        $skipped_folders = get_option('ocm_skipped_folders', []);
-        $not_found_folders = get_option('ocm_eexcluded_folders', []);
-        $is_warned = (is_array($missing_parts) && !empty($missing_parts))
-            || (is_array($skipped_folders) && !empty($skipped_folders))
-            || (is_array($not_found_folders) && !empty($not_found_folders));
-        update_option('ocm_show_restore_success', time(), false);
-        if ($is_warned) {
-            // Success UI ok; never offer Review CTA (and never count the run as
-            // clean) on warned / missing-parts / partial runs.
-            update_option('ocm_show_review_cta', 0, false);
-        } else {
-            $clean_count = (int) get_option('ocm_clean_restore_count', 0) + 1;
-            update_option('ocm_clean_restore_count', $clean_count, false);
-            $dismissed = (bool) get_option('ocm_review_ask_dismissed', false);
-            // Review CTA on every clean verified success, first one included, unless permanently dismissed.
-            update_option('ocm_show_review_cta', (!$dismissed && $clean_count >= 1) ? 1 : 0, false);
-        }
+        // Hard failures never reach here — fail_restore() / db-part stop /
+        // finish_restore_db_phase() exit first.
+        self::finalize_restore_completion_status();
+
+        // Partial address-update completion was removed: URL rewrite errors now
+        // stop before promote with LOG_RESTORE_STOPPED_IMPORT.
+        delete_option('ocm_restore_partial_address_updates');
+        delete_option('ocm_restore_failed_address_pairs');
         One_Click_Migration::reset_actions_start_mark();
         self::reset_current_restore_steps();
         update_option('ocm_is_stopped', true, true);
@@ -1377,10 +1411,185 @@ class OCM_Backup
 
     }
 
+    /**
+     * Write the restore terminal marker and arm UI flags.
+     * Clean runs: "Restore completed." Warned runs name skipped parts when known.
+     * Public for unit tests.
+     */
+    public static function finalize_restore_completion_status()
+    {
+        $missing_parts = get_option('ocm_backup_missing_parts', []);
+        $skipped_folders = get_option('ocm_skipped_folders', []);
+        $not_found_folders = get_option('ocm_eexcluded_folders', []);
+        $backup_excluded_parts = get_option('ocm_backup_excluded_parts', []);
+        $backup_excluded_parts = is_array($backup_excluded_parts) ? $backup_excluded_parts : array();
+        $part_warnings = get_option(self::OPTION_RESTORE_PART_WARNINGS, array());
+        $part_warnings = is_array($part_warnings) ? $part_warnings : array();
+
+        // Defense in depth: never warn about parts the backup marked =excluded.
+        // Must not hide a 404 on an included part (those are not in this list).
+        foreach ($backup_excluded_parts as $excluded_part) {
+            $excluded_part = strtolower((string) $excluded_part);
+            if ($excluded_part !== '') {
+                unset($part_warnings[$excluded_part]);
+            }
+        }
+
+        // Derive warnings from legacy lists when a reason was not recorded.
+        foreach (array(
+            'timeout' => $skipped_folders,
+            'not found' => $not_found_folders,
+            'not in backup' => $missing_parts,
+        ) as $reason => $list) {
+            if (!is_array($list)) {
+                continue;
+            }
+            foreach ($list as $part) {
+                if (!is_string($part) || $part === '' || $part === 'log' || $part === 'log_download') {
+                    continue;
+                }
+                $part = strtolower($part);
+                if (in_array($part, $backup_excluded_parts, true)) {
+                    continue;
+                }
+                if (!isset($part_warnings[$part])) {
+                    $part_warnings[$part] = $reason;
+                }
+            }
+        }
+        ksort($part_warnings);
+
+        if ($part_warnings !== array()) {
+            $line = self::format_restore_warnings_terminal_line($part_warnings);
+            One_Click_Migration::write_to_log(
+                'Notice: Restore finished with warnings for: ' . implode(', ', array_keys($part_warnings)) . '.'
+            );
+            One_Click_Migration::write_to_log($line);
+            self::apply_restore_success_flags(true, 'warnings');
+            return;
+        }
+
+        One_Click_Migration::write_to_log('Restore completed.');
+        // When the database was not restored for any intentional reason
+        // (backup db=excluded, or the user unticked db for this restore on a
+        // db=ok backup), take the files-only path: no review CTA / success
+        // email until a later release reactivates other plugins. Warnings and
+        // failures already returned above.
+        $user_excluded = get_option('ocm_excluded_folders', array());
+        $user_excluded = is_array($user_excluded) ? $user_excluded : array();
+        $db_not_restored = in_array('db', $backup_excluded_parts, true)
+            || in_array('db', $user_excluded, true);
+        if ($db_not_restored) {
+            self::apply_restore_success_flags(true, 'files-only');
+            return;
+        }
+        self::apply_restore_success_flags(false, '');
+    }
 
     /**
-     * Finish the destructive phase of the restore: DB restore + URL search-replace + cleanup.
-     * Called inline at the end of start_restore_process() once all file-based steps complete.
+     * Build a warned terminal line that never contains the substring "Restore completed."
+     * (period after completed). Example:
+     * "Restore completed with warnings: uploads skipped (timeout), themes partially copied."
+     *
+     * @param array<string, string> $part_warnings
+     * @return string
+     */
+    public static function format_restore_warnings_terminal_line(array $part_warnings)
+    {
+        $chunks = array();
+        foreach ($part_warnings as $part => $reason) {
+            $part = strtolower((string) $part);
+            $reason = strtolower(trim((string) $reason));
+            if ($part === '') {
+                continue;
+            }
+            if ($reason === 'partially copied') {
+                $chunks[] = $part . ' partially copied';
+            } elseif ($reason === 'copied, old copy not removed') {
+                $chunks[] = $part . ' copied, old copy not removed';
+            } elseif ($reason === 'not in backup') {
+                $chunks[] = $part . ' skipped (not in backup)';
+            } elseif ($reason === 'not found') {
+                $chunks[] = $part . ' skipped (not found)';
+            } elseif ($reason === 'timeout') {
+                $chunks[] = $part . ' skipped (timeout)';
+            } else {
+                $chunks[] = $part . ' skipped (' . ($reason !== '' ? $reason : 'see log') . ')';
+            }
+        }
+        if ($chunks === array()) {
+            return self::LOG_RESTORE_COMPLETED_WARNINGS_PREFIX . ' some parts were skipped (see log).';
+        }
+        return self::LOG_RESTORE_COMPLETED_WARNINGS_PREFIX . ' ' . implode(', ', $chunks) . '.';
+    }
+
+    /**
+     * @param string $part
+     * @param string $reason
+     */
+    public static function record_restore_part_warning($part, $reason)
+    {
+        $part = strtolower(trim((string) $part));
+        $reason = strtolower(trim((string) $reason));
+        if ($part === '' || $part === 'log' || $part === 'log_download') {
+            return;
+        }
+        $current = get_option(self::OPTION_RESTORE_PART_WARNINGS, array());
+        $current = is_array($current) ? $current : array();
+        // Prefer the more specific "partially copied" / "copied, old copy not
+        // removed" over a generic timeout for the same part.
+        if (isset($current[$part]) && $reason === 'timeout'
+            && ($current[$part] === 'partially copied' || $current[$part] === 'copied, old copy not removed')
+        ) {
+            return;
+        }
+        $current[$part] = $reason !== '' ? $reason : 'see log';
+        update_option(self::OPTION_RESTORE_PART_WARNINGS, $current, false);
+    }
+
+    /**
+     * Set restore-success modal + review CTA flags. Warned / missing-parts /
+     * partial-address runs never arm the Review ask or increment the clean
+     * count, so a later clean restore can still show Leave a review once.
+     *
+     * @param bool   $is_warned
+     * @param string $reason    Short reason for the review_ask log line.
+     */
+    public static function apply_restore_success_flags($is_warned, $reason = '')
+    {
+        update_option('ocm_show_restore_success', time(), false);
+        $is_partial = (is_string($reason) && false !== strpos($reason, 'partial'));
+        // files-only is a clean Restore completed. — not a warned UI state.
+        $is_files_only = ($reason === 'files-only');
+        $is_warned_ui = $is_warned && !$is_partial && !$is_files_only;
+        update_option('ocm_restore_was_partial', $is_partial ? 1 : 0, false);
+        update_option(self::OPTION_RESTORE_WAS_WARNED, $is_warned_ui ? 1 : 0, false);
+        if ($is_warned) {
+            update_option('ocm_show_review_cta', 0, false);
+            // files-only: do not consume ocm_clean_restore_count (flag kept).
+            One_Click_Migration::write_to_log(sprintf(
+                'SYSLOG: review_ask: none (%s)',
+                $reason !== '' ? $reason : 'warned'
+            ));
+            return;
+        }
+        $clean_count = (int) get_option('ocm_clean_restore_count', 0) + 1;
+        update_option('ocm_clean_restore_count', $clean_count, false);
+        $dismissed = (bool) get_option('ocm_review_ask_dismissed', false);
+        $show_cta = (!$dismissed && $clean_count >= 1);
+        update_option('ocm_show_review_cta', $show_cta ? 1 : 0, false);
+        if ($show_cta) {
+            One_Click_Migration::write_to_log('SYSLOG: review_ask: restore-success with review CTA');
+        } else {
+            One_Click_Migration::write_to_log('SYSLOG: review_ask: none (dismissed or not eligible)');
+        }
+    }
+
+
+    /**
+     * Finish the destructive phase of the restore: DB restore (including staging
+     * URL rewrite + promote) + deferred file swaps + cleanup.
+     * Called inline at the end of start_restore_process() once downloads complete.
      */
     public static function finish_restore_db_phase()
        {
@@ -1388,55 +1597,72 @@ class OCM_Backup
         $presigned_urls   = get_option('ocm_presigned_urls');
         $excluded_folders = get_option('ocm_excluded_folders', []);
 
-        // Keep the destination decision in memory across the options-table import.
-        $url_plan = get_option(OCM_Restore_Precheck::OPTION, array());
-
         //cater for the database restore.
         if(!in_array('db', $excluded_folders)){
           if (!self::check_is_complete_restore_step('db', self::STEP_RESTORE_CHILD_RESTORE)) {
+              self::$db_restore_refused_binary = false;
+              self::$db_restore_refused_options = false;
               if (!self::restore_db($presigned_urls, $wpdb)) {
-                  One_Click_Migration::write_to_log('Error: Restore failed during database import.');
-                  One_Click_Migration::write_to_log('Restore failed: database import failed (see previous log lines).');
-                  One_Click_Migration::disable_maintenance_mode();
-                  OCM_Debug_Mode::disable();
-                  update_option('ocm_is_stopped', true, true);
+                  if (self::$db_restore_refused_binary) {
+                      // Terminal marker already written by stop_restore_during_db_import()
+                      // or the early binary preflight path. Do not add generic
+                      // import-failure lines.
+                  } elseif (self::$db_restore_refused_options) {
+                      // LOG_RESTORE_STOPPED_OPTIONS already written; do not add
+                      // generic import-failure lines (those arm proc_open advice).
+                  } elseif (self::$import_oom_stop_written) {
+                      // LOG_RESTORE_STOPPED_IMPORT already written by the import
+                      // OOM shutdown guard. Do not add a second stop line.
+                  } else {
+                      // Any other import-stage failure before the swap maps to
+                      // RESTORE-STOPPED-IMPORT (live site untouched).
+                      One_Click_Migration::write_to_log(self::LOG_RESTORE_STOPPED_IMPORT);
+                  }
+                  self::fail_restore_before_file_swap();
                   exit;
               }
+              self::set_complete_restore_step('db', self::STEP_RESTORE_CHILD_RESTORE);
               // active_plugins is now the backup's list (just restored from the options table).
-              // Leave it alone — search-replace below runs raw DB queries and doesn't load plugins,
-              // and we want the user's original plugin set to be active again after restore.
+              // Leave it alone — URL rewrite already ran on staging tables inside
+              // restore_db() (before promote), and we want the user's original
+              // plugin set to be active again after restore.
           }
+          // DB+options gate passed — only now deactivate other plugins and swap files.
+          self::apply_deferred_file_swaps($presigned_urls);
         }
 
-
-        //search and replace all the  old urls in the database.
-        $current_url = site_url();
-        $old_url = self::$restore_site_url;
-
-
-        if (!empty($old_url)) {
-            $extra_arguments = OCM_Restore_Precheck::replacement_args($url_plan, $old_url, $current_url);
-            $db_details = new OCM_DB();
-            if (empty($url_plan['reviewed'])) {
-                $db_details->enable_url_collection();
-            }
-            $tables = $db_details->get_tables();
-            $result = $db_details->search_replace_db( $tables, $extra_arguments );
-            $report_update = $result['updates'];
-            One_Click_Migration::write_to_log(sprintf('SYSLOG: Number of updates made from replace "%s"',$report_update) );
-            One_Click_Migration::write_to_log(sprintf('SYSLOG: Finished updating URLs in the database'));
-            if (empty($url_plan['reviewed'])) {
-                self::store_extra_domain_candidates($db_details->collected_urls(), $old_url, $current_url);
-            } elseif (!empty($result['errors'])) {
-                // Retain only approved hosts for a post-restore retry.
-                update_option(OCM_Extra_Domains::OPTION, $url_plan['selected'], false);
-                One_Click_Migration::write_to_log('Notice: Some approved address updates failed. Review the remaining addresses after restore.');
-            } else {
-                delete_option(OCM_Extra_Domains::OPTION);
-            }
-        }
+        // URL search-replace runs on temp-prefixed staging tables inside
+        // restore_db() before the atomic RENAME / file swap. A failure there
+        // stops with LOG_RESTORE_STOPPED_IMPORT and never reaches this point.
         self::complete_restore();
         exit;
+    }
+
+    /**
+     * Log each failed approved address rewrite as `old → new` (optional table.column).
+     * Never logs row payloads or secrets.
+     *
+     * @param array $failed_pairs
+     */
+    public static function log_failed_address_pairs($failed_pairs)
+    {
+        if (!is_array($failed_pairs)) {
+            return;
+        }
+        foreach ($failed_pairs as $pair) {
+            if (!is_array($pair) || empty($pair['search'])) {
+                continue;
+            }
+            $line = sprintf(
+                'Address update failed: %s → %s',
+                (string) $pair['search'],
+                isset($pair['replace']) ? (string) $pair['replace'] : ''
+            );
+            if (!empty($pair['table']) && !empty($pair['column'])) {
+                $line .= sprintf(' (%s.%s)', (string) $pair['table'], (string) $pair['column']);
+            }
+            One_Click_Migration::write_to_log($line);
+        }
     }
 
     public static function initiate_db_backup($presigned_urls, $aes_key)
@@ -2345,6 +2571,26 @@ class OCM_Backup
         self::$archive_backend_failed = false;
         $close_marker = 'ocm_zip_close_in_progress_' . md5($filename);
 
+        // Empty uploads/themes/plugins must not fail the backup. ZipArchive::close()
+        // with zero queued files returns true but writes no archive on several
+        // PHP/libzip builds (field backup 48b6b15f). An empty DB dump must still
+        // fail — never write a valid empty db.zip.
+        if (!is_dir($folder_path) || !self::directory_contains_files($folder_path)) {
+            delete_option($close_marker);
+            if (self::archive_allows_empty($filename)) {
+                One_Click_Migration::write_to_log(sprintf(
+                    ' SYSLOG: "%s" has no files; writing a valid empty archive.',
+                    basename($filename)
+                ));
+                return self::write_empty_zip_archive($filename);
+            }
+            One_Click_Migration::write_to_log(sprintf(
+                'Error: "%s" source folder is empty; refusing to write an empty database archive.',
+                basename($filename)
+            ));
+            return false;
+        }
+
         // Normal sites always use ZipArchive. This marker survives a PHP
         // timeout/worker death inside close(). The close may nevertheless have
         // committed a valid central directory before PHP was terminated, so
@@ -2419,6 +2665,23 @@ class OCM_Backup
                 One_Click_Migration::worker_heartbeat();
                 $last_tick = time();
             }
+        }
+
+        if ($queued_files === 0) {
+            @$zip->close();
+            delete_option($close_marker);
+            if (self::archive_allows_empty($filename)) {
+                One_Click_Migration::write_to_log(sprintf(
+                    ' SYSLOG: "%s" queued 0 readable files; writing a valid empty archive.',
+                    basename($filename)
+                ));
+                return self::write_empty_zip_archive($filename);
+            }
+            One_Click_Migration::write_to_log(sprintf(
+                'Error: "%s" queued 0 readable files; refusing to write an empty database archive.',
+                basename($filename)
+            ));
+            return false;
         }
 
         // addFile() only queues entries; close() is the single blocking call
@@ -2538,10 +2801,10 @@ class OCM_Backup
         }
 
         if (!self::directory_contains_files($folder_path)) {
-            @unlink($filename);
-            $empty_zip = hex2bin('504b0506000000000000000000000000000000000000');
-            return is_string($empty_zip)
-                && file_put_contents($filename, $empty_zip) === strlen($empty_zip);
+            if (self::archive_allows_empty($filename)) {
+                return self::write_empty_zip_archive($filename);
+            }
+            return false;
         }
 
         if (DIRECTORY_SEPARATOR !== '/' || !function_exists('proc_open')) {
@@ -2620,6 +2883,9 @@ class OCM_Backup
 
     private static function directory_contains_files($folder_path)
     {
+        if (!is_dir($folder_path)) {
+            return false;
+        }
         $files = new RecursiveIteratorIterator(
             new RecursiveDirectoryIterator($folder_path, \FilesystemIterator::SKIP_DOTS),
             RecursiveIteratorIterator::LEAVES_ONLY
@@ -2630,6 +2896,41 @@ class OCM_Backup
             }
         }
         return false;
+    }
+
+    /**
+     * Empty archives are allowed for uploads/themes/plugins only — never for db.zip.
+     *
+     * @param string $filename
+     * @return bool
+     */
+    private static function archive_allows_empty($filename)
+    {
+        $base = strtolower(basename((string) $filename));
+        if ($base === 'db.zip') {
+            return false;
+        }
+        return in_array($base, array('uploads.zip', 'themes.zip', 'plugins.zip'), true)
+            || preg_match('/^(uploads|themes|plugins)\.zip$/i', $base);
+    }
+
+    /**
+     * Write a minimal valid empty ZIP (EOCD only). Used for empty uploads/themes/
+     * plugins parts so encryption and restore still have a real archive.
+     *
+     * @param string $filename
+     * @return bool
+     */
+    public static function write_empty_zip_archive($filename)
+    {
+        @unlink($filename);
+        $empty_zip = hex2bin('504b0506000000000000000000000000000000000000');
+        if (!is_string($empty_zip)) {
+            return false;
+        }
+        return file_put_contents($filename, $empty_zip) === strlen($empty_zip)
+            && is_file($filename)
+            && is_readable($filename);
     }
 
 
@@ -2863,7 +3164,9 @@ class OCM_Backup
             }
 
             // Never log the decrypted payload here — path, sizes and errno only.
-            if (false === fwrite($decrypted_handle, $decrypted_data, $write_bytes)) {
+            // A full disk or quota can return a short count rather than false.
+            $written = fwrite($decrypted_handle, $decrypted_data, $write_bytes);
+            if (false === $written || $written < $write_bytes) {
                 One_Click_Migration::write_to_log(sprintf(
                     'Error: Failed to write decrypted data to "%s" (%d of %d source bytes done). %s',
                     $decrypted_path,
@@ -2876,6 +3179,7 @@ class OCM_Backup
                 return false;
             }
             $bytes_decrypted += $buffer_size;
+            One_Click_Migration::transfer_heartbeat(One_Click_Migration::$process_restore_single);
         }
 
         // close the main file handle
@@ -2945,6 +3249,13 @@ class OCM_Backup
             return;
         }
         if (($now - $heartbeat) <= $threshold) {
+            return;
+        }
+
+        // A restore worker in a long step without heartbeats (e.g. extracting a
+        // large zip) still holds its process lock. It isn't stalled; a second
+        // worker would race it on the same files (#79).
+        if ($restore_active && OCM_BackgroundRestore::is_worker_file_lock_held()) {
             return;
         }
 
@@ -3080,7 +3391,9 @@ class OCM_Backup
                     );
                 }
 
-                if ($isStopped && $lastLog !== 'Restore completed.') {
+                $restore_terminal = ($lastLog === 'Restore completed.'
+                    || strpos($lastLog, self::LOG_RESTORE_COMPLETED_WARNINGS_PREFIX) === 0);
+                if ($isStopped && !$restore_terminal) {
                     $progress_item_text = array(
                         'isStopped' => true,
                         'text' => $lastLog,
@@ -3095,8 +3408,13 @@ class OCM_Backup
 
                 } elseif ($lastLog === 'Plugins have been restored') {
                     $progress_item_text['text'] .= '</br></br>Around this step you might get logged out. Log back in using your old WordPress credentials and refresh this page for progress updates.';
-                } elseif ($lastLog === 'Restore completed.') {
-                    $progress_item_text['text'] .= '</br></br>Please check your website. If you have any issues please check our <a target="_blank" href="https://1clickmigration.com/faq/">FAQ page</a> or contact us via <a target="_blank" href="https://1clickmigration.com/contact-us/">this Contact Form</a>.';
+                } elseif ($restore_terminal) {
+                    if (strpos($lastLog, self::LOG_RESTORE_COMPLETED_WARNINGS_PREFIX) === 0) {
+                        $progress_item_text['text'] .= '</br></br>Restore finished, but some parts were skipped or missing. Check the migration log, then verify themes, plugins, and media on your site.'
+                            . ' See our <a target="_blank" href="https://1clickmigration.com/faq/">FAQ page</a> or <a target="_blank" href="https://1clickmigration.com/contact-us/">Contact Form</a> if you need help.';
+                    } else {
+                        $progress_item_text['text'] .= '</br></br>Please check your website. If you have any issues please check our <a target="_blank" href="https://1clickmigration.com/faq/">FAQ page</a> or contact us via <a target="_blank" href="https://1clickmigration.com/contact-us/">this Contact Form</a>.';
+                    }
                     $progress_item_text['restoreCompleted'] = true;
                 } elseif ($lastLog === 'Backup completed.') {
                     $bucket_id = (string) get_option('ocm_bucket_id', '');
@@ -3149,7 +3467,31 @@ class OCM_Backup
             return 'Retry after freeing space. If it fails again, create a fresh backup because the downloaded archive may be incomplete.';
         }
 
-        if (strpos($log, 'Database restore failed while importing') !== false || strpos($log, 'Restore failed during database import') !== false || strpos($log, 'database import failed') !== false || strpos($log, 'DB Restore') !== false) {
+        if (strpos($log, 'cannot be restored safely (not hex-encoded)') !== false
+            || strpos($log, 'binary/BLOB column values that cannot be restored safely') !== false
+        ) {
+            return 'Update 1-Click Migration on the <strong>source</strong> site to 3.1.19 or later, take a new backup, then restore using the new backup\'s restore code. Nothing on this site was changed.';
+        }
+
+        if (strpos($log, 'Restore stopped before import: backup needs a fresh 3.1.19 backup') !== false) {
+            return 'Update 1-Click Migration on the <strong>source</strong> site to 3.1.19 or later, take a new backup, then restore using the new backup\'s restore code. Nothing on this site was changed.';
+        }
+
+        if (strpos($log, 'Restore stopped: database part could not be downloaded or unpacked') !== false) {
+            return 'The database archive could not be downloaded or unpacked, so nothing on this site was changed. Free disk space or check write permissions under <code>wp-content/ocm_restore</code>, then retry. If it fails again, create a fresh backup and restore with the new code.';
+        }
+
+        if (strpos($log, "Restore stopped: the backup's main options table didn't pass the check") !== false
+            || strpos($log, 'incomplete or wrong-prefix') !== false
+        ) {
+            return 'The backup\'s main options table did not pass the check, so nothing on this site was changed. No files, tables or plugins were touched. Take a fresh backup from the source (or fix the source options table) and restore again with the new backup\'s restore code.';
+        }
+
+        if (strpos($log, 'Restore stopped: the database could not be imported') !== false) {
+            return 'The database could not be imported, so nothing on this site was changed. No files, tables or plugins were touched. Take a fresh backup from the source and restore again with the new backup\'s restore code. If the log mentions a table name that is too long, shorten that table name or the source table prefix before taking the new backup. If the log says a table has no primary or unique key, ask your host or developer to add one to that table on the source site, then take a new backup. If the log says a table has a row too large, ask your host to raise the PHP memory limit on this site, or ask your developer to shrink the large rows in that table on the source site, then take a new backup. If the log says a table stopped making progress, contact our support with your restore code, and don\'t run the restore again until we\'ve checked it.';
+        }
+
+        if (strpos($log, 'Database restore failed while importing') !== false || strpos($log, 'DB Restore') !== false) {
             return 'The database import failed on a SQL file. If <code>proc_open</code> is disabled, ask the host to enable it so the restore can use the MySQL CLI path. If that is not possible, export a new backup after cleaning invalid or binary data stored in options by third-party plugins.';
         }
 
@@ -3666,6 +4008,10 @@ class OCM_Backup
             if (@rename($partial_path, $target_path)) {
                 return $target_path;
             }
+            clearstatcache(true, $target_path);
+            if (file_exists($target_path) && filesize($target_path) >= $expected_size) {
+                return $target_path;
+            }
             return new WP_Error('ocm_download_move_failed', sprintf(
                 'Downloaded file for "%s" could not be finalized.',
                 $key
@@ -3690,12 +4036,22 @@ class OCM_Backup
         if ($offset > 0) {
             curl_setopt($ch, CURLOPT_RANGE, $offset . '-');
         }
+        // A single curl_exec() can run for minutes; keep the heartbeat and
+        // process lock fresh so the watchdog doesn't start a second worker
+        // on the same .part file (#79).
+        curl_setopt($ch, CURLOPT_NOPROGRESS, false);
+        curl_setopt($ch, CURLOPT_PROGRESSFUNCTION, static function () {
+            One_Click_Migration::transfer_heartbeat(One_Click_Migration::$process_restore_single);
+            return 0;
+        });
 
         $ok = curl_exec($ch);
         $errno = curl_errno($ch);
         $error = curl_error($ch);
         $http_code = (int) curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
-        curl_close($ch);
+        // Release the handle (and its hold on the .part file) before fclose();
+        // curl_close() is a no-op since 8.0 and deprecated in 8.5.
+        unset($ch);
         fclose($handle);
         clearstatcache(true, $partial_path);
 
@@ -3755,6 +4111,11 @@ class OCM_Backup
         }
 
         if (!@rename($partial_path, $target_path)) {
+            clearstatcache(true, $target_path);
+            if ($expected_size > 0 && file_exists($target_path) && filesize($target_path) >= $expected_size) {
+                // Already finalized (e.g. by a worker that resumed this download).
+                return $target_path;
+            }
             return new WP_Error('ocm_download_move_failed', sprintf(
                 'Downloaded file for "%s" could not be finalized.',
                 $key
@@ -4162,6 +4523,23 @@ class OCM_Backup
         return false;
     }
 
+    /**
+     * The message of a log line: what follows the "<timestamp> - " prefix that
+     * write_to_log() adds. Only the first separator counts; splitting on the
+     * last one cut messages such as "SYSLOG: Queue is empty - nothing to
+     * process" down to a tail without "SYSLOG", which then showed as the
+     * current step and sent the progress bar back to 1%.
+     *
+     * @param string $line
+     * @return string
+     */
+    public static function log_line_message($line)
+    {
+        $line = (string) $line;
+        $sep = strpos($line, ' - ');
+        return $sep === false ? $line : (string) substr($line, $sep + 3);
+    }
+
     public static function get_last_log_message($skip = true)
     {
         $file = OCM_DEBUG_LOG_FILE;
@@ -4179,9 +4557,7 @@ class OCM_Backup
         foreach ($lines as $key => $line) {
 
 
-            $line_array = explode('- ', $line);
-
-            $line = $line_array[count($line_array) - 1];
+            $line = self::log_line_message($line);
 
             if (empty(trim($line))) {
                 continue;
@@ -4219,10 +4595,7 @@ class OCM_Backup
 
       foreach ($lines as $key => $line) {
 
-          $line_array = explode('- ', $line);
-
-
-          $line = $line_array[count($line_array) - 1];
+          $line = self::log_line_message($line);
           if (empty(trim($line))) {
               continue;
           }
@@ -4251,6 +4624,628 @@ class OCM_Backup
 
     }
 
+    /**
+     * Put db ahead of themes/plugins/uploads so extract+preflight can gate file replace.
+     *
+     * @param array|object $presigned_urls
+     * @return array<string, mixed>
+     */
+    private static function presigned_urls_db_first($presigned_urls)
+    {
+        $as_array = array();
+        foreach ($presigned_urls as $key => $url) {
+            $as_array[(string) $key] = $url;
+        }
+        if (!array_key_exists('db', $as_array)) {
+            return $as_array;
+        }
+        $ordered = array('db' => $as_array['db']);
+        foreach ($as_array as $key => $url) {
+            if ($key === 'db') {
+                continue;
+            }
+            $ordered[$key] = $url;
+        }
+        return $ordered;
+    }
+
+    /**
+     * Mid-restore skip of a part after max retries. User-excluded parts never
+     * call this. A skipped database part sets OPTION_RESTORE_DB_PART_FAILED and
+     * stops before any site files are replaced / plugins deactivated.
+     *
+     * @param array  $excluded_restore_files
+     * @param array  $skipped_restore_files
+     * @param string $key
+     */
+    private static function capture_skipped_restore_part($excluded_restore_files, $skipped_restore_files, $key)
+    {
+        self::capture_failed_folder($excluded_restore_files, $key, 'ocm_excluded_folders');
+        self::capture_failed_folder($skipped_restore_files, $key, 'ocm_skipped_folders');
+        if ($key !== 'db') {
+            $warnings = get_option(self::OPTION_RESTORE_PART_WARNINGS, array());
+            if (!is_array($warnings) || !isset($warnings[$key])) {
+                self::record_restore_part_warning($key, 'timeout');
+            }
+        }
+        if ($key === 'db') {
+            update_option(self::OPTION_RESTORE_DB_PART_FAILED, 1, true);
+            self::stop_restore_after_db_part_failure();
+        }
+    }
+
+    /**
+     * Stop when the database was meant to be included but is unavailable.
+     * Does not stop for db excluded for THIS restore (selective UI exclude or
+     * backup-log db=excluded files-only — those live on ocm_excluded_folders).
+     * Backup-side db=skipped (ocm_backup_missing_parts) still stops.
+     *
+     * @param array $user_excluded
+     * @return void
+     */
+    public static function stop_if_db_unavailable_for_restore($user_excluded = null)
+    {
+        if ($user_excluded === null) {
+            $user_excluded = get_option('ocm_excluded_folders', array());
+        }
+        $user_excluded = is_array($user_excluded) ? $user_excluded : array();
+        if (in_array('db', $user_excluded, true)) {
+            return;
+        }
+        if (get_option(self::OPTION_RESTORE_DB_PART_FAILED)) {
+            self::stop_restore_after_db_part_failure();
+        }
+        $missing = get_option('ocm_backup_missing_parts', array());
+        $missing = is_array($missing) ? $missing : array();
+        // Only backup-side skipped db (meant to be included, failed at backup).
+        // db=excluded is intentional files-only and must not stop here.
+        if (in_array('db', $missing, true)) {
+            update_option(self::OPTION_RESTORE_DB_PART_FAILED, 1, true);
+            self::stop_restore_after_db_part_failure();
+        }
+    }
+
+    /**
+     * Shared cleanup for terminal stops that leave the live site unchanged
+     * (apart from this plugin's progress options).
+     */
+    private static function cleanup_after_restore_no_change_stop()
+    {
+        One_Click_Migration::reset_actions_start_mark();
+        self::remove_extracted_restore_sql();
+        One_Click_Migration::disable_maintenance_mode();
+        OCM_Debug_Mode::disable();
+        update_option('ocm_is_stopped', true, true);
+    }
+
+    /**
+     * Remove extracted SQL under wp-content/ocm_restore after a no-change stop.
+     */
+    private static function remove_extracted_restore_sql()
+    {
+        $dbfiles = WP_CONTENT_DIR . '/ocm_restore';
+        if (!is_dir($dbfiles)) {
+            return;
+        }
+        self::deleteDirectoryBestEffort($dbfiles);
+    }
+
+    /**
+     * Terminal stop when the database archive could not be downloaded,
+     * decrypted, or extracted. No file replace, DB import, or plugin
+     * deactivation has run.
+     *
+     * @return never
+     */
+    private static function stop_restore_after_db_part_failure()
+    {
+        One_Click_Migration::write_to_log(self::LOG_RESTORE_STOPPED_DB_PART);
+        self::cleanup_after_restore_no_change_stop();
+        exit;
+    }
+
+    /**
+     * Deactivate other plugins only after DB import + options validation succeed
+     * (or on files-only restores), immediately before file swap.
+     */
+    private static function ensure_plugins_deactivated_for_restore()
+    {
+        if (get_option(self::OPTION_RESTORE_PLUGINS_ISOLATED)) {
+            return;
+        }
+        self::force_only_ocm_plugin_active('before file replace');
+        update_option(self::OPTION_RESTORE_PLUGINS_ISOLATED, 1, true);
+    }
+
+    /**
+     * Reinstate the active_plugins list saved at isolation time.
+     * On a DB restore that list is the backup's own plugins (imported before
+     * deferral). On failure before isolation this is a no-op.
+     *
+     * @return void
+     */
+    private static function restore_active_plugins_after_failed_restore()
+    {
+        $saved = get_option('ocm_force_deactivated_plugins', null);
+        if (!is_array($saved) || !$saved) {
+            return;
+        }
+        update_option('active_plugins', $saved, true);
+        delete_option('ocm_force_deactivated_plugins');
+        delete_option(self::OPTION_RESTORE_PLUGINS_ISOLATED);
+        wp_cache_delete('active_plugins', 'options');
+        wp_cache_delete('alloptions', 'options');
+    }
+
+    /**
+     * Shared bookkeeping when restore fails before any file swap: clear review
+     * flags, restore active_plugins if needed, stop cleanly.
+     *
+     * @return void
+     */
+    private static function fail_restore_before_file_swap()
+    {
+        self::restore_active_plugins_after_failed_restore();
+        self::clear_restore_batch_option_rows();
+        self::drop_leftover_staging_tables_after_stop();
+        update_option('ocm_show_restore_success', 0, false);
+        update_option('ocm_show_review_cta', 0, false);
+        update_option(self::OPTION_RESTORE_WAS_WARNED, 0, false);
+        delete_option(OCM_Extra_Domains::OPTION);
+        One_Click_Migration::write_to_log('SYSLOG: review_ask: none (stopped)');
+        One_Click_Migration::disable_maintenance_mode();
+        OCM_Debug_Mode::disable();
+        One_Click_Migration::reset_actions_start_mark();
+        update_option('ocm_is_stopped', true, true);
+    }
+
+    /**
+     * Remove leftover background-restore batch rows so a stopped restore cannot
+     * be restarted by a queued worker item.
+     *
+     * @return void
+     */
+    private static function clear_restore_batch_option_rows()
+    {
+        global $wpdb;
+        $prefix = 'wp_ocm_background_restore_batch_';
+        if (is_object($wpdb) && method_exists($wpdb, 'query') && !empty($wpdb->options)) {
+            $table = $wpdb->options;
+            $column = 'option_name';
+            if (function_exists('is_multisite') && is_multisite() && !empty($wpdb->sitemeta)) {
+                $table = $wpdb->sitemeta;
+                $column = 'meta_key';
+            }
+            if (method_exists($wpdb, 'get_col')) {
+                $names = $wpdb->get_col(
+                    "SELECT {$column} FROM {$table} WHERE {$column} LIKE '{$prefix}%'"
+                );
+                if (is_array($names)) {
+                    foreach ($names as $name) {
+                        if (is_string($name) && $name !== '') {
+                            delete_option($name);
+                        }
+                    }
+                }
+            }
+            $wpdb->query("DELETE FROM {$table} WHERE {$column} LIKE '{$prefix}%'");
+        }
+        // Test harnesses (and any in-request option bag) store rows via update_option.
+        if (isset($GLOBALS['ocm_options']) && is_array($GLOBALS['ocm_options'])) {
+            foreach (array_keys($GLOBALS['ocm_options']) as $name) {
+                if (is_string($name) && strpos($name, $prefix) === 0) {
+                    delete_option($name);
+                }
+            }
+        }
+    }
+
+    /**
+     * Drop any ocmXXXX_ staging tables left after an import-stage stop.
+     *
+     * @return void
+     */
+    private static function drop_leftover_staging_tables_after_stop()
+    {
+        global $wpdb;
+        if (!is_object($wpdb)) {
+            return;
+        }
+        OCM_SQL_Utils::drop_stale_temp_tables(
+            $wpdb,
+            null,
+            isset($wpdb->base_prefix) ? $wpdb->base_prefix : null
+        );
+        delete_option(OCM_SQL_Utils::OPTION_STAGING_PREFIX);
+    }
+
+    /**
+     * Arm a shutdown guard for the staging-import + URL-rewrite window.
+     * A PHP fatal (e.g. memory exhausted) must not leave staging tables or
+     * restart the worker mid-URL-step.
+     *
+     * @return void
+     */
+    public static function register_import_oom_guard()
+    {
+        if (self::$import_oom_guard_active) {
+            return;
+        }
+        self::$import_oom_guard_active = true;
+        self::$import_oom_stop_written = false;
+        register_shutdown_function(array(__CLASS__, 'handle_import_oom_shutdown'));
+    }
+
+    /**
+     * Disarm the import OOM guard after a normal (non-fatal) exit from the stage.
+     *
+     * @return void
+     */
+    public static function clear_import_oom_guard()
+    {
+        self::$import_oom_guard_active = false;
+    }
+
+    /**
+     * Shutdown callback: on fatal during import/URL stage, stop with
+     * LOG_RESTORE_STOPPED_IMPORT, drop staging tables, clear restore batches,
+     * and mirror fail_restore_before_file_swap review-flag bookkeeping.
+     *
+     * @param array|null $error Optional error array (tests); defaults to error_get_last().
+     * @return void
+     */
+    public static function handle_import_oom_shutdown($error = null)
+    {
+        if (!self::$import_oom_guard_active || self::$import_oom_stop_written) {
+            return;
+        }
+        if ($error === null) {
+            $error = error_get_last();
+        }
+        if (!is_array($error) || empty($error['type'])) {
+            return;
+        }
+        $fatal_types = array(E_ERROR, E_PARSE, E_CORE_ERROR, E_COMPILE_ERROR, E_USER_ERROR);
+        if (defined('E_RECOVERABLE_ERROR')) {
+            $fatal_types[] = E_RECOVERABLE_ERROR;
+        }
+        if (!in_array((int) $error['type'], $fatal_types, true)) {
+            return;
+        }
+
+        self::$import_oom_stop_written = true;
+        self::$import_oom_guard_active = false;
+
+        One_Click_Migration::write_to_log(self::LOG_RESTORE_STOPPED_IMPORT);
+        self::restore_active_plugins_after_failed_restore();
+        self::clear_restore_batch_option_rows();
+        self::drop_leftover_staging_tables_after_stop();
+        update_option('ocm_show_restore_success', 0, false);
+        update_option('ocm_show_review_cta', 0, false);
+        update_option(self::OPTION_RESTORE_WAS_WARNED, 0, false);
+        delete_option(OCM_Extra_Domains::OPTION);
+        One_Click_Migration::write_to_log('SYSLOG: review_ask: none (stopped)');
+        One_Click_Migration::disable_maintenance_mode();
+        OCM_Debug_Mode::disable();
+        One_Click_Migration::reset_actions_start_mark();
+        update_option('ocm_is_stopped', true, true);
+    }
+
+    /**
+     * Block themes/plugins/uploads replacement when db download/unpack failed
+     * or when binary preflight refuses the dump. Does not deactivate plugins —
+     * that waits until apply_deferred_file_swaps() after a successful DB step.
+     *
+     * @return void
+     */
+    private static function gate_restore_before_file_replace()
+    {
+        if (get_option(self::OPTION_RESTORE_DB_PART_FAILED)) {
+            self::stop_restore_after_db_part_failure();
+        }
+        self::stop_if_db_unavailable_for_restore();
+        $preflight = self::ensure_binary_preflight_before_file_replace();
+        if ($preflight === 'continue') {
+            One_Click_Migration::write_to_log('SYSLOG: Binary preflight scan still running; restarting worker.');
+            One_Click_Migration::write_to_log('Process is Restarting');
+            if (isset(One_Click_Migration::$process_restore_single) && is_object(One_Click_Migration::$process_restore_single)) {
+                One_Click_Migration::$process_restore_single->restart_task();
+            }
+            exit;
+        }
+        if ($preflight === false) {
+            self::stop_restore_after_binary_preflight_refusal();
+        }
+    }
+
+    /**
+     * Swap extracted themes/uploads/plugins into place only after DB import and
+     * options/prefix validation have succeeded (or on an intentional files-only
+     * restore where db is excluded). A failed DB step must never reach here.
+     *
+     * @param array $presigned_urls
+     * @return void
+     */
+    private static function apply_deferred_file_swaps($presigned_urls)
+    {
+        $excluded_restore_files = get_option('ocm_excluded_folders', array());
+        if (!is_array($excluded_restore_files)) {
+            $excluded_restore_files = array();
+        }
+        $skipped_restore_files = get_option('ocm_skipped_folders', array());
+        if (!is_array($skipped_restore_files)) {
+            $skipped_restore_files = array();
+        }
+        $content_dir = WP_CONTENT_DIR . '/ocm_restore';
+
+        self::gate_restore_before_file_replace();
+        // Plugins stay active through DB staging/validation; isolate only now.
+        self::ensure_plugins_deactivated_for_restore();
+
+        foreach (array('themes', 'uploads') as $key) {
+            if (in_array($key, $excluded_restore_files, true)) {
+                continue;
+            }
+            if (self::check_is_complete_restore_step($key, self::STEP_RESTORE_CHILD_DELETE_OLD_AND_MOVE_NEW)) {
+                continue;
+            }
+
+            $extract_path = $content_dir . '/' . $key;
+            if (!is_dir($extract_path)) {
+                self::set_complete_restore_step($key, self::STEP_RESTORE_CHILD_DELETE_OLD_AND_MOVE_NEW);
+                continue;
+            }
+
+            $directory = WP_CONTENT_DIR . '/' . $key;
+
+            // An empty uploads archive must not wipe the destination's
+            // existing media (mirror of an empty tree).
+            if ($key === 'uploads' && !self::directory_contains_files($extract_path)) {
+                One_Click_Migration::write_to_log(
+                    'Notice: Backup uploads archive is empty; leaving the destination uploads folder unchanged.'
+                );
+                self::deleteDirectoryBestEffort($extract_path);
+                self::set_complete_restore_step($key, self::STEP_RESTORE_CHILD_DELETE_OLD_AND_MOVE_NEW);
+                continue;
+            }
+
+            One_Click_Migration::write_to_log(sprintf('Restoring "%s" to directory "%s"', ucfirst($key), $directory));
+
+            if (!self::replaceDirectoryFromExtract($extract_path, $directory, $key)) {
+                One_Click_Migration::write_to_log(sprintf(
+                    'Downloading restore files. Error: "%s" directory could not be moved or copied to "%s" directory. Please check the write permission for these directories.',
+                    $extract_path,
+                    $directory
+                ));
+                One_Click_Migration::write_to_log(sprintf(
+                    'Restore failed: restored "%s" files could not be moved into place (write permission).',
+                    $key
+                ));
+                update_option('ocm_is_stopped', true, true);
+                die();
+            }
+
+            if (isset(One_Click_Migration::$process_restore_single)
+                && is_object(One_Click_Migration::$process_restore_single)
+                && One_Click_Migration::$process_restore_single->time_exceeded()
+            ) {
+                $next_retry_count = get_option('ocm_restore_child_delete_retry_' . $key, 1);
+                if ($next_retry_count && $next_retry_count <= self::MAX_STEP_RETRIES) {
+                    One_Click_Migration::write_to_log('Process is Restarting');
+                    update_option('ocm_restore_child_delete_retry_' . $key, $next_retry_count, true);
+                    One_Click_Migration::$process_restore_single->restart_task();
+                }
+
+                One_Click_Migration::write_to_log(sprintf(
+                    'Skipping %s old-folder cleanup after repeated timeouts (new copy is in place).',
+                    $key
+                ));
+                self::set_complete_restore_step($key, self::STEP_RESTORE_CHILD_DELETE_OLD_AND_MOVE_NEW);
+                self::record_restore_part_warning($key, 'copied, old copy not removed');
+                self::capture_skipped_restore_part($excluded_restore_files, $skipped_restore_files, $key);
+                continue;
+            }
+
+            self::set_complete_restore_step($key, self::STEP_RESTORE_CHILD_DELETE_OLD_AND_MOVE_NEW);
+        }
+
+        if (!in_array('themes', $excluded_restore_files, true)) {
+            if (!self::check_is_complete_restore_step('themes', self::STEP_RESTORE_CHILD_THEMES_RESTORED)) {
+                One_Click_Migration::write_to_log('Themes have been restored');
+                self::set_complete_restore_step('themes', self::STEP_RESTORE_CHILD_THEMES_RESTORED);
+            }
+        }
+        if (!in_array('uploads', $excluded_restore_files, true)) {
+            if (!self::check_is_complete_restore_step('uploads', self::STEP_RESTORE_CHILD_UPLOADS_RESTORED)) {
+                One_Click_Migration::write_to_log('Uploads have been restored');
+                self::set_complete_restore_step('uploads', self::STEP_RESTORE_CHILD_UPLOADS_RESTORED);
+            }
+        }
+
+        if (!in_array('plugins', $excluded_restore_files, true)) {
+            if (!self::check_is_complete_restore_step('plugins', self::STEP_RESTORE_CHILD_RESTORE)) {
+                self::restore_plugins($presigned_urls);
+            }
+        }
+
+        // File swap done: put back the plugins list saved at isolation. After a
+        // DB import that list is the source dump's active_plugins (master behaviour).
+        self::restore_active_plugins_after_failed_restore();
+    }
+
+    /**
+     * Fingerprint for the extracted dump set + backup id. A stored verdict
+     * whose key does not match must be ignored (rescan, never pass).
+     *
+     * @return string
+     */
+    public static function binary_preflight_fingerprint()
+    {
+        $bucket = (string) get_option('ocm_bucket_id', '');
+        $dbfiles = WP_CONTENT_DIR . '/ocm_restore/db/';
+        $parts = array('bucket=' . $bucket);
+        $files = OCM_SQL_Utils::list_restore_sql_dump_files($dbfiles);
+        foreach ($files as $filepath) {
+            $parts[] = basename($filepath) . ':' . (int) @filesize($filepath) . ':' . (int) @filemtime($filepath);
+        }
+        return sha1(implode('|', $parts));
+    }
+
+    /**
+     * After prefix remap rewrites dumps in place (size/mtime change), re-key a
+     * stored pass verdict so a resumed import still sees a matching pass and
+     * does not rescan / refuse. Only rekeys when the stored key still equals
+     * the fingerprint captured before this rewrite; otherwise leave it so the
+     * scan reruns.
+     *
+     * @param string $pre_rewrite_key Fingerprint from before swap_table_prefix.
+     * @return void
+     */
+    public static function rekey_binary_preflight_after_prefix_rewrite($pre_rewrite_key)
+    {
+        $pre_rewrite_key = (string) $pre_rewrite_key;
+        if ($pre_rewrite_key === '') {
+            return;
+        }
+        $stored = get_option(self::OPTION_BINARY_PREFLIGHT, null);
+        if (!is_array($stored) || !isset($stored['status'], $stored['key']) || $stored['status'] !== 'pass') {
+            return;
+        }
+        if ((string) $stored['key'] !== $pre_rewrite_key) {
+            return;
+        }
+        $stored['key'] = self::binary_preflight_fingerprint();
+        update_option(self::OPTION_BINARY_PREFLIGHT, $stored, false);
+    }
+
+    /**
+     * Scan already-extracted dumps under ocm_restore/db before replacing files.
+     * Verdicts are persisted against binary_preflight_fingerprint(); a mismatched
+     * key is treated as no verdict (rescan). Large dumps resume across requests.
+     *
+     * @return bool|string True when restore may continue; false when refused;
+     *                     'continue' when the scan needs another worker pass.
+     */
+    public static function ensure_binary_preflight_before_file_replace()
+    {
+        if (self::$db_restore_refused_binary) {
+            return false;
+        }
+        if (get_option(self::OPTION_RESTORE_DB_PART_FAILED)) {
+            return false;
+        }
+        if (self::$binary_preflight_passed) {
+            return true;
+        }
+
+        $excluded = get_option('ocm_excluded_folders', array());
+        // User-excluded db (selective restore) skips binary preflight.
+        if (is_array($excluded) && in_array('db', $excluded, true)) {
+            self::$binary_preflight_passed = true;
+            return true;
+        }
+
+        $dbfiles = WP_CONTENT_DIR . '/ocm_restore/db/';
+        if (!is_dir($dbfiles)) {
+            // DB not extracted yet. Callers with db-first ordering only replace
+            // files after the db iteration has finished extract+preflight.
+            return true;
+        }
+
+        $sql_files = OCM_SQL_Utils::list_restore_sql_dump_files($dbfiles);
+        if ($sql_files === array()) {
+            // Db part extracted but no SQL dumps — fail closed.
+            One_Click_Migration::write_to_log(
+                'Error: Database restore folder has no .sql dump files to import.'
+            );
+            One_Click_Migration::write_to_log(
+                'Restore stopped before import: backup needs a fresh 3.1.19 backup. No changes were made.'
+            );
+            self::$db_restore_refused_binary = true;
+            update_option(self::OPTION_BINARY_PREFLIGHT, array(
+                'key' => self::binary_preflight_fingerprint(),
+                'status' => 'refuse',
+            ), false);
+            return false;
+        }
+
+        $key = self::binary_preflight_fingerprint();
+        $stored = get_option(self::OPTION_BINARY_PREFLIGHT, null);
+        if (is_array($stored) && isset($stored['key'], $stored['status']) && $stored['key'] === $key) {
+            if ($stored['status'] === 'pass') {
+                self::$binary_preflight_passed = true;
+                return true;
+            }
+            if ($stored['status'] === 'refuse') {
+                self::$db_restore_refused_binary = true;
+                return false;
+            }
+        } else {
+            // Key mismatch or absent → treat as no verdict (never pass on stale).
+            $stored = array('key' => $key, 'status' => 'pending', 'file_index' => 0, 'byte_offset' => 0);
+            delete_option(self::OPTION_BINARY_PREFLIGHT);
+        }
+
+        $deadline = microtime(true) + 8.0;
+        $result = OCM_SQL_Utils::preflight_reject_unsafe_binary_dumps_resumable($sql_files, $stored, $deadline);
+        $status = isset($result['status']) ? $result['status'] : 'refuse';
+        $state = isset($result['state']) && is_array($result['state']) ? $result['state'] : array();
+        $state['key'] = $key;
+        $state['status'] = $status;
+        update_option(self::OPTION_BINARY_PREFLIGHT, $state, false);
+
+        if ($status === 'continue') {
+            return 'continue';
+        }
+        if ($status === 'refuse') {
+            self::$db_restore_refused_binary = true;
+            return false;
+        }
+
+        self::$binary_preflight_passed = true;
+        return true;
+    }
+
+    /**
+     * Terminal stop after binary preflight refusal (marker already in the log).
+     *
+     * @return never
+     */
+    private static function stop_restore_after_binary_preflight_refusal()
+    {
+        self::cleanup_after_restore_no_change_stop();
+        exit;
+    }
+
+    /**
+     * Terminal stop when binary preflight refuses (or cannot finish) at the
+     * import step. Deferred file swap + staging import mean live files/tables
+     * are untouched — LOG_RESTORE_STOPPED_IMPORT states that honestly.
+     *
+     * @return never
+     */
+    public static function stop_restore_during_db_import()
+    {
+        self::$db_restore_refused_binary = true;
+        self::clear_import_oom_guard();
+        One_Click_Migration::write_to_log(self::LOG_RESTORE_STOPPED_IMPORT);
+        self::restore_active_plugins_after_failed_restore();
+        self::clear_restore_batch_option_rows();
+        self::drop_leftover_staging_tables_after_stop();
+        // No review CTA; do not consume the first-clean restore flag.
+        update_option('ocm_show_restore_success', 0, false);
+        update_option('ocm_show_review_cta', 0, false);
+        update_option(self::OPTION_RESTORE_WAS_WARNED, 0, false);
+        delete_option(OCM_Extra_Domains::OPTION);
+        One_Click_Migration::write_to_log('SYSLOG: review_ask: none (stopped)');
+        One_Click_Migration::reset_actions_start_mark();
+        self::remove_extracted_restore_sql();
+        One_Click_Migration::disable_maintenance_mode();
+        OCM_Debug_Mode::disable();
+        update_option('ocm_is_stopped', true, true);
+        exit;
+    }
+
     private static function restore_db($presigned_urls, wpdb $wpdb)
     {
 
@@ -4272,7 +5267,7 @@ class OCM_Backup
           }
 
           $sql_bytes = 0;
-          foreach (glob($dbfiles . '*.sql') ?: array() as $sql_file) {
+          foreach (OCM_SQL_Utils::list_restore_sql_dump_files($dbfiles) as $sql_file) {
               $sql_bytes += (int) filesize($sql_file);
           }
           OCM_SQL_Utils::preflight_db_memory($sql_bytes, 'import');
@@ -4293,20 +5288,21 @@ class OCM_Backup
             $wpdb->prefix
         ));
 
-        $dir = new DirectoryIterator($dbfiles);
-        $found_files = array();
-        foreach ($dir as $fileinfo) {
-            if ($fileinfo->isDot()) {
-                continue;
-            }
-            // Leftover work files from an interrupted run (e.g. *.ocm-stream.tmp)
-            // must never be imported: they can carry a stale or partial prefix
-            // state and would DROP + re-create tables that were just restored.
-            if (strtolower(substr($fileinfo->getFilename(), -4)) !== '.sql') {
+        $found_files = OCM_SQL_Utils::list_restore_sql_dump_files($dbfiles);
+        if (is_dir($dbfiles)) {
+            $dir = new DirectoryIterator($dbfiles);
+            foreach ($dir as $fileinfo) {
+                if ($fileinfo->isDot() || !$fileinfo->isFile()) {
+                    continue;
+                }
+                if (strtolower(substr($fileinfo->getFilename(), -4)) === '.sql') {
+                    continue;
+                }
+                // Leftover work files from an interrupted run (e.g. *.ocm-stream.tmp)
+                // must never be imported: they can carry a stale or partial prefix
+                // state and would DROP + re-create tables that were just restored.
                 One_Click_Migration::write_to_log(sprintf('Notice: Skipping non-SQL file "%s" in the DB restore directory.', $fileinfo->getFilename()));
-                continue;
             }
-            $found_files[] = $fileinfo->getPathname();
         }
 
         // Give priority to WP tables so they're imported first
@@ -4334,36 +5330,85 @@ class OCM_Backup
 
         sleep(1);
 
-        // Remap and validate every dump before destroying any destination table.
+        // Preflight: refuse dumps whose declared binary/BLOB INSERT values cannot
+        // round-trip, before allocating staging or touching live tables. Usually
+        // already ran after DB extract (before file replace); memoized on pass so
+        // the happy path does not scan twice in one request.
+        $preflight = self::ensure_binary_preflight_before_file_replace();
+        if ($preflight === 'continue') {
+            // Never treat an incomplete scan as refusal at the import step —
+            // requeue so the resumable scan can finish.
+            One_Click_Migration::write_to_log('SYSLOG: Binary preflight scan still running at import; restarting worker.');
+            One_Click_Migration::write_to_log('Process is Restarting');
+            if (isset(One_Click_Migration::$process_restore_single) && is_object(One_Click_Migration::$process_restore_single)) {
+                One_Click_Migration::$process_restore_single->restart_task();
+            }
+            exit;
+        }
+        if ($preflight !== true) {
+            // Files and live tables are still untouched (staging import + deferred
+            // file swap). Same no-change stop path as the early gate.
+            self::stop_restore_during_db_import();
+        }
+
+        // Drop leftover staging tables from restores killed mid-import. Trash
+        // (ocd…/ocmd…) is kept when live counterparts are missing.
+        OCM_SQL_Utils::drop_stale_temp_tables($wpdb, null, $wpdb->base_prefix);
+
+        // Import into a temporary staging prefix first. Live destination tables
+        // and site files stay intact until every dump imports cleanly and the
+        // options/prefix gate passes; then we promote tables and swap files.
+        $staging_prefix = OCM_SQL_Utils::allocate_staging_prefix($wpdb);
+        if ($staging_prefix === false || $staging_prefix === '') {
+            One_Click_Migration::write_to_log('Error: Database restore could not allocate a staging table prefix.');
+            return false;
+        }
+        if (!OCM_SQL_Utils::assert_staging_identifier_headroom($sorted_table_list, $staging_prefix, $source_prefix)) {
+            return false;
+        }
+        update_option(OCM_SQL_Utils::OPTION_STAGING_PREFIX, $staging_prefix, false);
+        One_Click_Migration::write_to_log(sprintf(
+            'SYSLOG: Importing database into staging prefix "%s"; live tables with prefix "%s" stay intact until import succeeds.',
+            $staging_prefix,
+            $wpdb->base_prefix
+        ));
+        // Fatals (including memory exhausted) during staging import / URL rewrite
+        // must stop with LOG_RESTORE_STOPPED_IMPORT and never retry the URL step.
+        self::register_import_oom_guard();
+
+        $source_suffixes = OCM_SQL_Utils::source_table_suffixes_from_dumps($sorted_table_list, $source_prefix);
+        $pre_rewrite_key = self::binary_preflight_fingerprint();
+
+        // Data swap source → live dest; remap only statement table names to staging
+        // so row data keeps {dest}capabilities / {dest}user_roles. Foreign-prefix
+        // dumps (ktv_options, nst_options) are also pulled under staging.
         foreach ($sorted_table_list as $filepath) {
-            if (!OCM_SQL_Utils::swap_table_prefix($filepath)) {
+            if (!OCM_SQL_Utils::prepare_sql_dump_for_staging($filepath, $wpdb->base_prefix, $staging_prefix, $source_prefix)) {
                 One_Click_Migration::write_to_log(sprintf('Error: Database restore failed while remapping the table prefix in "%s".', basename($filepath)));
+                self::clear_import_oom_guard();
+                self::discard_staging_import($staging_prefix, $wpdb->base_prefix);
                 return false;
             }
             if (!is_file($filepath) || !is_readable($filepath) || filesize($filepath) === 0) {
                 One_Click_Migration::write_to_log(sprintf('Error: Database restore rejected invalid SQL dump "%s".', basename($filepath)));
+                self::clear_import_oom_guard();
+                self::discard_staging_import($staging_prefix, $wpdb->base_prefix);
                 return false;
             }
         }
+        // Prefix rewrite changes dump size/mtime; keep a stored pass valid only
+        // when it still matches the pre-rewrite fingerprint from this restore.
+        self::rekey_binary_preflight_after_prefix_rewrite($pre_rewrite_key);
 
         $review_options = self::snapshot_destination_review_options($wpdb);
 
-        // Only after every dump passed do we remove destination-prefix tables.
-        $tables = $wpdb->get_results('SHOW TABLES');
-        foreach ($tables as $table) {
-            foreach ($table as $table_name) {
-                if (strpos($table_name, $wpdb->base_prefix) === 0) {
-                    $wpdb->query('DROP TABLE IF EXISTS `' . esc_sql($table_name) . '`');
-                }
-            }
-        }
-
         $leftover_foreign_options = 0;
-        $tables_after_drop = $wpdb->get_results('SHOW TABLES');
-        foreach ($tables_after_drop as $table) {
+        $tables_before_import = $wpdb->get_results('SHOW TABLES');
+        foreach ($tables_before_import as $table) {
             foreach ($table as $table_name) {
                 if (substr($table_name, -8) === '_options'
                     && strpos($table_name, $wpdb->base_prefix) !== 0
+                    && strpos($table_name, $staging_prefix) !== 0
                 ) {
                     $leftover_foreign_options++;
                 }
@@ -4371,47 +5416,42 @@ class OCM_Backup
         }
         if ($leftover_foreign_options > 0) {
             One_Click_Migration::write_to_log(sprintf(
-                'Notice: Found %d leftover foreign-prefix *_options table(s) on destination; siteurl/home gate will use "%soptions" only.',
+                'Notice: Found %d leftover foreign-prefix *_options table(s) on destination; siteurl/home gate will use staging "%soptions" matching source_prefix="%s" only.',
                 $leftover_foreign_options,
-                $wpdb->base_prefix
+                $staging_prefix,
+                $source_prefix
             ));
         }
 
+        $main_options_seen = false;
         foreach ($sorted_table_list as $filepath) {
-            if (!OCM_SQL_Utils::import($filepath, $source_prefix, $wpdb->base_prefix)) {
+            // Import remaps statement heads from source_prefix → staging for any
+            // remaining source-prefixed names; foreign tables already use staging.
+            if (!OCM_SQL_Utils::import($filepath, $source_prefix, $staging_prefix)) {
                 One_Click_Migration::write_to_log(sprintf('Error: Database restore failed while importing "%s".', basename($filepath)));
+                self::clear_import_oom_guard();
+                self::discard_staging_import($staging_prefix, $wpdb->base_prefix);
                 return false;
             }
 
-            // Gate siteurl/home rewrite only on the main options dump (exact basename).
-            // Other *options.sql files (plugin tables like ktv_options, multisite
+            // Gate siteurl/home only after the source-prefix options dump imports.
+            // Stray *options.sql files (ktv_options, nst_options, multisite
             // {base}{id}_options) must import without this check.
             if (basename($filepath) === $source_prefix . 'options.sql') {
-                $table_name = $wpdb->base_prefix . 'options';
-
-                $db_url = $wpdb->get_results("SELECT option_value FROM {$table_name} WHERE option_name = 'siteurl'");
-                $db_home = $wpdb->get_results("SELECT option_value FROM {$table_name} WHERE option_name = 'home'");
-
-                if (
-                    empty($db_url) || empty($db_url[0]->option_value)
-                    || empty($db_home) || empty($db_home[0]->option_value)
-                ) {
-                    One_Click_Migration::write_to_log(sprintf(
-                        'Error: Database restore failed: main options table "%s" is incomplete or wrong-prefix (missing siteurl and/or home). source_prefix="%s" dest_base_prefix="%s" dest_prefix="%s".',
-                        $table_name,
-                        $source_prefix,
-                        $wpdb->base_prefix,
-                        $wpdb->prefix
-                    ));
-                    return false;
+                $main_options_seen = true;
+                $table_name = OCM_SQL_Utils::resolve_main_options_table($wpdb, $source_prefix, $staging_prefix);
+                if ($table_name === false) {
+                    return self::refuse_options_prefix_gate($staging_prefix, $source_prefix, $wpdb);
                 }
 
+                $db_url = $wpdb->get_results("SELECT option_value FROM `{$table_name}` WHERE option_name = 'siteurl'");
                 self::$restore_site_url = $db_url[0]->option_value;
 
                 One_Click_Migration::write_to_log(sprintf(
-                    'Main options verified on table "%s" (source_prefix="%s" dest_base_prefix="%s" dest_prefix="%s").',
+                    'Main options verified on staging table "%s" (source_prefix="%s" staging_prefix="%s" dest_base_prefix="%s" dest_prefix="%s").',
                     $table_name,
                     $source_prefix,
+                    $staging_prefix,
                     $wpdb->base_prefix,
                     $wpdb->prefix
                 ));
@@ -4433,16 +5473,185 @@ class OCM_Backup
                         array('%s')
                     );
                 }
-
-                self::restore_destination_review_options($wpdb, $review_options);
             }
         }
+
+        if (!$main_options_seen) {
+            // No source-prefix options dump — still require a resolvable options
+            // table with siteurl/home under staging before promoting.
+            $table_name = OCM_SQL_Utils::resolve_main_options_table($wpdb, $source_prefix, $staging_prefix);
+            if ($table_name === false) {
+                return self::refuse_options_prefix_gate($staging_prefix, $source_prefix, $wpdb);
+            }
+            $db_url = $wpdb->get_results("SELECT option_value FROM `{$table_name}` WHERE option_name = 'siteurl'");
+            if (!empty($db_url) && !empty($db_url[0]->option_value)) {
+                self::$restore_site_url = $db_url[0]->option_value;
+            }
+        }
+
+        // URL rewrite on temp-prefixed staging tables only — before atomic RENAME
+        // and before any file swap. Failure / OOM leaves the live site untouched.
+        if (!self::rewrite_urls_on_staging_tables($staging_prefix)) {
+            self::clear_import_oom_guard();
+            if (self::$url_rewrite_unpageable_table) {
+                // Drop staging quietly so the dedicated Error stays immediately
+                // before LOG_RESTORE_STOPPED_IMPORT (no discard Error in between).
+                OCM_SQL_Utils::drop_tables_with_prefix($staging_prefix);
+                delete_option(OCM_SQL_Utils::OPTION_STAGING_PREFIX);
+            } else {
+                self::discard_staging_import($staging_prefix, $wpdb->base_prefix);
+            }
+            return false;
+        }
+
+        if (!OCM_SQL_Utils::promote_staging_tables($staging_prefix, $wpdb->base_prefix, $source_suffixes)) {
+            One_Click_Migration::write_to_log(sprintf(
+                'Error: Database import failed while promoting staging prefix "%s" to live prefix "%s"; discarding staging tables and leaving any recoverable live tables in place.',
+                $staging_prefix,
+                $wpdb->base_prefix
+            ));
+            self::clear_import_oom_guard();
+            self::discard_staging_import($staging_prefix, $wpdb->base_prefix);
+            return false;
+        }
+
+        self::clear_import_oom_guard();
+
+        // Destination review prefs were snapshotted from the live options table
+        // before promote; write them onto the newly promoted options table.
+        self::restore_destination_review_options($wpdb, $review_options);
+
         // Clear any stale background process queues imported from the source site's database
         // to prevent them from firing on the destination site after restore.
         OCM_BackgroundHelper::delete_all_batch_process();
 
         One_Click_Migration::write_to_log('Database has been restored');
         return true;
+    }
+
+    /**
+     * Run URL search-replace against staging-prefixed tables only. Must complete
+     * before promote_staging_tables() / file swap. Returns false on rewrite errors
+     * so the caller can discard staging and stop with LOG_RESTORE_STOPPED_IMPORT.
+     *
+     * @param string $staging_prefix
+     * @return bool
+     */
+    private static function rewrite_urls_on_staging_tables($staging_prefix)
+    {
+        self::$url_rewrite_unpageable_table = null;
+        $old_url = self::$restore_site_url;
+        if (empty($old_url) || !is_string($staging_prefix) || $staging_prefix === '') {
+            return true;
+        }
+        $current_url = site_url();
+        $url_plan = get_option(OCM_Restore_Precheck::OPTION, array());
+        if (!is_array($url_plan)) {
+            $url_plan = array();
+        }
+        $extra_arguments = OCM_Restore_Precheck::replacement_args($url_plan, $old_url, $current_url);
+        $db_details = new OCM_DB();
+        if (empty($url_plan['reviewed'])) {
+            $db_details->enable_url_collection();
+        }
+        $all_tables = OCM_DB::get_tables();
+        if (!is_array($all_tables)) {
+            $all_tables = array();
+        }
+        $staging_tables = array();
+        foreach ($all_tables as $table) {
+            if (is_string($table) && strpos($table, $staging_prefix) === 0) {
+                $staging_tables[] = $table;
+            }
+        }
+        if (!$staging_tables) {
+            return true;
+        }
+        $result = $db_details->search_replace_db($staging_tables, $extra_arguments);
+        // Dedicated stop (keyless unpageable or oversized row): Error was already
+        // logged; return before Finished/Number SYSLOG so that Error sits
+        // immediately before LOG_RESTORE_STOPPED_IMPORT.
+        if (!empty($result['unpageable_table'])) {
+            self::$url_rewrite_unpageable_table = (string) $result['unpageable_table'];
+            return false;
+        }
+        if (!empty($result['oversized_table'])) {
+            self::$url_rewrite_unpageable_table = (string) $result['oversized_table'];
+            return false;
+        }
+        if (!empty($result['paging_stuck_table'])) {
+            self::$url_rewrite_unpageable_table = (string) $result['paging_stuck_table'];
+            return false;
+        }
+        $report_update = isset($result['updates']) ? $result['updates'] : 0;
+        One_Click_Migration::write_to_log(sprintf('SYSLOG: Number of updates made from replace "%s"', $report_update));
+        One_Click_Migration::write_to_log('SYSLOG: Finished updating URLs in the database');
+        if (!empty($result['errors'])) {
+            One_Click_Migration::write_to_log(sprintf(
+                'Error: Database restore failed while updating URLs on staging tables (%d).',
+                count($result['errors'])
+            ));
+            $failed_pairs = isset($result['failed_pairs']) && is_array($result['failed_pairs'])
+                ? $result['failed_pairs']
+                : array();
+            self::log_failed_address_pairs($failed_pairs);
+            return false;
+        }
+        // Only after a clean rewrite: candidates make the admin page open the
+        // restore-success modal, which must never follow a stopped restore.
+        if (empty($url_plan['reviewed'])) {
+            self::store_extra_domain_candidates($db_details->collected_urls(), $old_url, $current_url);
+        }
+        if (!empty($url_plan['reviewed'])) {
+            delete_option(OCM_Extra_Domains::OPTION);
+            delete_option('ocm_restore_partial_address_updates');
+            delete_option('ocm_restore_failed_address_pairs');
+        }
+        return true;
+    }
+
+    /**
+     * Options/prefix gate failure: write the dedicated stop line, discard staging,
+     * leave live tables/files/plugins unchanged.
+     *
+     * @param string $staging_prefix
+     * @param string $source_prefix
+     * @param wpdb   $wpdb
+     * @return false
+     */
+    private static function refuse_options_prefix_gate($staging_prefix, $source_prefix, wpdb $wpdb)
+    {
+        self::$db_restore_refused_options = true;
+        self::clear_import_oom_guard();
+        One_Click_Migration::write_to_log(sprintf(
+            'Error: Database restore failed: main options table "%soptions" is incomplete or wrong-prefix (missing siteurl and/or home). source_prefix="%s" staging_prefix="%s" dest_base_prefix="%s" dest_prefix="%s".',
+            $staging_prefix,
+            $source_prefix,
+            $staging_prefix,
+            $wpdb->base_prefix,
+            $wpdb->prefix
+        ));
+        self::discard_staging_import($staging_prefix, $wpdb->base_prefix);
+        One_Click_Migration::write_to_log(self::LOG_RESTORE_STOPPED_OPTIONS);
+        return false;
+    }
+
+    /**
+     * Drop an in-flight staging import and leave live destination tables alone.
+     *
+     * @param string $staging_prefix
+     * @param string $dest_prefix
+     * @return void
+     */
+    private static function discard_staging_import($staging_prefix, $dest_prefix)
+    {
+        One_Click_Migration::write_to_log(sprintf(
+            'Error: Database import failed; discarding staging prefix "%s" and leaving live tables with prefix "%s" unchanged.',
+            $staging_prefix,
+            $dest_prefix
+        ));
+        OCM_SQL_Utils::drop_tables_with_prefix($staging_prefix);
+        delete_option(OCM_SQL_Utils::OPTION_STAGING_PREFIX);
     }
 
     private static function snapshot_destination_review_options(wpdb $wpdb)
@@ -4711,6 +5920,21 @@ class OCM_Backup
       delete_option('ocm_excluded_folders');
       delete_option('ocm_skipped_folders');
       delete_option('ocm_eexcluded_folders');
+      delete_option('ocm_backup_missing_parts');
+      delete_option('ocm_backup_excluded_parts');
+      delete_option('ocm_backup_parts_known');
+      delete_option(self::OPTION_RESTORE_DB_PART_FAILED);
+      delete_option(self::OPTION_BINARY_PREFLIGHT);
+      delete_option(self::OPTION_RESTORE_PART_WARNINGS);
+      delete_option(self::OPTION_RESTORE_PLUGINS_ISOLATED);
+      delete_option(self::OPTION_RESTORE_WAS_WARNED);
+      delete_option('ocm_restore_was_partial');
+      // A new run's log must show its own PHP errors, not skip ones the
+      // previous run already logged.
+      delete_option('ocm_error_log_dedupe');
+      delete_option('ocm_restore_partial_address_updates');
+      delete_option('ocm_restore_failed_address_pairs');
+      delete_option(OCM_SQL_Utils::OPTION_BACKUP_PLUGIN_VERSION);
       delete_option(OCM_Extra_Domains::OPTION);
       delete_option(OCM_Restore_Precheck::OPTION);
 
@@ -4719,6 +5943,7 @@ class OCM_Backup
     public static function delete_backup_options(){
       // Clean up transient backup state from previous runs.
       delete_option('ocm_force_deactivated_plugins');
+      delete_option('ocm_error_log_dedupe');
 
       delete_option('ocm_backup_compress_retry_db');
       delete_option('ocm_backup_compress_retry_themes');
@@ -4766,6 +5991,168 @@ class OCM_Backup
       $excluded_restore_files = is_array($excluded_restore_files) ? $excluded_restore_files : array();
       $excluded_restore_files = array_merge($current, $excluded_restore_files, array($key));
       update_option($option, array_values(array_unique($excluded_restore_files)));
+    }
+
+    /** @var array<int, string> Parts for which download_restore_file was invoked (tests). */
+    public static $restore_download_requests = array();
+
+    /**
+     * Merge backup-log =excluded parts into ocm_excluded_folders so downloads,
+     * DB import, and URL rewrite follow the same path as a selective exclude
+     * in 3.1.18 (files-only: complete_restore, no search-replace).
+     *
+     * @return array Updated ocm_excluded_folders
+     */
+    public static function apply_backup_excluded_parts_to_restore_exclusions()
+    {
+        $backup_excluded = get_option('ocm_backup_excluded_parts', array());
+        $backup_excluded = is_array($backup_excluded) ? $backup_excluded : array();
+        if ($backup_excluded === array()) {
+            $current = get_option('ocm_excluded_folders', array());
+            return is_array($current) ? $current : array();
+        }
+        $current = get_option('ocm_excluded_folders', array());
+        $current = is_array($current) ? $current : array();
+        $merged = array_values(array_unique(array_merge($current, $backup_excluded)));
+        update_option('ocm_excluded_folders', $merged, true);
+        return $merged;
+    }
+
+    /**
+     * If the backup log marked this part =excluded, never request/download it.
+     * Records it on ocm_excluded_folders and marks restore steps complete.
+     * Includes db=excluded (files-only restore → complete_restore, no import).
+     *
+     * @param string $key
+     * @param array  $excluded_restore_files
+     * @return bool True when the caller must continue (skip download).
+     */
+    public static function maybe_skip_backup_excluded_restore_part($key, array &$excluded_restore_files)
+    {
+        $key = strtolower((string) $key);
+        if ($key === '' || $key === 'log' || $key === 'log_download') {
+            return false;
+        }
+        $backup_excluded = get_option('ocm_backup_excluded_parts', array());
+        $backup_excluded = is_array($backup_excluded) ? $backup_excluded : array();
+        if (!in_array($key, $backup_excluded, true)) {
+            return false;
+        }
+
+        One_Click_Migration::write_to_log(sprintf(
+            'Notice: %s was excluded from this backup by the user; not downloading.',
+            $key
+        ));
+        $excluded_restore_files[] = $key;
+        $excluded_restore_files = array_values(array_unique($excluded_restore_files));
+        update_option('ocm_excluded_folders', $excluded_restore_files, true);
+        self::set_complete_restore_step($key, self::STEP_RESTORE_CHILD_DOWNLOAD);
+        self::set_complete_restore_step($key, self::STEP_RESTORE_CHILD_DECRYPT);
+        self::set_complete_restore_step($key, self::STEP_RESTORE_CHILD_EXTRACT);
+        self::set_complete_restore_step($key, self::STEP_RESTORE_CHILD_DELETE_OLD_AND_MOVE_NEW);
+        return true;
+    }
+
+    /**
+     * Real download-path entry used by the restore loop (and tests): skip
+     * backup-excluded parts without requesting; otherwise record a request and
+     * optionally run the Not Found handler.
+     *
+     * @param string $key
+     * @param bool   $simulate_404
+     * @return string 'skipped_excluded'|'continue'|'fail_restore'|'requested'
+     */
+    public static function process_restore_part_download_decision($key, $simulate_404 = false)
+    {
+        $key = strtolower((string) $key);
+        $excluded_restore_files = get_option('ocm_excluded_folders', array());
+        $excluded_restore_files = is_array($excluded_restore_files) ? $excluded_restore_files : array();
+        if (in_array($key, $excluded_restore_files, true)) {
+            return 'skipped_excluded';
+        }
+        if (self::maybe_skip_backup_excluded_restore_part($key, $excluded_restore_files)) {
+            return 'skipped_excluded';
+        }
+        self::$restore_download_requests[] = $key;
+        if (!$simulate_404) {
+            return 'requested';
+        }
+        $eexcluded_restore_files = get_option('ocm_eexcluded_folders', array());
+        $eexcluded_restore_files = is_array($eexcluded_restore_files) ? $eexcluded_restore_files : array();
+        return self::handle_restore_part_download_not_found(
+            $key,
+            $key . '.zip.crypt',
+            $excluded_restore_files,
+            $eexcluded_restore_files
+        );
+    }
+
+    /**
+     * Handle a Not Found download for one restore part.
+     * - Backup =excluded (incl. db=excluded): no warning, treat as selective exclude.
+     * - Included / skipped db, or pre-manifest missing db: DB-part stop.
+     * - Included non-db 404 / pre-manifest missing non-db: warn skipped (not found).
+     *
+     * @param string $key
+     * @param string $keyZipCrypt
+     * @param array  $excluded_restore_files
+     * @param array  $eexcluded_restore_files
+     * @return string 'continue' or 'fail_restore' (db stop never returns)
+     */
+    public static function handle_restore_part_download_not_found(
+        $key,
+        $keyZipCrypt,
+        array &$excluded_restore_files,
+        array &$eexcluded_restore_files
+    ) {
+        $key = (string) $key;
+        $backup_missing_parts = get_option('ocm_backup_missing_parts', []);
+        $backup_missing_parts = is_array($backup_missing_parts) ? $backup_missing_parts : [];
+        $backup_excluded_parts = get_option('ocm_backup_excluded_parts', []);
+        $backup_excluded_parts = is_array($backup_excluded_parts) ? $backup_excluded_parts : [];
+        $excluded_at_backup = in_array($key, $backup_excluded_parts, true);
+        $skipped_at_backup = in_array($key, $backup_missing_parts, true);
+
+        // Intentional backup exclusion (files-only db, or non-db): never warn.
+        if ($excluded_at_backup) {
+            One_Click_Migration::write_to_log("Notice: $key was excluded from this backup by the user; continuing without it.");
+            $excluded_restore_files[] = $key;
+            $excluded_restore_files = array_values(array_unique($excluded_restore_files));
+            update_option('ocm_excluded_folders', $excluded_restore_files, true);
+            self::set_complete_restore_step($key, self::STEP_RESTORE_CHILD_DOWNLOAD);
+            self::set_complete_restore_step($key, self::STEP_RESTORE_CHILD_DECRYPT);
+            self::set_complete_restore_step($key, self::STEP_RESTORE_CHILD_EXTRACT);
+            self::set_complete_restore_step($key, self::STEP_RESTORE_CHILD_DELETE_OLD_AND_MOVE_NEW);
+            return 'continue';
+        }
+
+        // Meant-to-be-included db missing (skipped-at-backup, included 404, or
+        // pre-manifest with no BACKUP_PARTS list): stop before file replace.
+        if ($key === 'db') {
+            update_option(self::OPTION_RESTORE_DB_PART_FAILED, 1, true);
+            self::stop_restore_after_db_part_failure();
+        }
+
+        if ($skipped_at_backup) {
+            One_Click_Migration::write_to_log("Notice: $key was not included in this backup (skipped while the backup was created); continuing without it.");
+            self::record_restore_part_warning($key, 'not in backup');
+        } elseif (get_option('ocm_backup_parts_known')) {
+            return 'fail_restore';
+        } else {
+            // No BACKUP_PARTS line: cannot tell excluded from missing → warn.
+            One_Click_Migration::write_to_log("Notice: file $keyZipCrypt not found");
+            self::record_restore_part_warning($key, 'not found');
+        }
+
+        $excluded_restore_files[] = $key;
+        $excluded_restore_files = array_values(array_unique($excluded_restore_files));
+        update_option('ocm_excluded_folders', $excluded_restore_files, true);
+        self::capture_failed_folder($eexcluded_restore_files, $key, 'ocm_eexcluded_folders');
+        self::set_complete_restore_step($key, self::STEP_RESTORE_CHILD_DOWNLOAD);
+        self::set_complete_restore_step($key, self::STEP_RESTORE_CHILD_DECRYPT);
+        self::set_complete_restore_step($key, self::STEP_RESTORE_CHILD_EXTRACT);
+        self::set_complete_restore_step($key, self::STEP_RESTORE_CHILD_DELETE_OLD_AND_MOVE_NEW);
+        return 'continue';
     }
 
     public static function mark_backup_part_uploaded($part)

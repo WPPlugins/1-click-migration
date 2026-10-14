@@ -4,7 +4,7 @@ Tags: backup, migrate, migration, restore, clone
 Requires at least: 4.0
 Tested up to: 7.1
 Requires PHP: 7.4
-Stable tag: 3.1.18
+Stable tag: 3.1.20
 Author URI: https://1clickmigration.com
 License: GPLv3 or later
 License URI: http://www.gnu.org/licenses/gpl-3.0.html
@@ -122,6 +122,23 @@ All of them! Migrate WordPress sites between any hosting providers: Bluehost, Si
 4. Enter the restore code on the destination site to finish your WordPress migration.
 
 == Changelog ==
+= 3.1.20 =
+* **Site addresses updated before the swap**: The restore now updates site addresses on the imported copy of the database, before it replaces the live database and files. If that step can't finish safely (for example a table with no primary key, a row too large for the PHP memory limit, or the memory limit itself being reached), the restore stops with no changes made to the site, instead of leaving it half-restored.
+* **Restore never resumes the source's backup**: A backup's database is dumped while that backup is still running. After a restore, the destination could pick up the source site's unfinished backup and upload into the source's storage. The destination now keeps its own plugin state when the database is swapped in, and a backup can't run while a restore is in progress.
+* **One restore worker at a time**: Long downloads and decryption now report progress, so the restore is no longer mistaken for stalled and started twice. A process lock also keeps a second restore worker from running alongside the first. A missing temporary file is no longer reported as a disk-quota problem.
+* **Progress check after backup**: Checking progress the moment a backup finished could log a fatal `count()` error. It now exits quietly and never finishes the backup twice.
+* **Crashes are always logged**: A fatal PHP error during a backup or restore is now always logged, including parse and compile errors and a repeat of an earlier crash. A crashed run no longer looks like it is still in progress.
+* **Clearer storage and disk errors**: Running out of disk space while decrypting a part is reported at that step, not later as a corrupt archive. A failed upload of a large part no longer leaks the storage error into the progress screen, and an upload without a storage receipt is now logged.
+* **No address prompt after a stopped restore**: A restore that stops with no changes made no longer offers to update extra site addresses.
+* **Steadier progress bar**: Some internal log lines, such as low-memory notices and duplicate-worker exits, could send the progress bar back to 1% or show as the current step. They no longer do.
+
+= 3.1.19 =
+* **Binary database backup**: New backups hex-encode BINARY/BLOB columns (for example Wordfence file-hash tables) so those dumps restore cleanly. Older backups that still contain broken (non-hex) binary values need a fresh backup from a 3.1.19+ source; plain-text UTF-8 values stored in BLOB columns restore normally. BIT columns are no longer exported as quoted text, so their values restore exactly on hosts without mysqldump.
+* **Broken binary restore guard**: Restores that detect broken binary data stop before anything on the site is changed and ask for a fresh backup.
+* **Database part restore guard**: If the database was meant to be included but can't be downloaded or unpacked, the restore stops before any site files are replaced. A backup that intentionally left the database out (files-only) still restores its files without stopping.
+* **Empty uploads backup**: An empty uploads, themes, or plugins folder no longer fails the backup; the plugin writes a valid empty archive and restore accepts it. An empty database dump still fails as before.
+* **URL rewrite reliability**: Source addresses from `.local`/localhost and temp/cPanel domains expand scheme/www variants for the primary site path only (and checklist-approved domains). Other URLs such as CDN, embeds, and affiliate links stay unchanged.
+
 = 3.1.18 =
 * **Database archive failover**: If `ZipArchive::close()` fails while packing `db.zip`, backup no longer dead-ends when the host has no system `zip` binary. It now fails over to the existing in-process streaming zip, logs close diagnostics (libzip status, disk space), and only fails after ZipArchive, system zip, and in-process zip have all been tried (#69).
 
@@ -312,6 +329,12 @@ All of them! Migrate WordPress sites between any hosting providers: Bluehost, Si
 * Initial release & dependency updates
 
 == Upgrade Notice ==
+
+= 3.1.20 =
+Includes all 3.1.19 changes. Restores now update site addresses before swapping in the database and files, and stop cleanly with no changes made if that step fails. A restore can no longer resume the source site's backup, and only one restore worker runs at a time.
+
+= 3.1.19 =
+New backups hex-encode BINARY/BLOB columns. Restores refuse broken binary data and stop early if the database part can't be unpacked. Empty uploads/themes/plugins folders back up cleanly. URL rewrites for .local/temp domains are more reliable.
 
 = 3.1.6 =
 Partial backups are now clearly flagged in the UI and restore-code email, stalled background workers auto-recover on hosts that block loopback requests, and disk usage during backup/restore is significantly reduced.

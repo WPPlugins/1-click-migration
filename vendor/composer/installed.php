@@ -1,9 +1,9 @@
 <?php return array(
     'root' => array(
         'name' => 'oneclickmigration/1-click-migration',
-        'pretty_version' => 'dev-master',
-        'version' => 'dev-master',
-        'reference' => '49a4c0251d190bea0f383f49dac3abb750028e0c',
+        'pretty_version' => '1.0.0+no-version-set',
+        'version' => '1.0.0.0',
+        'reference' => null,
         'type' => 'library',
         'install_path' => __DIR__ . '/../../',
         'aliases' => array(),
@@ -56,9 +56,9 @@
             'dev_requirement' => false,
         ),
         'oneclickmigration/1-click-migration' => array(
-            'pretty_version' => 'dev-master',
-            'version' => 'dev-master',
-            'reference' => '49a4c0251d190bea0f383f49dac3abb750028e0c',
+            'pretty_version' => '1.0.0+no-version-set',
+            'version' => '1.0.0.0',
+            'reference' => null,
             'type' => 'library',
             'install_path' => __DIR__ . '/../../',
             'aliases' => array(),
