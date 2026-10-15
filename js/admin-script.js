@@ -482,6 +482,9 @@
         var dismissUrl = (typeof siteData !== 'undefined' && siteData.dismissReviewUrl)
             ? siteData.dismissReviewUrl
             : '';
+        var supportUrl = (typeof siteData !== 'undefined' && siteData.supportUrl)
+            ? siteData.supportUrl
+            : 'https://wordpress.org/support/plugin/1-click-migration/';
         var isPartial = typeof siteData !== 'undefined' && ocmFlagOn(siteData.showRestorePartial);
         var isWarned = typeof siteData !== 'undefined' && ocmFlagOn(siteData.showRestoreWarned);
         var isIncomplete = isPartial || isWarned;
@@ -513,6 +516,11 @@
             + '    <div class="ocm-modal-icon" aria-hidden="true">' + (isIncomplete ? '!' : '✓') + '</div>'
             + '    <h2 id="ocm-restore-success-title" class="ocm-modal-title">' + titleText + '</h2>'
             + '    <p class="ocm-modal-body">' + bodyText + '</p>'
+            // The forum is public: anyone with the restore code can restore the backup.
+            + (isIncomplete
+                ? '    <p class="ocm-modal-body ocm-modal-support">Need help? <a href="' + escHtml(supportUrl) + '" target="_blank" rel="noopener noreferrer">Ask on the support forum</a>'
+                    + ' and share your site\'s domain. Never post your restore code: anyone who has it can restore your backup.</p>'
+                : '')
             + domains
             + '    <div class="ocm-modal-actions">'
             + reviewBlock

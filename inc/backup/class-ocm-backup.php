@@ -77,6 +77,9 @@ class OCM_Backup
     const MAX_STEP_RETRIES = 4;
     const MAX_TRANSFER_RETRIES = 24;
 
+    /** Where the UI sends users who need help (the WordPress.org forum is public). */
+    const SUPPORT_FORUM_URL = 'https://wordpress.org/support/plugin/1-click-migration/';
+
     private static $skipMessages = [
         self::LOG_MESSAGE_BG_PROCESS_RESTARTING,
         self::LOG_MESSAGE_BG_PROCESS_RESTARTING_LOG
@@ -3334,7 +3337,7 @@ class OCM_Backup
         // "Taking longer than expected" is for a real stall (the watchdog had to
         // revive a worker), not for a planned hand-over.
         $stall_notice = ($action_in_flight && (int) get_option('ocm_worker_revival_count', 0) > 0)
-            ? self::LOG_MESSAGE_BG_PROCESS_RESTARTING_LOG
+            ? self::LOG_MESSAGE_BG_PROCESS_RESTARTING_LOG . '. ' . self::support_forum_html('Stuck for a long time?')
             : '';
 
         if ($lastLog && strpos($lastLog, 'was skipped due to timeout') !== false) {
@@ -3418,10 +3421,11 @@ class OCM_Backup
                 } elseif ($restore_terminal) {
                     if (strpos($lastLog, self::LOG_RESTORE_COMPLETED_WARNINGS_PREFIX) === 0) {
                         $progress_item_text['text'] .= '</br></br>Restore finished, but some parts were skipped or missing. Check the migration log, then verify themes, plugins, and media on your site.'
-                            . ' See our <a target="_blank" href="https://1clickmigration.com/faq/">FAQ page</a> or <a target="_blank" href="https://1clickmigration.com/contact-us/">Contact Form</a> if you need help.';
+                            . ' Our <a target="_blank" href="https://1clickmigration.com/faq/">FAQ page</a> covers common fixes.';
                     } else {
-                        $progress_item_text['text'] .= '</br></br>Please check your website. If you have any issues please check our <a target="_blank" href="https://1clickmigration.com/faq/">FAQ page</a> or contact us via <a target="_blank" href="https://1clickmigration.com/contact-us/">this Contact Form</a>.';
+                        $progress_item_text['text'] .= '</br></br>Please check your website. If you have any issues, see our <a target="_blank" href="https://1clickmigration.com/faq/">FAQ page</a>.';
                     }
+                    $progress_item_text['text'] .= '</br></br>' . self::support_forum_html('Need help?');
                     $progress_item_text['restoreCompleted'] = true;
                 } elseif ($lastLog === 'Backup completed.') {
                     $bucket_id = (string) get_option('ocm_bucket_id', '');
@@ -3445,11 +3449,53 @@ class OCM_Backup
                 if ($recovery_hint !== '') {
                     $progress_item_text['text'] .= '</br></br><strong>How to fix:</strong> ' . $recovery_hint;
                 }
+                if (self::is_failure_progress_line($lastLog, $progress_item[1], $isStopped)) {
+                    $progress_item_text['text'] .= '</br></br>' . self::support_forum_html($recovery_hint !== '' ? 'Still stuck?' : 'Need help?');
+                }
                 return $progress_item_text;
             }
         }
 
         return $default_text;
+    }
+
+    /**
+     * "Ask on the support forum" line for the progress card. The forum is
+     * public, so it asks for the site's domain only: anyone with the restore
+     * code can restore the backup.
+     *
+     * @param string $lead Short question in front of the link, e.g. "Need help?".
+     * @return string HTML
+     */
+    private static function support_forum_html($lead)
+    {
+        return $lead . ' <a target="_blank" rel="noopener noreferrer" href="' . self::SUPPORT_FORUM_URL . '">Ask on the support forum</a>'
+            . ' and share your site\'s domain. Never post your restore code: anyone who has it can restore your backup.';
+    }
+
+    /**
+     * Does the progress card show a run that failed? The terminal failure
+     * lines, and once the run has stopped, any error line or line the progress
+     * map puts at 0% other than the user's own Stop & Reset. A run still in
+     * flight can get past an error line (the worker is retried), so it gets
+     * no forum link until it fails.
+     *
+     * @param string      $line       Log line the card shows.
+     * @param string      $percentage Its progress map value.
+     * @param bool|string $is_stopped ocm_is_stopped.
+     * @return bool
+     */
+    private static function is_failure_progress_line($line, $percentage, $is_stopped)
+    {
+        foreach (array('Backup failed:', 'Restore failed:', 'Restore stopped') as $prefix) {
+            if (strpos($line, $prefix) === 0) {
+                return true;
+            }
+        }
+        if (!$is_stopped || $line === 'Stop & Reset Finished' || strpos($line, 'Time out approaching') === 0) {
+            return false;
+        }
+        return $percentage === '0%' || strpos($line, 'Error') !== false;
     }
 
     /**
@@ -3505,7 +3551,7 @@ class OCM_Backup
         }
 
         if (strpos($log, 'Restore stopped: the database could not be imported') !== false) {
-            return 'The database could not be imported, so nothing on this site was changed. No files, tables or plugins were touched. Take a fresh backup from the source and restore again with the new backup\'s restore code. If the log mentions a table name that is too long, shorten that table name or the source table prefix before taking the new backup. If the log says a table has no primary or unique key, ask your host or developer to add one to that table on the source site, then take a new backup. If the log says a table has a row too large, ask your host to raise the PHP memory limit on this site, or ask your developer to shrink the large rows in that table on the source site, then take a new backup. If the log says a table stopped making progress, contact our support with your restore code, and don\'t run the restore again until we\'ve checked it.';
+            return 'The database could not be imported, so nothing on this site was changed. No files, tables or plugins were touched. Take a fresh backup from the source and restore again with the new backup\'s restore code. If the log mentions a table name that is too long, shorten that table name or the source table prefix before taking the new backup. If the log says a table has no primary or unique key, ask your host or developer to add one to that table on the source site, then take a new backup. If the log says a table has a row too large, ask your host to raise the PHP memory limit on this site, or ask your developer to shrink the large rows in that table on the source site, then take a new backup. If the log says a table stopped making progress, ask on the support forum below, and don\'t run the restore again until we\'ve checked it.';
         }
 
         if (strpos($log, 'Database restore failed while importing') !== false || strpos($log, 'DB Restore') !== false) {

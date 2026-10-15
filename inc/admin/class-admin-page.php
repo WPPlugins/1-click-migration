@@ -51,6 +51,7 @@ class OCM_Admin_Page
         $cancel_url  = wp_nonce_url(admin_url('admin-post.php?action=cancel_actions'), 'one_click_migration_cancel_action');
         $logo_url    = plugins_url('/images/one-click.png', dirname(dirname(__FILE__)));
         $version     = One_Click_Migration::get_version();
+        $support_url = OCM_Backup::SUPPORT_FORUM_URL;
         ?>
         <div class="ocm-app">
 
@@ -102,6 +103,7 @@ class OCM_Admin_Page
                                         <div class="ocm-step-title">3. Troubleshooting</div>
                                         <p>If the backup fails repeatedly, press <strong>Stop &amp; Reset</strong> and use <strong>Advanced options</strong> to back up one section at a time (e.g. exclude everything except the database for one run, then exclude everything except plugins for the next, and so on).</p>
                                         <p>Each run creates a <strong>separate backup with its own restore code</strong>. Save every email &mdash; on the destination site you'll need to run Restore once per code to put all the pieces back together.</p>
+                                        <p>Still stuck? <a href="<?php echo esc_url($support_url); ?>" target="_blank" rel="noopener noreferrer">Ask on the support forum</a> and share your site's domain. Never post your restore code: anyone who has it can restore your backup.</p>
                                     </div>
                                     <div class="ocm-step">
                                         <div class="ocm-step-title">4. Important info</div>
@@ -128,6 +130,7 @@ class OCM_Admin_Page
                                         <div class="ocm-step-title">3. Troubleshooting</div>
                                         <p>If your backup is large and restoring fails, press <strong>Stop &amp; Reset</strong>, then use <strong>Advanced options</strong> to restore one section at a time. Restore the database last.</p>
                                         <p>If you took multiple partial backups (one per section), you'll have a separate restore code for each. Run Restore once per code &mdash; suggested order: <strong>themes, plugins, uploads, database last</strong>.</p>
+                                        <p>Still stuck? <a href="<?php echo esc_url($support_url); ?>" target="_blank" rel="noopener noreferrer">Ask on the support forum</a> and share your site's domain. Never post your restore code: anyone who has it can restore your backup.</p>
                                     </div>
                                     <div class="ocm-step">
                                         <div class="ocm-step-title">4. Important info</div>
