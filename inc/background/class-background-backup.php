@@ -151,6 +151,9 @@ class OCM_BackgroundBackup extends WP_Background_Process
         if (WP_DEBUG !== true) {
             OCM_Backup::deleteDir(OCM_Backup::get_backup_work_path(), 'Cleaning temporary directory', $urls);
         }
+        // Under WP_DEBUG the work files stay, but the parts' archives are gone
+        // after their uploads: don't keep the empty run dir.
+        OCM_Backup::remove_empty_backup_work_dir($run_id);
 
         if (!OCM_Backup::send_restore_code_email()) {
             // Terminal marker: without the restore code email the backup is unusable.

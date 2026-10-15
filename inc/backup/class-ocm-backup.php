@@ -372,6 +372,12 @@ class OCM_Backup
     const PRISTINE_DUMP_SUFFIX = '.ocm-orig';
     /** A DB-import step cut off this many times in a row stops the restore. */
     const MAX_DB_UNIT_ATTEMPTS = 3;
+    /** write_deny_files(): name => contents. */
+    const DENY_FILES = array(
+        '.htaccess' => "Deny from all\nRequire all denied\n",
+        'web.config' => '<configuration><system.webServer><authorization><deny users="*" /></authorization></system.webServer></configuration>',
+        'index.php' => "<?php\nhttp_response_code(404);\n",
+    );
 
 
     public static function cancel_actions()
@@ -1355,7 +1361,10 @@ class OCM_Backup
         One_Click_Migration::write_to_log('Backup failed: ' . self::short_failure_reason($message));
         One_Click_Migration::reset_actions_start_mark();
         update_option('ocm_is_stopped', true, true);
-        self::release_backup_run(self::get_stored_backup_run_id());
+        $run_id = self::get_stored_backup_run_id();
+        // Before the release, which forgets the run id the dir is named after.
+        self::remove_empty_backup_work_dir($run_id);
+        self::release_backup_run($run_id);
     }
 
     public static function fail_part_upload($part, $message)
@@ -4146,12 +4155,7 @@ class OCM_Backup
      */
     private static function write_deny_files($dir)
     {
-        $files = array(
-            '.htaccess' => "Deny from all\nRequire all denied\n",
-            'web.config' => '<configuration><system.webServer><authorization><deny users="*" /></authorization></system.webServer></configuration>',
-            'index.php' => "<?php\nhttp_response_code(404);\n",
-        );
-        foreach ($files as $name => $contents) {
+        foreach (self::DENY_FILES as $name => $contents) {
             if (!is_file($dir . '/' . $name)) {
                 @file_put_contents($dir . '/' . $name, $contents);
             }
@@ -4289,6 +4293,50 @@ class OCM_Backup
                 self::deleteDir($private . '/' . $entry, $action_log, null);
             }
         }
+    }
+
+    /**
+     * Remove a backup run's work dir once it holds nothing but deny files.
+     * Each part deletes its archive after the upload, and the completion
+     * cleanup is skipped under WP_DEBUG, so a finished or failed run would
+     * otherwise leave an empty backup-<run>/ behind. A dir that still holds
+     * work files is left for Stop & Reset. Never touches the parent work dir
+     * or another run's dir.
+     *
+     * @param string|null $run_id Defaults to this request's run.
+     * @return bool Whether the dir is gone.
+     */
+    public static function remove_empty_backup_work_dir($run_id = null)
+    {
+        $dir = rtrim(self::get_backup_work_path($run_id), '/\\');
+        if (!is_dir($dir)) {
+            return true;
+        }
+        $entries = @scandir($dir);
+        if (!is_array($entries)) {
+            return false;
+        }
+        $deny_files = array();
+        foreach ($entries as $entry) {
+            if ('.' === $entry || '..' === $entry) {
+                continue;
+            }
+            if (!array_key_exists($entry, self::DENY_FILES) || !is_file($dir . '/' . $entry)) {
+                return false;
+            }
+            $deny_files[] = $entry;
+        }
+        foreach ($deny_files as $name) {
+            @unlink($dir . '/' . $name);
+        }
+        if (@rmdir($dir)) {
+            return true;
+        }
+        // Something was written meanwhile: keep the dir covered.
+        if ($deny_files) {
+            self::write_deny_files($dir);
+        }
+        return false;
     }
 
     /**
@@ -5860,7 +5908,7 @@ class OCM_Backup
                 $dump = basename($filepath);
                 if (!empty($state['prepared'][$dump])) {
                     // Recorded already; drop the untouched copy a cut-off worker left.
-                    @unlink($filepath . self::PRISTINE_DUMP_SUFFIX);
+                    self::unlink_if_present($filepath . self::PRISTINE_DUMP_SUFFIX);
                     continue;
                 }
                 if (!self::begin_db_unit($state, sprintf('rewriting the table prefix in "%s"', $dump))) {
@@ -5885,7 +5933,7 @@ class OCM_Backup
                 }
                 $state['prepared'][$dump] = true;
                 self::end_db_unit($state);
-                @unlink($filepath . self::PRISTINE_DUMP_SUFFIX);
+                self::unlink_if_present($filepath . self::PRISTINE_DUMP_SUFFIX);
                 self::rekey_binary_preflight_after_prefix_rewrite($pre_rewrite_key);
                 self::maybe_yield_db_phase('table prefix rewrite');
             }
@@ -6182,7 +6230,7 @@ class OCM_Backup
     private static function prepare_dump_for_staging_once($filepath, $dest_prefix, $staging_prefix, $source_prefix)
     {
         $pristine = $filepath . self::PRISTINE_DUMP_SUFFIX;
-        @unlink($pristine . '.tmp');
+        self::unlink_if_present($pristine . '.tmp');
         if (is_file($pristine)) {
             if (!@rename($pristine, $filepath)) {
                 One_Click_Migration::write_to_log(sprintf(
@@ -6201,7 +6249,7 @@ class OCM_Backup
             $kept = @copy($filepath, $pristine . '.tmp') && @rename($pristine . '.tmp', $pristine);
         }
         if (!$kept) {
-            @unlink($pristine . '.tmp');
+            self::unlink_if_present($pristine . '.tmp');
             One_Click_Migration::write_to_log(sprintf(
                 'Error: Could not keep an untouched copy of "%s" while rewriting its table prefix. Please check disk quota and write permissions.',
                 basename($filepath)
@@ -6209,6 +6257,21 @@ class OCM_Backup
             return false;
         }
         return OCM_SQL_Utils::prepare_sql_dump_for_staging($filepath, $dest_prefix, $staging_prefix, $source_prefix);
+    }
+
+    /**
+     * Delete a work file that is often not there. The error handler logs
+     * @-suppressed warnings too, so a bare @unlink() of a missing file adds a
+     * SYSLOG "[PHP ERR][WARN]" line to the restore log.
+     *
+     * @param string $path
+     * @return void
+     */
+    private static function unlink_if_present($path)
+    {
+        if (is_file($path) || is_link($path)) {
+            @unlink($path);
+        }
     }
 
     /**

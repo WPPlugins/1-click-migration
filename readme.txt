@@ -4,7 +4,7 @@ Tags: backup, migrate, migration, restore, clone
 Requires at least: 4.0
 Tested up to: 7.1
 Requires PHP: 7.4
-Stable tag: 3.1.21
+Stable tag: 3.1.22
 Author URI: https://1clickmigration.com
 License: GPLv3 or later
 License URI: http://www.gnu.org/licenses/gpl-3.0.html
@@ -122,6 +122,10 @@ All of them! Migrate WordPress sites between any hosting providers: Bluehost, Si
 4. Enter the restore code on the destination site to finish your WordPress migration.
 
 == Changelog ==
+= 3.1.22 =
+* **Quieter restore log**: Restores no longer log a warning for each temporary copy of a database file that was already removed.
+* **No empty folders after backups**: A finished or failed backup now removes its empty work folder instead of leaving one behind for every run.
+
 = 3.1.21 =
 * **Restores survive strict server time limits**: Some hosts end a PHP request after 30 seconds, sooner than the plugin expected. Backup and restore workers now hand over to the next worker before that limit (20 seconds by default) without losing finished steps. If a worker is cut off during the database import anyway, the next one resumes the import where it stopped, instead of stopping with "the backup's main options table didn't pass the check".
 * **Restore files kept out of the web root**: The restore used to unpack the database dump and the other parts into `wp-content/ocm_restore`. Servers that ignore `.htaccess` (such as nginx) could serve those files to anyone during a restore and after a failed one. Restore and backup work files now go to the private folder outside the web root. Where that isn't possible, they go to a randomly named, access-protected folder. A leftover `wp-content/ocm_restore` from an older version is removed.
@@ -339,6 +343,9 @@ All of them! Migrate WordPress sites between any hosting providers: Bluehost, Si
 * Initial release & dependency updates
 
 == Upgrade Notice ==
+
+= 3.1.22 =
+Maintenance release: a quieter restore log, and backups no longer leave empty work folders behind. Includes all 3.1.21 changes.
 
 = 3.1.21 =
 Backups and restores now work on hosts that end PHP requests after 30 seconds, and a cut-off database import resumes. Restore files no longer sit in the web root, sites in the same folder get separate logs, and every stopped restore cleans up after itself.
