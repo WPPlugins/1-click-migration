@@ -4,7 +4,7 @@
  * Plugin Name: 1 Click Migration
  * Plugin URI: https://wordpress.org/plugins/1-click-migration/
  * Description: Migrate, copy, or clone your entire site with 1 click. <strong>Any host, no size limitation, no premium versions.</strong>
- * Version: 3.1.20
+ * Version: 3.1.21
  * Author: 1ClickMigration
  * Author URI: https://1clickmigration.com/
  * Text Domain: 1-click-migration
@@ -24,9 +24,14 @@ define('OCM_PLUGIN_ROOT', plugin_dir_path(__FILE__));
 define('OCM_PLUGIN_WRITABLE_PATH', WP_CONTENT_DIR . '/tmp/');
 define('OCM_MAIN_FILE', __FILE__);
 define('OCM_SET_TIME_LIMIT', 900);
+define('OCM_WORKER_TIME_BUDGET', 20);
+
+require_once __DIR__ . '/inc/handler/class-ocm-private-dir.php';
 
 define('OCM_DEBUG_LOG_FILENAME', 'ocm_debug.log');
-define('OCM_DEBUG_LOG_DIR', dirname(rtrim(ABSPATH, '/\\')) . '/.ocm-private');
+// This site's private directory (log, restore worker lock), inside the
+// .ocm-private shared with sibling installs.
+define('OCM_DEBUG_LOG_DIR', OCM_Private_Dir::site_dir_for(ABSPATH));
 define('OCM_DEBUG_LOG_FILE', OCM_DEBUG_LOG_DIR . '/' . OCM_DEBUG_LOG_FILENAME);
 define('OCM_DEBUG_LOG_FILE_URL', '');
 define('OCM_WP_CONFIG_FILE', ABSPATH . 'wp-config.php');
@@ -57,6 +62,28 @@ class One_Click_Migration
     const BACKUP_ISOLATION_TOKEN_HASH_OPTION = 'ocm_backup_isolation_token_hash';
     const BACKUP_ISOLATION_ALLOWED_PLUGINS_OPTION = 'ocm_backup_isolation_allowed_plugins';
 
+    /**
+     * Seconds between two S3 copies of the debug log from one request
+     * (filter: ocm_log_upload_interval; 0 uploads on every line). Each copy
+     * PUTs the whole log, about 0.3-0.5 s on a typical host.
+     */
+    const LOG_UPLOAD_INTERVAL = 10;
+
+    /**
+     * Lines that go to S3 as soon as they are written: the terminal markers
+     * 1CmSyncers/monitor_lib.php alerts on (latestTerminalEvent()). Every line
+     * after one of them in the same request goes at once too: the monitor reads
+     * the lines that follow it (review_ask: none (files-only) / (stopped)).
+     */
+    const LOG_UPLOAD_NOW_MARKERS = array(
+        'Backup completed',
+        'Backup failed:',
+        'Restore completed',
+        'Restore stopped',
+        'Restore failed:',
+        'Restore finished without:',
+    );
+
     /** @var OCM_BackgroundBackup */
     public static $process_backup_single;
 
@@ -65,6 +92,24 @@ class One_Click_Migration
 
     /** @var int Last transfer_heartbeat() write, for its 10-second throttle. */
     private static $last_transfer_heartbeat = 0;
+
+    /** @var string Presigned log URL this request last uploaded the log to. */
+    private static $log_uploaded_url = '';
+
+    /** @var float microtime(true) when that upload finished. */
+    private static $log_uploaded_at = 0.0;
+
+    /**
+     * @var array|null Lines written but not yet in S3: the log URL, and the
+     *                 local log's size and first bytes when they were written.
+     */
+    private static $log_upload_pending = null;
+
+    /** @var int 0 = no shutdown flush registered, 1 = registered, 2 = running. */
+    private static $log_shutdown_state = 0;
+
+    /** @var bool This request logged a LOG_UPLOAD_NOW_MARKERS line. */
+    private static $log_terminal_written = false;
 
     /** @var string */
     private static $version;
@@ -101,6 +146,7 @@ class One_Click_Migration
     {
         add_action('admin_menu', array(OCM_Admin_Page::class, 'add_admin_page'));
         add_action('admin_init', array(__CLASS__, 'register_settings'));
+        add_action('admin_init', array(OCM_Backup::class, 'remove_legacy_restore_workspace'));
         // add_action('admin_init', array(__CLASS__, 'ensure_mu_plugin_isolation_shim')); // disabled while debugging restore
         add_action('admin_enqueue_scripts', array(__CLASS__, 'admin_styles'));
         add_action('template_redirect', array(__CLASS__, 'handle_maintenance_mode'));
@@ -393,6 +439,7 @@ class One_Click_Migration
       delete_option('ocm_extra_domain_candidates');
       delete_option('ocm_restore_url_plan');
       delete_option('ocm_active_backup_run');
+      delete_option('ocm_active_restore_run');
       delete_option('ocm_backup_uploaded_parts');
       self::clear_backup_plugin_isolation();
       delete_option('ocm_backup_compress_retry_db');
@@ -569,6 +616,13 @@ class One_Click_Migration
       $line = $timestamp . ' - ' . $string;
 
       if($urls){
+        $log_url = is_object($urls) && !empty($urls->log) ? (string) $urls->log : '';
+
+        // Lines held back for another log URL go there before this line is
+        // appended, so that copy never carries lines written under this one.
+        if (self::$log_upload_pending && self::$log_upload_pending['url'] !== $log_url) {
+            self::flush_log_upload();
+        }
 
         // If ocm_debug doesn't exist, make sure to grab the latest from S3 so we can append.
         // Download to memory first; only write the local file on 200 so a failed download
@@ -595,12 +649,146 @@ class One_Click_Migration
         fwrite($log_file, $line . PHP_EOL);
         fclose($log_file);
 
+        // Every S3 copy PUTs the whole log, so copy at most every
+        // LOG_UPLOAD_INTERVAL seconds; flush_log_upload() sends the rest.
+        if ($log_url !== '') {
+            if (self::log_upload_due($log_url, $string)) {
+                self::upload_log($log_url, self::$log_shutdown_state !== 2);
+            } else {
+                self::defer_log_upload($log_url);
+            }
+        }
+
+      }
+
+      if(!$urls){
+          if (self::$log_upload_pending) {
+              self::flush_log_upload();
+          }
+
+          $log_file = fopen($file, 'ab');
+          fwrite($log_file, $line . PHP_EOL);
+          fclose($log_file);
+
+      }
+
+    }
+
+    /**
+     * Upload log lines write_to_log() held back. Called before a worker
+     * dispatches the next one, before the restore code is emailed, before the
+     * local log is deleted and at shutdown, so no line stays out of S3.
+     */
+    public static function flush_log_upload()
+    {
+        $pending = self::$log_upload_pending;
+        if (!$pending) {
+            return;
+        }
+        self::$log_upload_pending = null;
+
+        // The log only grows during a run. A shorter file or other first bytes
+        // mean another request deleted or restarted it: never send that log
+        // to this run's URL.
+        $file = OCM_DEBUG_LOG_FILE;
+        clearstatcache(true, $file);
+        if (!is_file($file)
+            || (int) filesize($file) < $pending['size']
+            || self::read_log_head($pending['head_len']) !== $pending['head']
+        ) {
+            return;
+        }
+
+        self::upload_log($pending['url'], false);
+    }
+
+    /** Shutdown callback. Lines logged after it ran (later shutdown callbacks) upload at once. */
+    public static function flush_log_upload_on_shutdown()
+    {
+        self::$log_shutdown_state = 2;
+        self::flush_log_upload();
+    }
+
+    private static function log_upload_due($url, $message)
+    {
+        foreach (self::LOG_UPLOAD_NOW_MARKERS as $marker) {
+            if (strpos($message, $marker) !== false) {
+                self::$log_terminal_written = true;
+                return true;
+            }
+        }
+
+        // The first line for a URL in a request uploads at once, as before:
+        // that keeps the no_bucket redirect on the request's first write.
+        if (self::$log_terminal_written
+            || self::$log_shutdown_state === 2
+            || $url !== self::$log_uploaded_url
+        ) {
+            return true;
+        }
+
+        $interval = function_exists('apply_filters')
+            ? (float) apply_filters('ocm_log_upload_interval', self::LOG_UPLOAD_INTERVAL)
+            : (float) self::LOG_UPLOAD_INTERVAL;
+
+        return microtime(true) - self::$log_uploaded_at >= $interval;
+    }
+
+    private static function defer_log_upload($url)
+    {
+        $file = OCM_DEBUG_LOG_FILE;
+        clearstatcache(true, $file);
+        $size = (int) @filesize($file);
+
+        if (!self::$log_upload_pending) {
+            $head_len = min($size, 512);
+            self::$log_upload_pending = array(
+                'url' => $url,
+                'head_len' => $head_len,
+                'head' => self::read_log_head($head_len),
+            );
+        }
+        self::$log_upload_pending['size'] = $size;
+
+        if (self::$log_shutdown_state === 0) {
+            self::$log_shutdown_state = 1;
+            register_shutdown_function(array(__CLASS__, 'flush_log_upload_on_shutdown'));
+        }
+    }
+
+    private static function read_log_head($length)
+    {
+        if ($length <= 0) {
+            return '';
+        }
+        $fh = @fopen(OCM_DEBUG_LOG_FILE, 'rb');
+        if (!$fh) {
+            return false;
+        }
+        $head = (string) fread($fh, $length);
+        fclose($fh);
+        return $head;
+    }
+
+    /**
+     * PUT the whole local log to the presigned log URL. A 404 means the bucket
+     * is gone: drop the local log and, unless called from a flush, send the
+     * admin to the no_bucket notice.
+     */
+    private static function upload_log($url, $may_redirect)
+    {
+        self::$log_upload_pending = null;
+        $body = @file_get_contents(OCM_DEBUG_LOG_FILE);
+        if ($body === false) {
+            return;
+        }
+
         try {
             $request = new Request(
                 'PUT',
-                $urls->log,
+                $url,
                 [],
-                file_get_contents($file)
+                $body
             );
 
             $client = new Client();
@@ -608,22 +796,18 @@ class One_Click_Migration
         } catch (Exception $e) {
             if ($e->getCode() === 404) {
                 self::delete_log_file();
-                wp_safe_redirect(admin_url('tools.php?page=one-click-migration&message=no_bucket'));
-                exit;
+                if ($may_redirect) {
+                    wp_safe_redirect(admin_url('tools.php?page=one-click-migration&message=no_bucket'));
+                    exit;
+                }
+                return;
             }
-        }catch(ClientException $e){
+            // Try again at the next upload, hand-over or shutdown.
+            self::defer_log_upload($url);
+        }
 
-          }
-
-      }
-
-      if(!$urls){
-          $log_file = fopen($file, 'ab');
-          fwrite($log_file, $line . PHP_EOL);
-          fclose($log_file);
-
-      }
-
+        self::$log_uploaded_url = $url;
+        self::$log_uploaded_at = microtime(true);
     }
 
     public static function ensure_private_log_directory()
@@ -633,26 +817,12 @@ class One_Click_Migration
             return true;
         }
 
-        if (!is_dir(OCM_DEBUG_LOG_DIR)
-            && !@mkdir(OCM_DEBUG_LOG_DIR, 0700, true)
-            && !is_dir(OCM_DEBUG_LOG_DIR)
-        ) {
+        if (!OCM_Private_Dir::ensure(OCM_DEBUG_LOG_DIR)) {
             return false;
         }
 
-        if (!is_file(OCM_DEBUG_LOG_DIR . '/.htaccess')) {
-            @file_put_contents(OCM_DEBUG_LOG_DIR . '/.htaccess', "Deny from all\nRequire all denied\n");
-        }
-        if (!is_file(OCM_DEBUG_LOG_DIR . '/web.config')) {
-            @file_put_contents(
-                OCM_DEBUG_LOG_DIR . '/web.config',
-                '<configuration><system.webServer><authorization><deny users="*" /></authorization></system.webServer></configuration>'
-            );
-        }
-        if (!is_file(OCM_DEBUG_LOG_DIR . '/index.php')) {
-            @file_put_contents(OCM_DEBUG_LOG_DIR . '/index.php', "<?php\nhttp_response_code(404);\n");
-        }
-
+        // The plugin-folder log was this site's own, so it moves in. The one
+        // older versions kept in the shared .ocm-private root stays put.
         $legacy_file = OCM_PLUGIN_ROOT . OCM_DEBUG_LOG_FILENAME;
         if (is_file($legacy_file) && !is_file(OCM_DEBUG_LOG_FILE)) {
             if (!@rename($legacy_file, OCM_DEBUG_LOG_FILE) && @copy($legacy_file, OCM_DEBUG_LOG_FILE)) {
@@ -712,6 +882,26 @@ class One_Click_Migration
     public static function get_timeout()
     {
         return (self::get_current_max_execution_time()-5) > 0 ? self::get_current_max_execution_time()-5 : OCM_SET_TIME_LIMIT;
+    }
+
+    /**
+     * Seconds a backup or restore worker works before it hands over to a new one.
+     *
+     * set_current_max_execution_time() raises PHP's own limit, but the server
+     * can still kill the request sooner: PHP-FPM's request_terminate_timeout
+     * sends SIGTERM (no shutdown functions run), and those limits are often
+     * 30 s, near php.ini's max_execution_time. So stay well under both.
+     *
+     * @return int
+     */
+    public static function get_worker_time_budget()
+    {
+        $budget = min(self::get_timeout(), OCM_WORKER_TIME_BUDGET);
+        $ini_limit = (int) self::get_default_max_execution_time();
+        if ($ini_limit > 0) {
+            $budget = min($budget, max(10, $ini_limit - 10));
+        }
+        return max(5, (int) apply_filters('ocm_worker_time_budget', $budget));
     }
 
     public static function ensure_mu_plugin_isolation_shim()
@@ -918,14 +1108,13 @@ PHP;
             delete_option(\OCM\OCM_SQL_Utils::OPTION_STAGING_PREFIX);
         }
 
-        // Delete ocm_restore folder
+        // Delete the restore workspace
         if(!WP_DEBUG){
-          if (is_dir(WP_CONTENT_DIR . '/ocm_restore/')) {
-              OCM_Backup::deleteDir(WP_CONTENT_DIR . '/ocm_restore/', 'Deleting ocm_restore', null);
-          }
+          OCM_Backup::delete_restore_workspaces('Deleting restore workspace');
         }
 
-        // Clear tmp folder
+        // Clear backup work files (private work dir, then the tmp folder)
+        OCM_Backup::delete_private_backup_work_dirs('Deleting TMP Folder');
         if (is_dir(OCM_PLUGIN_WRITABLE_PATH)) {
             OCM_Backup::deleteDir(OCM_PLUGIN_WRITABLE_PATH, 'Deleting TMP Folder', null);
         }
@@ -952,6 +1141,9 @@ PHP;
 
     public static function delete_log_file()
     {
+        // Lines this request held back still belong in the old log's S3 copy.
+        self::flush_log_upload();
+
         $file = OCM_DEBUG_LOG_FILE;
         if (file_exists($file)) {
             unlink($file);

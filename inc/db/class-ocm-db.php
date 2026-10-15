@@ -45,8 +45,9 @@ class OCM_DB {
 	/**
 	 * Record hosts from cells the current rewrite already reads.
 	 */
-	public function enable_url_collection() {
-		$this->url_found = array();
+	public function enable_url_collection( $found = array() ) {
+		// A resumed rewrite continues the host list the earlier workers built.
+		$this->url_found = is_array( $found ) ? $found : array();
 	}
 
 	/**
@@ -96,6 +97,11 @@ class OCM_DB {
 	 * oversized cutoff (refuse when max_row×6.5 > current batch budget).
 	 */
 	const KEYSET_ROW_MEMORY_MULTIPLIER = 6.5;
+
+	/**
+	 * Inside a keyset page, ask should_yield every this many rows.
+	 */
+	const YIELD_CHECK_ROWS = 50;
 
 	/**
 	 * Returns the current page size with memory-aware calculation.
@@ -590,13 +596,32 @@ class OCM_DB {
 	 *
 	 * @link https://interconnectit.com/products/search-and-replace-for-wordpress-databases/
 	 *
+	 * A restore spread over several workers passes, besides the replacement args:
+	 * - should_yield: callable, true once the worker must stop. Checked every
+	 *   YIELD_CHECK_ROWS rows and after each page of a keyset table.
+	 * - resume_key: keyset position (values in key-column order) the first
+	 *   table's rows up to and including were already rewritten.
+	 * - continuing: an earlier call already logged the start line.
+	 * - log_summary: false leaves the closing peak_bytes line to the caller.
+	 * A yielded report has 'yielded' => true and 'cursor' => array('table',
+	 * 'last_key'): the table to continue with and its keyset position.
+	 *
 	 * @access public
 	 * @param  array $tables Tables to run the replacement on.
 	 * @param  array $args   Replacement args; optional page_size for tests.
 	 * @return array
 	 */
 	public function search_replace_db( $tables, $args ) {
-		One_Click_Migration::write_to_log('Starting to update URLs in database');
+		if ( empty( $args['continuing'] ) ) {
+			One_Click_Migration::write_to_log('Starting to update URLs in database');
+		}
+		$should_yield = isset( $args['should_yield'] ) && is_callable( $args['should_yield'] )
+			? $args['should_yield']
+			: null;
+		$resume_key = isset( $args['resume_key'] ) && is_array( $args['resume_key'] ) && $args['resume_key']
+			? array_values( $args['resume_key'] )
+			: null;
+		$tables = is_array( $tables ) ? array_values( $tables ) : array();
 
 		$pairs = $this->replacement_pairs_from_args( $args );
 		$host_needles = $this->host_needles_from_pairs( $pairs );
@@ -621,9 +646,11 @@ class OCM_DB {
 			'unpageable_table' => null,
 			'oversized_table' => null,
 			'paging_stuck_table' => null,
+			'yielded' => false,
+			'cursor' => null,
 		);
 
-		foreach ($tables as $table) {
+		foreach ($tables as $table_index => $table) {
 			// Load up the default settings for this chunk.
 			$table = esc_sql( $table );
 
@@ -718,6 +745,16 @@ class OCM_DB {
 
 			$current_row = 0;
 			$last_key    = null; // list of key values in column order, or null.
+			if ( 0 === $table_index && null !== $resume_key ) {
+				// Rows up to the saved position are already rewritten; a second
+				// pass could replace inside a new value that contains the old one.
+				if ( 'keyset' !== $path || count( $resume_key ) !== count( $key_columns ) ) {
+					$table_report['errors'][] = sprintf( 'Could not resume %s at its saved position.', $table );
+					break;
+				}
+				$last_key = $resume_key;
+			}
+			$yield_now = false;
 
 			while ( true ) {
 				$this->touch_replace_limits();
@@ -899,6 +936,16 @@ class OCM_DB {
 						}
 					}
 
+					// Every row before $last_key is done, so a long page can stop
+					// here and the next worker continues after it.
+					if ( $should_yield && 'keyset' === $path && null !== $last_key
+						&& 0 === ( $current_row % self::YIELD_CHECK_ROWS )
+						&& call_user_func( $should_yield )
+					) {
+						$yield_now = true;
+						break;
+					}
+
 				} // end row loop
 
 				// Flush the results after each page.
@@ -928,8 +975,14 @@ class OCM_DB {
 					}
 				}
 
-				if ( 'whole' === $path || count( $data ) < $limit ) {
+				if ( ! $yield_now && ( 'whole' === $path || count( $data ) < $limit ) ) {
 					break;
+				}
+
+				if ( $yield_now || ( $should_yield && 'keyset' === $path && call_user_func( $should_yield ) ) ) {
+					$table_report['yielded'] = true;
+					$table_report['cursor'] = array( 'table' => (string) $table, 'last_key' => $last_key );
+					break 2;
 				}
 
 			} // end page loop
@@ -945,6 +998,7 @@ class OCM_DB {
 		if ( empty( $table_report['unpageable_table'] )
 			&& empty( $table_report['oversized_table'] )
 			&& empty( $table_report['paging_stuck_table'] )
+			&& ( ! isset( $args['log_summary'] ) || $args['log_summary'] )
 		) {
 			One_Click_Migration::write_to_log( sprintf(
 				'SYSLOG: URL update: peak_bytes=%d memory_limit=%s',

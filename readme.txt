@@ -4,7 +4,7 @@ Tags: backup, migrate, migration, restore, clone
 Requires at least: 4.0
 Tested up to: 7.1
 Requires PHP: 7.4
-Stable tag: 3.1.20
+Stable tag: 3.1.21
 Author URI: https://1clickmigration.com
 License: GPLv3 or later
 License URI: http://www.gnu.org/licenses/gpl-3.0.html
@@ -122,6 +122,16 @@ All of them! Migrate WordPress sites between any hosting providers: Bluehost, Si
 4. Enter the restore code on the destination site to finish your WordPress migration.
 
 == Changelog ==
+= 3.1.21 =
+* **Restores survive strict server time limits**: Some hosts end a PHP request after 30 seconds, sooner than the plugin expected. Backup and restore workers now hand over to the next worker before that limit (20 seconds by default) without losing finished steps. If a worker is cut off during the database import anyway, the next one resumes the import where it stopped, instead of stopping with "the backup's main options table didn't pass the check".
+* **Restore files kept out of the web root**: The restore used to unpack the database dump and the other parts into `wp-content/ocm_restore`. Servers that ignore `.htaccess` (such as nginx) could serve those files to anyone during a restore and after a failed one. Restore and backup work files now go to the private folder outside the web root. Where that isn't possible, they go to a randomly named, access-protected folder. A leftover `wp-content/ocm_restore` from an older version is removed.
+* **Separate logs for sites in the same folder**: Sites installed side by side in one folder no longer share the migration log and the restore lock. Each site now has its own folder inside `.ocm-private`.
+* **Every stopped restore cleans up**: Each restore that stops with "No changes were made" now clears the success and review prompts, the restore queue and any temporary tables. This includes a database part that can't be downloaded.
+* **Restore right after a stopped one**: A restore started from the admin page soon after a failed or stopped run could stop at once with "the database could not be imported". The progress check no longer clears anything while a new restore starts.
+* **No leftover restore workers**: After a restore fails or stops, no worker from that run keeps downloading, decrypting or logging, and a new restore no longer overlaps a worker from the previous run.
+* **Source site's scheduled events stay behind**: A restore no longer copies the source site's scheduled 1 Click Migration events to the destination.
+* **Faster logging**: The migration log is now sent to storage at most every 10 seconds and immediately when a run ends, instead of after every line. This made backups and restores slower.
+
 = 3.1.20 =
 * **Site addresses updated before the swap**: The restore now updates site addresses on the imported copy of the database, before it replaces the live database and files. If that step can't finish safely (for example a table with no primary key, a row too large for the PHP memory limit, or the memory limit itself being reached), the restore stops with no changes made to the site, instead of leaving it half-restored.
 * **Restore never resumes the source's backup**: A backup's database is dumped while that backup is still running. After a restore, the destination could pick up the source site's unfinished backup and upload into the source's storage. The destination now keeps its own plugin state when the database is swapped in, and a backup can't run while a restore is in progress.
@@ -329,6 +339,9 @@ All of them! Migrate WordPress sites between any hosting providers: Bluehost, Si
 * Initial release & dependency updates
 
 == Upgrade Notice ==
+
+= 3.1.21 =
+Backups and restores now work on hosts that end PHP requests after 30 seconds, and a cut-off database import resumes. Restore files no longer sit in the web root, sites in the same folder get separate logs, and every stopped restore cleans up after itself.
 
 = 3.1.20 =
 Includes all 3.1.19 changes. Restores now update site addresses before swapping in the database and files, and stop cleanly with no changes made if that step fails. A restore can no longer resume the source site's backup, and only one restore worker runs at a time.

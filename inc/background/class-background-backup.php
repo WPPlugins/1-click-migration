@@ -14,10 +14,12 @@ class OCM_BackgroundBackup extends WP_Background_Process
     {
         parent::__construct();
 
+        // Hand over well before the server's hard request limit, which can be
+        // shorter than the max_execution_time this plugin sets.
         add_filter(
             $this->getIdentifier() . '_default_time_limit',
             static function () {
-                return One_Click_Migration::get_timeout();
+                return One_Click_Migration::get_worker_time_budget();
             }
         );
 
@@ -27,6 +29,16 @@ class OCM_BackgroundBackup extends WP_Background_Process
     protected function getIdentifier()
     {
         return $this->identifier;
+    }
+
+    /**
+     * Upload the log lines this request held back before the next worker
+     * starts, so its first log upload cannot race this one's shutdown upload.
+     */
+    public function dispatch()
+    {
+        One_Click_Migration::flush_log_upload();
+        return parent::dispatch();
     }
 
     public function add_plugin_isolation_header($args)

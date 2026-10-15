@@ -13,10 +13,12 @@ class OCM_BackgroundRestore extends WP_Background_Process
     {
         parent::__construct();
 
+        // Hand over well before the server's hard request limit, which can be
+        // shorter than the max_execution_time this plugin sets.
         add_filter(
             $this->getIdentifier() . '_default_time_limit',
             static function () {
-                return One_Click_Migration::get_timeout();
+                return One_Click_Migration::get_worker_time_budget();
             }
         );
     }
@@ -24,6 +26,16 @@ class OCM_BackgroundRestore extends WP_Background_Process
     protected function getIdentifier()
     {
         return $this->identifier;
+    }
+
+    /**
+     * Upload the log lines this request held back before the next worker
+     * starts, so its first log upload cannot race this one's shutdown upload.
+     */
+    public function dispatch()
+    {
+        One_Click_Migration::flush_log_upload();
+        return parent::dispatch();
     }
 
     /**
@@ -40,7 +52,20 @@ class OCM_BackgroundRestore extends WP_Background_Process
      */
     protected function task($data)
     {
-        list($restore_code) = $data;
+        $restore_code = isset($data[0]) ? $data[0] : '';
+        $run_id = isset($data[1]) && is_string($data[1]) ? $data[1] : '';
+        if ('' !== $run_id) {
+            $stale = !OCM_Backup::is_current_restore_run($run_id);
+        } else {
+            // Item queued before run ids: valid only while no run is registered.
+            $stale = '' !== (string) get_option(OCM_Backup::RESTORE_RUN_OPTION, '');
+        }
+        // An item from a failed, stopped or replaced run must not restart that
+        // restore. Stop quietly: its run already wrote its terminal line (#96).
+        if ($stale) {
+            return self::RETURN_TYPE_STOP_PROCESSS;
+        }
+        OCM_Backup::set_restore_run_context($run_id);
 
         One_Click_Migration::write_to_log(' SYSLOG: *** RESTORE TASK STARTED ***');
         $result = OCM_Backup::start_restore_process($restore_code);
@@ -132,8 +157,10 @@ class OCM_BackgroundRestore extends WP_Background_Process
                 }
             }
 
-            // Update or delete current batch.
-            if ( ! empty( $batch->data ) ) {
+            // Update or delete current batch. A stopped restore is terminal:
+            // drop its batch so neither the cron healthcheck nor the watchdog
+            // can start it again (#96).
+            if ( ! empty( $batch->data ) && self::RETURN_TYPE_STOP_PROCESSS !== $isStopProcess ) {
                 $this->update( $batch->key, $batch->data );
             } else {
                 $this->delete( $batch->key );

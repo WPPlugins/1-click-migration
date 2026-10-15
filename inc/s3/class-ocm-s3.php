@@ -233,18 +233,28 @@ class OCM_S3
         $parts = isset($state['parts']) && is_array($state['parts']) ? $state['parts'] : [];
         $total_parts = (int) ceil($file_size / self::MULTIPART_CHUNK_SIZE);
 
+        $process = One_Click_Migration::$process_backup_single;
+        $can_hand_over = is_object($process)
+            && method_exists($process, 'time_exceeded')
+            && method_exists($process, 'remaining_time');
+        $parts_this_worker = 0;
+        $last_part_seconds = 0;
+
         for ($part_number = 1; $part_number <= $total_parts; $part_number++) {
             if (!empty($parts[$part_number])) {
                 continue;
             }
 
-            if (is_object(One_Click_Migration::$process_backup_single)
-                && method_exists(One_Click_Migration::$process_backup_single, 'remaining_time')
-                && One_Click_Migration::$process_backup_single->remaining_time() < 20) {
+            // Every worker uploads at least one part, so each hand-over moves the
+            // upload forward. After that, hand over once the budget is used up
+            // or the next part would likely run past it.
+            if ($can_hand_over && $parts_this_worker > 0
+                && ($process->time_exceeded() || $process->remaining_time() < $last_part_seconds)) {
                 One_Click_Migration::write_to_log("Process is Restarting");
-                One_Click_Migration::$process_backup_single->restart_task();
+                $process->restart_task();
             }
 
+            $part_started = microtime(true);
             $presign = self::lambda_action([
                 'action'      => 'presign_multipart_part',
                 'bucket_id'   => $bucket_id,
@@ -273,6 +283,12 @@ class OCM_S3
             $parts[$part_number] = $etag;
             $state['parts'] = $parts;
             update_option($state_option, $state, true);
+            // The upload moved forward, so the next worker continues it rather
+            // than retrying it: the retry limit counts attempts since the last
+            // stored part, and a long upload over many short workers never hits it.
+            update_option('ocm_backup_upload_retry_' . $folder_type, 0, true);
+            $parts_this_worker++;
+            $last_part_seconds = (int) ceil(microtime(true) - $part_started);
             One_Click_Migration::write_to_log(sprintf(
                 'Uploaded %s part %d/%d',
                 $folder_type,

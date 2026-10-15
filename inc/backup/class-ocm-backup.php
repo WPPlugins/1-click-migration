@@ -22,8 +22,23 @@ class OCM_Backup
     /** @var string Run owner captured by this PHP request. */
     private static $backup_run_id = '';
 
+    /** @var string Restore run this worker serves; '' outside a queued restore. */
+    private static $restore_run_id = '';
+
+    /** @var bool Once this worker's restore run has ended it stays ended. */
+    private static $restore_run_ended = false;
+
+    /** @var int Last time a long transfer re-read the restore run. */
+    private static $restore_run_checked_at = 0;
+
     const BACKUP_RUN_OPTION = 'ocm_active_backup_run';
+    const RESTORE_RUN_OPTION = 'ocm_active_restore_run';
     const BACKUP_UPLOADED_PARTS_OPTION = 'ocm_backup_uploaded_parts';
+
+    /** Restore workspace under wp-content when the private work dir can't be used. */
+    const RESTORE_WORKSPACE_FALLBACK_PREFIX = 'ocm_restore-';
+    /** Restore workspace of 3.1.20 and earlier, still removed by every cleanup. */
+    const LEGACY_RESTORE_WORKSPACE = 'ocm_restore';
 
     const STEP_BACKUP_CHILD_URL_GENERATED = 'urlGenerated';
     const STEP_BACKUP_CHILD_INITIATE = 'initiate';
@@ -48,6 +63,14 @@ class OCM_Backup
     const STEP_RESTORE_CHILD_THEMES_RESTORED = 'themesRestored';
     const STEP_RESTORE_CHILD_UPLOADS_RESTORED = 'UploadsRestored';
     const STEP_RESTORE_CHILD_RESTORE = 'restore';
+    /** In-flight import state for restore_db() (array; see db_import_state()). */
+    const STEP_RESTORE_CHILD_DB_IMPORT = 'dbImport';
+    /** Every dump imported into staging and the options gate passed. */
+    const STEP_RESTORE_CHILD_DB_IMPORTED = 'dbImported';
+    /** URL rewrite on the staging tables finished. */
+    const STEP_RESTORE_CHILD_DB_URLS = 'dbUrlsRewritten';
+    /** Staging tables are live. */
+    const STEP_RESTORE_CHILD_DB_PROMOTED = 'dbPromoted';
 
     const LOG_MESSAGE_BG_PROCESS_RESTARTING = 'Timeout approaching. Restarting';
     const LOG_MESSAGE_BG_PROCESS_RESTARTING_LOG = 'Notice: Please wait. This is taking longer than expected but we are still making progress';
@@ -327,6 +350,8 @@ class OCM_Backup
     private static $url_rewrite_unpageable_table = null;
     /** @var bool Memo for ensure_binary_preflight_before_file_replace() in one request. */
     private static $binary_preflight_passed = false;
+    /** @var bool This worker finished at least one DB-import step, so it may hand over. */
+    private static $db_phase_progress = false;
     private static $restore_files = [];
 
     /** Mid-restore db download/decrypt/extract failure (not a user exclude). */
@@ -341,6 +366,12 @@ class OCM_Backup
     /** Persisted binary-preflight verdict for this restore's dump fingerprint. */
     const OPTION_BINARY_PREFLIGHT = 'ocm_binary_preflight_verdict';
     const OPTION_RESTORE_PLUGINS_ISOLATED = 'ocm_restore_plugins_isolated';
+    /** Hosts the staging URL rewrite collected so far, for a resumed rewrite. */
+    const OPTION_RESTORE_URL_HOSTS = 'ocm_restore_url_hosts';
+    /** Suffix of the untouched copy kept while a dump's table prefix is rewritten. */
+    const PRISTINE_DUMP_SUFFIX = '.ocm-orig';
+    /** A DB-import step cut off this many times in a row stops the restore. */
+    const MAX_DB_UNIT_ATTEMPTS = 3;
 
 
     public static function cancel_actions()
@@ -514,6 +545,10 @@ class OCM_Backup
             One_Click_Migration::write_to_log(sprintf('Excluding "%s"', $excluding_str));
 
             self::save_system_data_to_log_file($username, $bucket_id);
+            One_Click_Migration::write_to_log(sprintf(
+                ' SYSLOG: Backup worker time budget: %ds',
+                One_Click_Migration::get_worker_time_budget()
+            ));
 
             // Server configuration diagnostics
             One_Click_Migration::write_to_log(' SYSLOG: Server IP: ' . ($_SERVER['SERVER_ADDR'] ?? 'unknown'));
@@ -721,17 +756,15 @@ class OCM_Backup
         One_Click_Migration::delete_log_file();
         $exluded_folders = self::get_excluded_folders();
 
-        if (!One_Click_Migration::$process_restore_single->is_queue_empty()) {
-            // Queue already exists, just process it directly
-            One_Click_Migration::$process_restore_single->trigger_processing();
-        } else {
-            One_Click_Migration::$process_restore_single->push_to_queue(array($restore_code));
+        // cancel_all_process() above emptied the queue; any item still left
+        // belongs to an older run and its worker drops it (#96).
+        $run_id = self::claim_restore_run();
+        One_Click_Migration::$process_restore_single->push_to_queue(array($restore_code, $run_id));
 
-            // Save the queue and use direct processing for maximum reliability
-            One_Click_Migration::$process_restore_single->save();
-            One_Click_Migration::write_to_log(' SYSLOG: Using direct restore processing for maximum compatibility');
-            One_Click_Migration::$process_restore_single->trigger_processing();
-        }
+        // Save the queue and use direct processing for maximum reliability
+        One_Click_Migration::$process_restore_single->save();
+        One_Click_Migration::write_to_log(' SYSLOG: Using direct restore processing for maximum compatibility');
+        One_Click_Migration::$process_restore_single->trigger_processing();
     }
 
     public static function start_restore_process($restore_code)
@@ -758,7 +791,7 @@ class OCM_Backup
             self::$binary_preflight_passed = false;
         }
 
-        $content_dir = WP_CONTENT_DIR . '/ocm_restore';
+        $content_dir = self::get_restore_work_path();
         $excluded_restore_files = get_option('ocm_excluded_folders', []);
 
         if (!self::check_is_complete_restore_step('init', self::STEP_RESTORE_CHILD_INITIATE)) {
@@ -777,6 +810,7 @@ class OCM_Backup
                 ));
                 One_Click_Migration::reset_actions_start_mark();
                 update_option('ocm_is_stopped', true, true);
+                self::end_restore_run();
                 wp_safe_redirect(admin_url('tools.php?page=one-click-migration&message=invalid_restore_code'));
                 exit;
             }
@@ -785,6 +819,7 @@ class OCM_Backup
             if ($url_plan && ($url_plan['bucket_id'] !== $redeem->bucket_id || $url_plan['destination'] !== site_url())) {
                 One_Click_Migration::write_to_log('Error: Restore preparation no longer matches this backup or destination. Check the backup again.');
                 update_option('ocm_is_stopped', true, true);
+                self::end_restore_run();
                 exit;
             }
             $bucket_id      = $redeem->bucket_id;
@@ -840,6 +875,7 @@ class OCM_Backup
                 One_Click_Migration::write_to_log('Restore failed: Not enough disk space or the hosting disk quota is exhausted (see previous log line).');
                 One_Click_Migration::reset_actions_start_mark();
                 update_option('ocm_is_stopped', true, true);
+                self::end_restore_run();
                 wp_safe_redirect(admin_url('tools.php?page=one-click-migration&message=insufficient_disk_space'));
                 exit;
             }
@@ -866,6 +902,10 @@ class OCM_Backup
 
             // One_Click_Migration::write_to_log(sprintf('Excluding "%s"', $exluding));
             self::save_system_data_to_log_file($username, $bucket_id);
+            One_Click_Migration::write_to_log(sprintf(
+                ' SYSLOG: Restore worker time budget: %ds',
+                One_Click_Migration::get_worker_time_budget()
+            ));
 
             foreach ($presigned_urls as $key => $generated_url) {
               $writable_file_path = OCM_PLUGIN_WRITABLE_PATH . $key . '.zip';
@@ -876,10 +916,12 @@ class OCM_Backup
 
             }
 
-            if (!self::prepare_restore_workspace($content_dir)) {
+            $attempted_dir = '';
+            $content_dir = self::prepare_restore_workspace($attempted_dir);
+            if ('' === $content_dir) {
                 One_Click_Migration::write_to_log(sprintf(
                     'Downloading restore files, Error: Directory "%s" could not be prepared. Please check the write permission for the parent directory "%s".',
-                    $content_dir, WP_CONTENT_DIR
+                    $attempted_dir, dirname($attempted_dir)
                 ));
                 exit;
             }
@@ -902,6 +944,11 @@ class OCM_Backup
 
         // Download each of the zip files
         foreach ($presigned_urls as $key => $download_url) {
+            // A worker left over from a failed, stopped or replaced run must not
+            // log or touch the restore workspace again (#96).
+            if (self::restore_run_ended()) {
+                return OCM_BackgroundRestore::RETURN_TYPE_STOP_PROCESSS;
+            }
             // Don't try and download the log file
 
             $excluded_restore_files = get_option('ocm_excluded_folders',[]);
@@ -964,6 +1011,9 @@ class OCM_Backup
 
                     self::$restore_download_requests[] = $key;
                     $downloadTmpPathFile = self::download_restore_file($download_url, $file_path, $key);
+                    if (self::restore_run_ended()) {
+                        return OCM_BackgroundRestore::RETURN_TYPE_STOP_PROCESSS;
+                    }
 
                     if(is_wp_error($downloadTmpPathFile)){
                       $error_message = $downloadTmpPathFile->get_error_message();
@@ -997,31 +1047,19 @@ class OCM_Backup
                       ));
                     }
 
+                    // The file is complete: record it before handing over, or the
+                    // next worker would redo the step and, once its retries ran
+                    // out, skip the part.
+                    self::set_complete_restore_step($key, self::STEP_RESTORE_CHILD_DOWNLOAD_TMP_PATH, $downloadTmpPathFile);
+                    self::set_complete_restore_step($key, self::STEP_RESTORE_CHILD_DOWNLOAD);
                     if (One_Click_Migration::$process_restore_single->time_exceeded()) {
-                        $next_retry_count = get_option('ocm_restore_download_retry_' . $key, 1);
-                        if($next_retry_count && $next_retry_count <= self::MAX_TRANSFER_RETRIES){
-                          One_Click_Migration::write_to_log("Process is Restarting");
-                          update_option('ocm_restore_download_retry_' . $key, $next_retry_count, true);
-                          One_Click_Migration::$process_restore_single->restart_task();
-                        }
-                        else{
-                          One_Click_Migration::write_to_log(sprintf('Skipping ' .$key.  ' Download'));
-                          One_Click_Migration::write_to_log(sprintf('Skipping ' .$key.  ' Decrypting'));
-                          One_Click_Migration::write_to_log(sprintf('Skipping ' .$key.  ' Extraction'));
-                          self::set_complete_restore_step($key, self::STEP_RESTORE_CHILD_DOWNLOAD);
-                          self::set_complete_restore_step($key, self::STEP_RESTORE_CHILD_DECRYPT);
-                          self::set_complete_restore_step($key, self::STEP_RESTORE_CHILD_EXTRACT);
-                          self::set_complete_restore_step($key, self::STEP_RESTORE_CHILD_DELETE_OLD_AND_MOVE_NEW);
-                          self::capture_skipped_restore_part($excluded_restore_files, $skipped_restore_files, $key);
-                          continue;
-                        }
+                        One_Click_Migration::write_to_log("Process is Restarting");
+                        One_Click_Migration::$process_restore_single->restart_task();
                     }
-                    if (!One_Click_Migration::$process_restore_single->time_exceeded()) {
-
-                      self::set_complete_restore_step($key, self::STEP_RESTORE_CHILD_DOWNLOAD_TMP_PATH, $downloadTmpPathFile);
-                      self::set_complete_restore_step($key, self::STEP_RESTORE_CHILD_DOWNLOAD);
-                  }
                 }
+              }
+              if (self::restore_run_ended()) {
+                  return OCM_BackgroundRestore::RETURN_TYPE_STOP_PROCESSS;
               }
               if(is_dir($content_dir)){
                 $retry_count = get_option('ocm_restore_decrypt_retry_' . $key, 0);
@@ -1073,6 +1111,9 @@ class OCM_Backup
                   $aes_key_b64 = get_option('ocm_aes_key');
                   $aes_key = $aes_key_b64 ? base64_decode($aes_key_b64) : '';
                   $unencrypted_zip = self::decryptZipFile($file_path, $aes_key);
+                  if (self::restore_run_ended()) {
+                      return OCM_BackgroundRestore::RETURN_TYPE_STOP_PROCESSS;
+                  }
                   if (!$unencrypted_zip) {
                       clearstatcache(true, $file_path);
                       if (!file_exists($file_path)) {
@@ -1088,36 +1129,20 @@ class OCM_Backup
                       ));
                   }
 
+                  // Decrypted: record it before handing over (see download above).
+                  self::set_complete_restore_step($key, self::STEP_RESTORE_CHILD_UNENCRYPTED_ZIP, $unencrypted_zip);
+                  self::set_complete_restore_step($key, self::STEP_RESTORE_CHILD_DECRYPT);
+
+                  // Later steps only need the decrypted zip; drop the encrypted copy
+                  // now so the part never occupies 3x its size on disk at once.
+                  @unlink($file_path);
+                  if (is_string($downloadTmpPathFile) && $downloadTmpPathFile !== $file_path && file_exists($downloadTmpPathFile)) {
+                      @unlink($downloadTmpPathFile);
+                  }
+
                   if (One_Click_Migration::$process_restore_single->time_exceeded()) {
-                      $next_retry_count = get_option('ocm_restore_decrypt_retry_' . $key, 1);
-                      if($next_retry_count && $next_retry_count <= self::MAX_STEP_RETRIES){
-                        One_Click_Migration::write_to_log("Process is Restarting");
-                        update_option('ocm_restore_decrypt_retry_' . $key, $next_retry_count, true);
-                        One_Click_Migration::$process_restore_single->restart_task();
-                      }
-                      else{
-                        One_Click_Migration::write_to_log(sprintf('Skipping ' .$key.  ' Decrypting'));
-                        One_Click_Migration::write_to_log(sprintf('Skipping ' .$key.  ' Extraction'));
-
-                        self::set_complete_restore_step($key, self::STEP_RESTORE_CHILD_DECRYPT);
-                        self::set_complete_restore_step($key, self::STEP_RESTORE_CHILD_EXTRACT);
-                        self::set_complete_restore_step($key, self::STEP_RESTORE_CHILD_DELETE_OLD_AND_MOVE_NEW);
-                        self::capture_skipped_restore_part($excluded_restore_files, $skipped_restore_files, $key);
-                        continue;
-                      }
-                    }
-
-                    if (!One_Click_Migration::$process_restore_single->time_exceeded()) {
-
-                      self::set_complete_restore_step($key, self::STEP_RESTORE_CHILD_UNENCRYPTED_ZIP, $unencrypted_zip);
-                      self::set_complete_restore_step($key, self::STEP_RESTORE_CHILD_DECRYPT);
-
-                      // Later steps only need the decrypted zip; drop the encrypted copy
-                      // now so the part never occupies 3x its size on disk at once.
-                      @unlink($file_path);
-                      if (is_string($downloadTmpPathFile) && $downloadTmpPathFile !== $file_path && file_exists($downloadTmpPathFile)) {
-                          @unlink($downloadTmpPathFile);
-                      }
+                      One_Click_Migration::write_to_log("Process is Restarting");
+                      One_Click_Migration::$process_restore_single->restart_task();
                   }
                 }
               }
@@ -1127,6 +1152,9 @@ class OCM_Backup
                   exit;
                       }
 
+              if (self::restore_run_ended()) {
+                  return OCM_BackgroundRestore::RETURN_TYPE_STOP_PROCESSS;
+              }
               if(is_dir($content_dir)){
                 $retry_count = get_option('ocm_restore_extract_retry_' . $key, 0);
                 if(!$retry_count){
@@ -1196,6 +1224,9 @@ class OCM_Backup
 
                   $extract_result = $zip->extractTo($extract_path);
                   $zip->close();
+                  if (self::restore_run_ended()) {
+                      return OCM_BackgroundRestore::RETURN_TYPE_STOP_PROCESSS;
+                  }
 
                   if (!$extract_result || !is_dir($extract_path)) {
                       return self::fail_restore(sprintf(
@@ -1204,35 +1235,22 @@ class OCM_Backup
                       ));
                   }
 
-                    if (One_Click_Migration::$process_restore_single->time_exceeded()) {
-                      $next_retry_count = get_option('ocm_restore_extract_retry_' . $key, 1);
-                      if($next_retry_count && $next_retry_count <= self::MAX_STEP_RETRIES){
-                        One_Click_Migration::write_to_log("Process is Restarting");
-                        update_option('ocm_restore_extract_retry_' . $key, $next_retry_count, true);
-                        One_Click_Migration::$process_restore_single->restart_task();
-                      }
-                      else{
+                  // Extracted: record it before handing over (see download above).
+                  self::set_complete_restore_step($key, self::STEP_RESTORE_CHILD_EXTRACT);
 
-                        One_Click_Migration::write_to_log(sprintf('Skipping ' .$key.  ' Extraction'));
+                  // Extraction succeeded, so the zip is no longer needed; free its
+                  // space before the next part starts downloading.
+                  @unlink($unencrypted_zip['filename']);
 
-                        self::set_complete_restore_step($key, self::STEP_RESTORE_CHILD_EXTRACT);
-                        self::set_complete_restore_step($key, self::STEP_RESTORE_CHILD_DELETE_OLD_AND_MOVE_NEW);
-                        self::capture_skipped_restore_part($excluded_restore_files, $skipped_restore_files, $key);
-                        continue;
-                      }
-                    }
-
-                    if (!One_Click_Migration::$process_restore_single->time_exceeded()) {
-
-
-                    self::set_complete_restore_step($key, self::STEP_RESTORE_CHILD_EXTRACT);
-
-                    // Extraction succeeded, so the zip is no longer needed; free its
-                    // space before the next part starts downloading.
-                    @unlink($unencrypted_zip['filename']);
+                  if (One_Click_Migration::$process_restore_single->time_exceeded()) {
+                      One_Click_Migration::write_to_log("Process is Restarting");
+                      One_Click_Migration::$process_restore_single->restart_task();
                   }
                 }
 
+              }
+              if (self::restore_run_ended()) {
+                  return OCM_BackgroundRestore::RETURN_TYPE_STOP_PROCESSS;
               }
               if(is_dir($content_dir)){
                 $retry_count = get_option('ocm_restore_child_delete_retry_' . $key, 0);
@@ -1240,7 +1258,13 @@ class OCM_Backup
                   update_option('ocm_restore_child_delete_retry_' . $key, 1, true);
 
                 }
-                if($retry_count){
+                // Until the DB phase is done, themes/uploads only wait for their
+                // deferred swap: a worker passing by (the DB import can span
+                // several) is not a failed swap attempt.
+                $swap_waits_for_db = in_array($key, array('themes', 'uploads'), true)
+                    && !in_array('db', $excluded_restore_files, true)
+                    && !self::check_is_complete_restore_step('db', self::STEP_RESTORE_CHILD_RESTORE);
+                if($retry_count && !$swap_waits_for_db){
                   if($retry_count <= self::MAX_STEP_RETRIES){
                     if (!self::check_is_complete_restore_step($key, self::STEP_RESTORE_CHILD_DELETE_OLD_AND_MOVE_NEW)) {
                     One_Click_Migration::write_to_log(sprintf('Deleting old %s Retry %d', $key, $retry_count));
@@ -1284,6 +1308,10 @@ class OCM_Backup
           update_option('ocm_is_stopped', true, true);
           die();
 
+        }
+
+        if (self::restore_run_ended()) {
+            return OCM_BackgroundRestore::RETURN_TYPE_STOP_PROCESSS;
         }
 
         // Mid-restore db download/decrypt/extract failure must never fall through
@@ -1339,8 +1367,27 @@ class OCM_Backup
         return OCM_BackgroundBackup::RETURN_TYPE_END_PROCESSS;
     }
 
+    /**
+     * Hand the backup over to a new worker once this one has used up its time
+     * budget. Call it only after the finished step is recorded: the next worker
+     * then moves on instead of redoing the step against its retry limit.
+     */
+    private static function hand_over_if_backup_time_exceeded()
+    {
+        $process = One_Click_Migration::$process_backup_single;
+        if (is_object($process) && method_exists($process, 'time_exceeded') && $process->time_exceeded()) {
+            One_Click_Migration::write_to_log("Process is Restarting");
+            $process->restart_task();
+        }
+    }
+
     private static function fail_restore($message)
     {
+        // This run already ended (another worker failed it, or a new run took
+        // over): its failure is not news and must not reach the log (#96).
+        if (self::restore_run_ended()) {
+            return OCM_BackgroundRestore::RETURN_TYPE_STOP_PROCESSS;
+        }
         One_Click_Migration::write_to_log($message);
         // Terminal marker, same contract as "Backup failed:" above.
         One_Click_Migration::write_to_log('Restore failed: ' . self::short_failure_reason($message));
@@ -1348,6 +1395,11 @@ class OCM_Backup
         OCM_Debug_Mode::disable();
         One_Click_Migration::reset_actions_start_mark();
         update_option('ocm_is_stopped', true, true);
+        self::end_restore_run();
+        // Nothing was swapped in yet and a retry starts from scratch. Don't
+        // leave the plaintext SQL dump under wp-content, where many servers
+        // serve .sql files to anyone.
+        self::remove_extracted_restore_sql();
 
         return OCM_BackgroundRestore::RETURN_TYPE_STOP_PROCESSS;
     }
@@ -1363,26 +1415,9 @@ class OCM_Backup
         // Add a small delay to ensure all file operations complete before cleanup
         sleep(2);
 
-        // Delete ocm_restore folder
-        $ocmRestoreDir = WP_CONTENT_DIR . '/ocm_restore/';
-
-
-
+        // Delete the restore workspace (deleteDir() logs and stops on failure).
         if(WP_DEBUG !== true){
-
-        if (is_dir($ocmRestoreDir)) {
-            self::deleteDir($ocmRestoreDir, 'Cleaning up "ocm_restore" directory', $presigned_urls);
-            // Delete ocm_restore folder
-              if (file_exists($ocmRestoreDir) && !rmdir($ocmRestoreDir)) {
-                One_Click_Migration::write_to_log(sprintf(
-                    'Cleaning up "ocm_restore" directory. Error: "%s" directory could not be deleted. Please check the write permission for this directory or the parent directory.',
-                    $ocmRestoreDir
-                ));
-
-                update_option('ocm_is_stopped', true, true);
-                exit;
-            }
-          }
+            self::delete_restore_workspaces('Cleaning up the restore workspace', $presigned_urls);
         }
         self::print_folders_skipped();
         self::print_folders_not_found();
@@ -1407,6 +1442,7 @@ class OCM_Backup
         One_Click_Migration::reset_actions_start_mark();
         self::reset_current_restore_steps();
         update_option('ocm_is_stopped', true, true);
+        self::end_restore_run();
 
 
     }
@@ -1618,7 +1654,7 @@ class OCM_Backup
                       // RESTORE-STOPPED-IMPORT (live site untouched).
                       One_Click_Migration::write_to_log(self::LOG_RESTORE_STOPPED_IMPORT);
                   }
-                  self::fail_restore_before_file_swap();
+                  self::cleanup_after_restore_no_change_stop();
                   exit;
               }
               self::set_complete_restore_step('db', self::STEP_RESTORE_CHILD_RESTORE);
@@ -1685,8 +1721,11 @@ class OCM_Backup
             return OCM_BackgroundBackup::RETURN_TYPE_END_PROCESSS;
         }
 
+        // A worker that only resumes the upload needs no room for a new dump, and
+        // the encrypted archive it uploads already takes part of the space.
+        $needs_dump_space = !self::check_is_complete_backup_step('db', self::STEP_BACKUP_CHILD_COMPRESS);
         $free_bytes = self::get_free_disk_space($work_path);
-        if ($free_bytes > 0 && $db_size_mb > 0) {
+        if ($needs_dump_space && $free_bytes > 0 && $db_size_mb > 0) {
             $required_bytes = $db_size_mb * 2 * 1024 * 1024;
             if ($free_bytes < $required_bytes) {
                 $disk_message = sprintf(
@@ -1742,7 +1781,10 @@ class OCM_Backup
 
         $tables = $wpdb->get_results('SHOW TABLES');
 
-        // If tmp directory doesn't exist, create it
+        // If tmp directory doesn't exist, create it (in wp-content/tmp when
+        // the private work dir isn't writable here)
+        self::ensure_temporary_directory();
+        $work_path = self::get_backup_work_path();
         if (!is_dir($work_path . 'db/')) {
             if (!mkdir($concurrentDirectory = $work_path . 'db/', 0700, true) && !is_dir($concurrentDirectory)) {
                 One_Click_Migration::write_to_log(sprintf('Database backup started, Error: Directory "%s" was not created', $concurrentDirectory));
@@ -1793,41 +1835,20 @@ class OCM_Backup
               exit;
           }
 
-          if (!One_Click_Migration::$process_backup_single->time_exceeded()) {
-            One_Click_Migration::write_to_log('Database ZIP file created.');
-            self::set_complete_backup_step('db', self::STEP_BACKUP_CHILD_COMPRESS);
-            self::set_complete_backup_step('db', self::STEP_BACKUP_CHILD_ENCRYPT);
-            self::set_complete_backup_step('db', self::STEP_BACKUP_CHILD_ZIP_FILE_PATH, $zip_filepath);
+          // The encrypted archive is complete: record it before handing over, or
+          // the next worker would dump the database again and, once its retries
+          // ran out, skip the part.
+          One_Click_Migration::write_to_log('Database ZIP file created.');
+          self::set_complete_backup_step('db', self::STEP_BACKUP_CHILD_COMPRESS);
+          self::set_complete_backup_step('db', self::STEP_BACKUP_CHILD_ENCRYPT);
+          self::set_complete_backup_step('db', self::STEP_BACKUP_CHILD_ZIP_FILE_PATH, $zip_filepath);
 
-            // Only the encrypted zip is uploaded; drop the per-table SQL dumps and
-            // the plain zip now so they don't stack under later parts' disk needs.
-            self::deleteDirectoryBestEffort($work_path . 'db/');
-            @unlink($work_path . 'db.zip');
-          }
+          // Only the encrypted zip is uploaded; drop the per-table SQL dumps and
+          // the plain zip now so they don't stack under later parts' disk needs.
+          self::deleteDirectoryBestEffort($work_path . 'db/');
+          @unlink($work_path . 'db.zip');
 
-
-          if (One_Click_Migration::$process_backup_single->time_exceeded()) {
-            $next_retry_count = get_option('ocm_backup_compress_retry_db', 1);
-
-            if($next_retry_count && $next_retry_count <= self::MAX_STEP_RETRIES){
-              One_Click_Migration::write_to_log("Process is Restarting");
-              update_option('ocm_backup_compress_retry_db', $next_retry_count, true);
-              One_Click_Migration::$process_backup_single->restart_task();
-
-            }else{
-
-              One_Click_Migration::write_to_log(sprintf('Skipping DB compression'));
-              One_Click_Migration::write_to_log(sprintf('Skipping DB encrypting'));
-              One_Click_Migration::write_to_log(sprintf('Skipping DB upload'));
-              self::set_complete_backup_step('db', self::STEP_BACKUP_CHILD_COMPRESS);
-              self::set_complete_backup_step('db', self::STEP_BACKUP_CHILD_ENCRYPT);
-              self::set_complete_backup_step('db', self::STEP_BACKUP_CHILD_UPLOAD);
-              self::capture_failed_folder($skipped_restore_files, 'db', 'ocm_skipped_folders');
-              One_Click_Migration::write_to_log("Notice: File DB was skipped due to timeout");
-            }
-
-          }
-
+          self::hand_over_if_backup_time_exceeded();
         }
 
         $retry_count = get_option('ocm_backup_upload_retry_db', 0);
@@ -1974,25 +1995,8 @@ class OCM_Backup
               exit;
           }
 
-          if (One_Click_Migration::$process_backup_single->time_exceeded()) {
-            $next_retry_count = get_option('ocm_backup_encrypt_retry_db', 1);
-
-            if($next_retry_count && $next_retry_count <= self::MAX_STEP_RETRIES){
-              One_Click_Migration::write_to_log("Process is Restarting");
-              update_option('ocm_backup_encrypt_retry_db', $next_retry_count, true);
-              One_Click_Migration::$process_backup_single->restart_task();
-            }
-            else{
-              One_Click_Migration::write_to_log(sprintf('Skipping DB Encrypting'));
-              One_Click_Migration::write_to_log(sprintf('Skipping DB upload'));
-              self::set_complete_backup_step('db', self::STEP_BACKUP_CHILD_ENCRYPT);
-              self::set_complete_backup_step('db', self::STEP_BACKUP_CHILD_UPLOAD);
-              self::capture_failed_folder($skipped_restore_files, 'db', 'ocm_skipped_folders');
-              One_Click_Migration::write_to_log("Notice: File DB was skipped due to timeout");
-
-            }
-
-          }
+          // No hand-over here: initiate_db_backup() records the finished
+          // archive first, then hands over if the budget is used up.
           One_Click_Migration::write_to_log('DB Zip file has been encrypted.');
           error_reporting($old_error_reporting);
           return $return;
@@ -2004,11 +2008,11 @@ class OCM_Backup
 
     public static function initiate_folder_backup($folder_name, $presigned_urls, $aes_key)
     {
-        $work_path = self::get_backup_work_path();
         // Re-create tmp directory if it was deleted (e.g. by Stop & Reset while background process was still running)
         if (!self::ensure_temporary_directory()) {
             return OCM_BackgroundBackup::RETURN_TYPE_END_PROCESSS;
         }
+        $work_path = self::get_backup_work_path();
 
         // Suppress PHP 8+ compatibility warnings from vendor library
         $old_error_reporting = error_reporting();
@@ -2141,35 +2145,17 @@ class OCM_Backup
 
             }
 
-            if (!One_Click_Migration::$process_backup_single->time_exceeded()) {
+            // The archive is complete: record it before handing over, or the next
+            // worker would zip the folder again and, once its retries ran out,
+            // skip the part. (A ZipException that ran out of retries already
+            // marked the part skipped.)
+            if (!self::check_is_complete_backup_step($folder_name, self::STEP_BACKUP_CHILD_COMPRESS)) {
               self::set_complete_backup_step($folder_name, self::STEP_BACKUP_CHILD_COMPRESS);
 
               One_Click_Migration::write_to_log(sprintf('%s ZIP has been created.', $folder_name));
-
             }
 
-            if (One_Click_Migration::$process_backup_single->time_exceeded()) {
-              $next_retry_count = get_option('ocm_backup_compress_retry_' . $folder_name, 1);
-
-              if($next_retry_count && $next_retry_count <= self::MAX_STEP_RETRIES){
-                One_Click_Migration::write_to_log("Process is Restarting");
-
-                update_option('ocm_backup_compress_retry_' . $folder_name, $next_retry_count, true);
-
-                One_Click_Migration::$process_backup_single->restart_task();
-              }
-              else{
-
-                One_Click_Migration::write_to_log(sprintf('Skipping ' .$folder_name.  ' Compressing'));
-                One_Click_Migration::write_to_log(sprintf('Skipping ' .$folder_name.  ' Encypting'));
-                One_Click_Migration::write_to_log(sprintf('Skipping ' .$folder_name.  ' Upload'));
-                self::set_complete_backup_step($folder_name, self::STEP_BACKUP_CHILD_COMPRESS);
-                self::set_complete_backup_step($folder_name, self::STEP_BACKUP_CHILD_ENCRYPT);
-                self::set_complete_backup_step($folder_name, self::STEP_BACKUP_CHILD_UPLOAD);
-                self::capture_failed_folder($skipped_restore_files, $folder_name, 'ocm_skipped_folders');
-                One_Click_Migration::write_to_log("Notice: File $folder_name was skipped due to timeout");
-              }
-            }
+            self::hand_over_if_backup_time_exceeded();
         }
 
         // encrypt
@@ -2209,37 +2195,15 @@ class OCM_Backup
                 exit;
             }
 
-            // CRITICAL: Always save the zip file path immediately after encryption succeeds,
-            // regardless of time_exceeded status. This prevents "Zip file path is empty" errors
-            // when the process restarts and tries to upload.
+            // Encrypted: record it (and the path the upload reads) before handing
+            // over, as for the archive above.
             self::set_complete_backup_step($folder_name, self::STEP_BACKUP_CHILD_ZIP_FILE_PATH, $zip_filepath);
+            self::set_complete_backup_step($folder_name, self::STEP_BACKUP_CHILD_ENCRYPT);
+            One_Click_Migration::write_to_log(sprintf('%s ZIP has been encrypted.', $folder_name));
+            // The upload only needs the encrypted copy.
+            @unlink($filename);
 
-            if (!One_Click_Migration::$process_backup_single->time_exceeded()) {
-              self::set_complete_backup_step($folder_name, self::STEP_BACKUP_CHILD_ENCRYPT);
-              One_Click_Migration::write_to_log(sprintf('%s ZIP has been encrypted.', $folder_name));
-              // The upload only needs the encrypted copy.
-              @unlink($filename);
-            }
-
-            if (One_Click_Migration::$process_backup_single->time_exceeded()) {
-              $next_retry_count = get_option('ocm_backup_encrypt_retry_' . $folder_name, 1);
-              if($next_retry_count && $next_retry_count <= self::MAX_STEP_RETRIES){
-                One_Click_Migration::write_to_log("Process is Restarting");
-                update_option('ocm_backup_encrypt_retry_' . $folder_name, $next_retry_count, true);
-                One_Click_Migration::$process_backup_single->restart_task();
-
-              }else{
-
-                One_Click_Migration::write_to_log(sprintf('Skipping ' .$folder_name.  ' Encypting'));
-                One_Click_Migration::write_to_log(sprintf('Skipping ' .$folder_name.  ' Upload'));
-                self::set_complete_backup_step($folder_name, self::STEP_BACKUP_CHILD_ENCRYPT);
-                self::set_complete_backup_step($folder_name, self::STEP_BACKUP_CHILD_UPLOAD);
-                self::capture_failed_folder($skipped_restore_files, $folder_name, 'ocm_skipped_folders');
-                One_Click_Migration::write_to_log("Notice: File $folder_name was skipped due to timeout");
-              }
-
-            }
-
+            self::hand_over_if_backup_time_exceeded();
         }
 
         // upload
@@ -2507,13 +2471,39 @@ class OCM_Backup
         return $success;
     }
 
-    private static function prepare_restore_workspace($content_dir)
+    /**
+     * Start every restore with one empty workspace: remove all old ones (they
+     * may hold a plaintext SQL dump), then create it in the private work dir,
+     * or under wp-content with an unguessable name and deny files when that
+     * isn't possible.
+     *
+     * @param string $attempted Set to the directory that could not be cleared or created.
+     * @return string The workspace, or '' on failure.
+     */
+    private static function prepare_restore_workspace(&$attempted = '')
     {
-        if (is_dir($content_dir) && !self::deleteDirectoryBestEffort($content_dir)) {
-            return false;
+        foreach (self::existing_restore_work_paths() as $old) {
+            if (!self::deleteDirectoryBestEffort($old)) {
+                $attempted = $old;
+                return '';
+            }
         }
 
-        return @mkdir($content_dir, 0700, true) || is_dir($content_dir);
+        $candidates = array();
+        if (self::private_work_dir_usable(true)) {
+            $candidates[] = self::get_private_work_dir() . '/restore';
+        }
+        $candidates[] = WP_CONTENT_DIR . '/' . self::RESTORE_WORKSPACE_FALLBACK_PREFIX . self::random_dir_token();
+
+        foreach ($candidates as $dir) {
+            $attempted = $dir;
+            if ((@mkdir($dir, 0700, true) || is_dir($dir)) && is_writable($dir)) {
+                self::write_deny_files($dir);
+                return $dir;
+            }
+            @rmdir($dir);
+        }
+        return '';
     }
 
     private static function copyDirectory($src, $dst)
@@ -3180,6 +3170,13 @@ class OCM_Backup
             }
             $bytes_decrypted += $buffer_size;
             One_Click_Migration::transfer_heartbeat(One_Click_Migration::$process_restore_single);
+            if (self::restore_run_ended_throttled()) {
+                // The run ended while this worker was decrypting (#96).
+                fclose($decrypted_handle);
+                fclose($file_handle);
+                @unlink($decrypted_path);
+                return false;
+            }
         }
 
         // close the main file handle
@@ -3293,10 +3290,12 @@ class OCM_Backup
         $uploadFileData = get_option('ocm_upload_file');
         $isStopped = get_option('ocm_is_stopped');
 
-        if ($isStopped) { // cancel all bg process
-            One_Click_Migration::cancel_all_process();
-        }
-
+        // A poll must not tear anything down. It used to run cancel_all_process()
+        // whenever ocm_is_stopped was set, which a new restore only clears once its
+        // worker starts: a poll in that window deleted the new run's queue row and
+        // restore_steps behind the worker's option cache, and dispatched both
+        // cancelled processes. Terminal paths drop their own queue rows, and stale
+        // items are refused by run ownership.
         self::maybe_revive_stalled_worker($isStopped);
 
         if ($lastLog && $lastLotNoSkip === self::LOG_MESSAGE_BG_PROCESS_RESTARTING_LOG) {
@@ -3445,6 +3444,16 @@ class OCM_Backup
         return $default_text;
     }
 
+    /**
+     * @return string " and <code>…</code>" naming the private folder that
+     *                holds the restore workspace, or '' without one.
+     */
+    private static function restore_workspace_hint_folder()
+    {
+        $dir = self::get_private_work_dir();
+        return '' === $dir ? '' : ' and <code>' . esc_html(dirname($dir)) . '</code>';
+    }
+
     private static function get_recovery_hint_for_log($log)
     {
         if (!is_string($log) || $log === '') {
@@ -3456,7 +3465,7 @@ class OCM_Backup
         }
 
         if (strpos($log, 'write permissions') !== false || strpos($log, 'could not be moved or copied') !== false || strpos($log, 'could not be moved into place') !== false || strpos($log, 'could not be extracted') !== false) {
-            return 'Make sure WordPress can write to <code>wp-content</code>, <code>wp-content/plugins</code>, <code>wp-content/themes</code>, <code>wp-content/uploads</code>, and <code>wp-content/ocm_restore</code>, then retry the restore.';
+            return 'Make sure WordPress can write to <code>wp-content</code>, <code>wp-content/plugins</code>, <code>wp-content/themes</code>, <code>wp-content/uploads</code>' . self::restore_workspace_hint_folder() . ', then retry the restore.';
         }
 
         if (strpos($log, 'Restore failed while downloading') !== false) {
@@ -3478,7 +3487,7 @@ class OCM_Backup
         }
 
         if (strpos($log, 'Restore stopped: database part could not be downloaded or unpacked') !== false) {
-            return 'The database archive could not be downloaded or unpacked, so nothing on this site was changed. Free disk space or check write permissions under <code>wp-content/ocm_restore</code>, then retry. If it fails again, create a fresh backup and restore with the new code.';
+            return 'The database archive could not be downloaded or unpacked, so nothing on this site was changed. Free disk space or check write permissions under <code>wp-content</code>' . self::restore_workspace_hint_folder() . ', then retry. If it fails again, create a fresh backup and restore with the new code.';
         }
 
         if (strpos($log, "Restore stopped: the backup's main options table didn't pass the check") !== false
@@ -3637,7 +3646,7 @@ class OCM_Backup
 
     /**
      * Check disk space for restore. Each part is downloaded (encrypted zip),
-     * decrypted (crypt deleted right after), extracted into ocm_restore/ (zip
+     * decrypted (crypt deleted right after), extracted into the workspace (zip
      * deleted right after), and db/plugins content stays staged until the final
      * phases, so peak ≈ sum(unzipped_sizes) + one part's zip in flight.
      *
@@ -3685,7 +3694,7 @@ class OCM_Backup
             $required = (int) ($total_bytes * 1.6);
         }
 
-        $free = self::get_free_disk_space(OCM_PLUGIN_WRITABLE_PATH);
+        $free = self::get_free_disk_space(self::get_restore_work_path());
         $space_ok = ($free === 0 || $required === 0) ? true : ($free >= $required);
 
         return [
@@ -3860,6 +3869,104 @@ class OCM_Backup
         return $released;
     }
 
+    /**
+     * Start a new restore run. Its id travels with the queue item, so a worker
+     * left over from a failed or replaced run can tell it no longer owns the
+     * site and stop without logging or touching the restore workspace (#96).
+     *
+     * @return string
+     */
+    public static function claim_restore_run()
+    {
+        $run_id = function_exists('wp_generate_uuid4')
+            ? wp_generate_uuid4()
+            : wp_generate_password(32, false, false);
+        $run_id = strtolower(preg_replace('/[^a-zA-Z0-9_-]/', '', (string) $run_id));
+        update_option(self::RESTORE_RUN_OPTION, $run_id, false);
+        self::set_restore_run_context($run_id);
+        return $run_id;
+    }
+
+    public static function set_restore_run_context($run_id)
+    {
+        self::$restore_run_id = is_string($run_id) ? $run_id : '';
+        self::$restore_run_ended = false;
+        self::$restore_run_checked_at = 0;
+    }
+
+    public static function is_current_restore_run($run_id)
+    {
+        if (!is_string($run_id) || '' === $run_id) {
+            return false;
+        }
+        // Another request ends or replaces the run, so never trust this
+        // request's cached copy of the option.
+        if (function_exists('wp_cache_delete')) {
+            wp_cache_delete(self::RESTORE_RUN_OPTION, 'options');
+        }
+        $current = get_option(self::RESTORE_RUN_OPTION, '');
+        return is_string($current) && '' !== $current && hash_equals($current, $run_id);
+    }
+
+    /**
+     * True when this worker serves a restore run that has since failed,
+     * stopped, completed or been replaced by a newer one.
+     *
+     * @return bool
+     */
+    public static function restore_run_ended()
+    {
+        if ('' === self::$restore_run_id) {
+            return false;
+        }
+        if (!self::$restore_run_ended && !self::is_current_restore_run(self::$restore_run_id)) {
+            self::$restore_run_ended = true;
+        }
+        return self::$restore_run_ended;
+    }
+
+    /**
+     * restore_run_ended() for tight transfer loops: re-reads the option at most
+     * every 5 seconds.
+     *
+     * @return bool
+     */
+    public static function restore_run_ended_throttled()
+    {
+        if ('' === self::$restore_run_id || self::$restore_run_ended) {
+            return self::$restore_run_ended;
+        }
+        $now = time();
+        if ($now - self::$restore_run_checked_at < 5) {
+            return false;
+        }
+        self::$restore_run_checked_at = $now;
+        return self::restore_run_ended();
+    }
+
+    /**
+     * Terminal bookkeeping for a restore run: drop its queue rows so neither
+     * the cron healthcheck nor the watchdog can start it again, and release
+     * the run so any worker still busy with it stops at its next check.
+     *
+     * @return void
+     */
+    private static function end_restore_run()
+    {
+        if ('' !== self::$restore_run_id && !self::is_current_restore_run(self::$restore_run_id)) {
+            // A newer run owns the slot and its queue.
+            return;
+        }
+        self::clear_restore_batch_option_rows();
+        delete_option(self::RESTORE_RUN_OPTION);
+        if (function_exists('wp_cache_delete')) {
+            wp_cache_delete(self::RESTORE_RUN_OPTION, 'options');
+        }
+        if ('' !== self::$restore_run_id) {
+            self::$restore_run_ended = true;
+        }
+    }
+
     private static function delete_option_if_value($name, $expected_serialized)
     {
         global $wpdb;
@@ -3898,8 +4005,290 @@ class OCM_Backup
             $run_id = is_array($run) && isset($run['id']) ? (string) $run['id'] : '';
         }
         $run_id = strtolower(preg_replace('/[^a-zA-Z0-9_-]/', '', (string) $run_id));
+        $name = 'backup-' . ($run_id !== '' ? $run_id : 'unowned') . '/';
 
-        return OCM_PLUGIN_WRITABLE_PATH . 'backup-' . ($run_id !== '' ? $run_id : 'unowned') . '/';
+        // The SQL dump and zips live in the private work dir, not under the
+        // web root. A run that had to fall back to wp-content/tmp (see
+        // ensure_temporary_directory) keeps using it.
+        $legacy = OCM_PLUGIN_WRITABLE_PATH . $name;
+        $private = self::get_private_work_dir();
+        if ('' === $private || (!is_dir($private . '/' . $name) && is_dir($legacy))) {
+            return $legacy;
+        }
+        if (!is_dir($private . '/' . $name) && !self::private_work_dir_usable(false)) {
+            return $legacy;
+        }
+        return $private . '/' . $name;
+    }
+
+    /**
+     * This site's directory for backup and restore work files, beside the
+     * private debug log and outside the web root. OCM_DEBUG_LOG_DIR is already
+     * per site (OCM_Private_Dir), so sibling installs never share it.
+     *
+     * @return string Directory without trailing slash; '' when there is no private dir.
+     */
+    public static function get_private_work_dir()
+    {
+        if (!defined('OCM_DEBUG_LOG_DIR') || !is_string(OCM_DEBUG_LOG_DIR)) {
+            return '';
+        }
+        $base = rtrim(OCM_DEBUG_LOG_DIR, '/\\');
+        if ('' === $base) {
+            return '';
+        }
+        return $base . '/work';
+    }
+
+    /**
+     * Whether new work dirs may go in get_private_work_dir(). It must not be
+     * inside the web root (a WordPress install in a subdirectory of the
+     * document root puts the private dir there). The restore also needs it on
+     * wp-content's filesystem, so the deferred file swap stays a rename.
+     * Writability is checked when the directory is created.
+     *
+     * @param bool $same_filesystem_as_content
+     * @return bool
+     */
+    private static function private_work_dir_usable($same_filesystem_as_content)
+    {
+        $dir = self::get_private_work_dir();
+        if ('' === $dir || self::is_inside_web_root($dir)) {
+            return false;
+        }
+        if ($same_filesystem_as_content) {
+            $dir_device = self::filesystem_device($dir);
+            $content_device = self::filesystem_device(WP_CONTENT_DIR);
+            if (null !== $dir_device && null !== $content_device && $dir_device !== $content_device) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * @param string $path
+     * @return bool True when $path is ABSPATH, WP_CONTENT_DIR or the document
+     *              root, or inside one of them.
+     */
+    private static function is_inside_web_root($path)
+    {
+        $roots = array(ABSPATH, WP_CONTENT_DIR);
+        if (isset($_SERVER['DOCUMENT_ROOT']) && is_string($_SERVER['DOCUMENT_ROOT']) && '' !== $_SERVER['DOCUMENT_ROOT']) {
+            $roots[] = $_SERVER['DOCUMENT_ROOT'];
+        }
+        $path = self::resolve_path($path) . '/';
+        foreach ($roots as $root) {
+            if (!is_string($root) || '' === $root) {
+                continue;
+            }
+            if (0 === strpos($path, self::resolve_path($root) . '/')) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * realpath() for a path that may not exist yet: resolve its nearest
+     * existing ancestor and append the rest.
+     *
+     * @param string $path
+     * @return string Forward slashes, no trailing slash ('' for the filesystem root).
+     */
+    private static function resolve_path($path)
+    {
+        $path = rtrim(str_replace('\\', '/', (string) $path), '/');
+        $rest = '';
+        while ('' !== $path) {
+            $real = @realpath($path);
+            if (false !== $real) {
+                return rtrim(str_replace('\\', '/', $real), '/') . $rest;
+            }
+            $parent = rtrim(str_replace('\\', '/', dirname($path)), '/');
+            if ($parent === $path) {
+                break;
+            }
+            $rest = '/' . basename($path) . $rest;
+            $path = $parent;
+        }
+        return $path . $rest;
+    }
+
+    /**
+     * @param string $path
+     * @return int|null Device id of the nearest existing ancestor; null when unknown.
+     */
+    private static function filesystem_device($path)
+    {
+        $path = (string) $path;
+        while ('' !== $path) {
+            if (file_exists($path)) {
+                $stat = @stat($path);
+                return is_array($stat) && isset($stat['dev']) ? (int) $stat['dev'] : null;
+            }
+            $parent = dirname($path);
+            if ($parent === $path) {
+                break;
+            }
+            $path = $parent;
+        }
+        return null;
+    }
+
+    /**
+     * Keep web servers that honour these files (Apache, IIS) from serving or
+     * listing a work dir that had to go under wp-content. nginx ignores them,
+     * which is why such a dir also gets an unguessable name.
+     *
+     * @param string $dir
+     * @return void
+     */
+    private static function write_deny_files($dir)
+    {
+        $files = array(
+            '.htaccess' => "Deny from all\nRequire all denied\n",
+            'web.config' => '<configuration><system.webServer><authorization><deny users="*" /></authorization></system.webServer></configuration>',
+            'index.php' => "<?php\nhttp_response_code(404);\n",
+        );
+        foreach ($files as $name => $contents) {
+            if (!is_file($dir . '/' . $name)) {
+                @file_put_contents($dir . '/' . $name, $contents);
+            }
+        }
+    }
+
+    /**
+     * @return string 24 lowercase hex characters.
+     */
+    private static function random_dir_token()
+    {
+        try {
+            return bin2hex(random_bytes(12));
+        } catch (\Throwable $e) {
+            return strtolower(substr(preg_replace('/[^a-zA-Z0-9]/', '', wp_generate_password(32, false, false)), 0, 24));
+        }
+    }
+
+    /**
+     * Where restore parts are downloaded, decrypted and extracted: the private
+     * work dir, or wp-content/ocm_restore-<random> when
+     * prepare_restore_workspace() could not use that. Found from what is on
+     * disk, so every worker of a run, before and after the database swap,
+     * resolves the same directory.
+     *
+     * @return string Directory without trailing slash. Never '' (callers append "/db/").
+     */
+    public static function get_restore_work_path()
+    {
+        $private = self::get_private_work_dir();
+        if ('' !== $private && is_dir($private . '/restore')) {
+            return $private . '/restore';
+        }
+        $fallbacks = self::find_fallback_restore_work_paths();
+        if ($fallbacks) {
+            return $fallbacks[0];
+        }
+        if ('' !== $private && self::private_work_dir_usable(true)) {
+            return $private . '/restore';
+        }
+        // Nothing prepared yet: a path that doesn't exist.
+        return WP_CONTENT_DIR . '/' . self::RESTORE_WORKSPACE_FALLBACK_PREFIX . 'none';
+    }
+
+    /**
+     * @return string[] Existing wp-content/ocm_restore-<token> dirs, newest first.
+     */
+    private static function find_fallback_restore_work_paths()
+    {
+        $entries = @scandir(WP_CONTENT_DIR);
+        if (!is_array($entries)) {
+            return array();
+        }
+        $found = array();
+        foreach ($entries as $entry) {
+            if (!preg_match('/^' . preg_quote(self::RESTORE_WORKSPACE_FALLBACK_PREFIX, '/') . '[a-z0-9]+$/', $entry)) {
+                continue;
+            }
+            $path = WP_CONTENT_DIR . '/' . $entry;
+            if (is_dir($path) && !is_link($path)) {
+                $found[$path] = (int) @filemtime($path);
+            }
+        }
+        arsort($found);
+        return array_keys($found);
+    }
+
+    /**
+     * Every restore workspace this site may have on disk: the private one,
+     * wp-content fallbacks, and wp-content/ocm_restore from 3.1.20 and earlier.
+     *
+     * @return string[]
+     */
+    private static function existing_restore_work_paths()
+    {
+        $paths = array();
+        $private = self::get_private_work_dir();
+        if ('' !== $private && is_dir($private . '/restore')) {
+            $paths[] = $private . '/restore';
+        }
+        $paths = array_merge($paths, self::find_fallback_restore_work_paths());
+        if (is_dir(WP_CONTENT_DIR . '/' . self::LEGACY_RESTORE_WORKSPACE)) {
+            $paths[] = WP_CONTENT_DIR . '/' . self::LEGACY_RESTORE_WORKSPACE;
+        }
+        return $paths;
+    }
+
+    /**
+     * 3.1.20 and earlier extracted restores into wp-content/ocm_restore, and a
+     * failed run could leave its SQL dump there for nginx to serve. Plugin
+     * updates don't run the activation hook, so remove it on the next admin
+     * page load while no restore is running.
+     *
+     * @return void
+     */
+    public static function remove_legacy_restore_workspace()
+    {
+        $legacy = WP_CONTENT_DIR . '/' . self::LEGACY_RESTORE_WORKSPACE;
+        if (!is_dir($legacy) || get_option('ocm_action_start_restore')) {
+            return;
+        }
+        self::deleteDirectoryBestEffort($legacy);
+    }
+
+    /**
+     * Delete every restore workspace, stopping the run on the first failure
+     * (deleteDir() logs it). For Stop & Reset and a completed restore.
+     *
+     * @param string $action_log
+     * @param mixed  $presigned_urls
+     * @return void
+     */
+    public static function delete_restore_workspaces($action_log, $presigned_urls = null)
+    {
+        foreach (self::existing_restore_work_paths() as $dir) {
+            self::deleteDir($dir, $action_log, $presigned_urls);
+        }
+    }
+
+    /**
+     * Delete this site's backup work dirs in the private work dir (Stop & Reset;
+     * fallbacks under wp-content/tmp go with that folder).
+     *
+     * @param string $action_log
+     * @return void
+     */
+    public static function delete_private_backup_work_dirs($action_log)
+    {
+        $private = self::get_private_work_dir();
+        if ('' === $private || !is_dir($private)) {
+            return;
+        }
+        foreach ((array) @scandir($private) as $entry) {
+            if (is_string($entry) && 0 === strpos($entry, 'backup-') && is_dir($private . '/' . $entry)) {
+                self::deleteDir($private . '/' . $entry, $action_log, null);
+            }
+        }
     }
 
     /**
@@ -3927,6 +4316,20 @@ class OCM_Backup
         }
 
         if (@mkdir($work_path, 0700, true) || is_dir($work_path)) {
+            return true;
+        }
+
+        // The private dir isn't writable on this host: fall back to
+        // wp-content/tmp. The run id makes the name unguessable; the deny
+        // files cover servers that would list or serve it.
+        $legacy = OCM_PLUGIN_WRITABLE_PATH . basename(rtrim($work_path, '/\\')) . '/';
+        if ($legacy !== $work_path && (@mkdir($legacy, 0700, true) || is_dir($legacy))) {
+            // Only an index.php in the shared tmp folder: other plugins may
+            // serve files from it.
+            if (!is_file(OCM_PLUGIN_WRITABLE_PATH . 'index.php')) {
+                @file_put_contents(OCM_PLUGIN_WRITABLE_PATH . 'index.php', "<?php\nhttp_response_code(404);\n");
+            }
+            self::write_deny_files(rtrim($legacy, '/\\'));
             return true;
         }
 
@@ -3990,6 +4393,13 @@ class OCM_Backup
             if (is_wp_error($download_tmp_path)) {
                 return $download_tmp_path;
             }
+            // copy('') throws a ValueError on PHP 8 instead of returning false.
+            if (!is_string($download_tmp_path) || '' === $download_tmp_path || !is_file($download_tmp_path)) {
+                return new WP_Error('ocm_download_missing', sprintf(
+                    'Download for "%s" returned no file.',
+                    $key
+                ));
+            }
             if (!@rename($download_tmp_path, $target_path)) {
                 if (!@copy($download_tmp_path, $target_path)) {
                     return new WP_Error('ocm_download_move_failed', sprintf(
@@ -4042,7 +4452,8 @@ class OCM_Backup
         curl_setopt($ch, CURLOPT_NOPROGRESS, false);
         curl_setopt($ch, CURLOPT_PROGRESSFUNCTION, static function () {
             One_Click_Migration::transfer_heartbeat(One_Click_Migration::$process_restore_single);
-            return 0;
+            // Abort the transfer once its restore run has ended (#96).
+            return OCM_Backup::restore_run_ended_throttled() ? 1 : 0;
         });
 
         $ok = curl_exec($ch);
@@ -4187,6 +4598,10 @@ class OCM_Backup
             return false;
         }
 
+        // The Lambda marks the backup ready: from then on a restore precheck can
+        // read the URL inventory and BACKUP_PARTS lines from the S3 log.
+        One_Click_Migration::flush_log_upload();
+
         for ($attempt = 1; $attempt <= 3; $attempt++) {
             if (OCM_S3::send_restore_code_email($email, $bucket_id, $restore_code, get_site_url(), $missing_parts)) {
                 delete_option('ocm_restore_code_plain');
@@ -4314,6 +4729,10 @@ class OCM_Backup
             self::STEP_RESTORE_CHILD_RESTORE => false,
             self::STEP_RESTORE_CHILD_THEMES_RESTORED => false,
             self::STEP_RESTORE_CHILD_UPLOADS_RESTORED => false,
+            self::STEP_RESTORE_CHILD_DB_IMPORT => null,
+            self::STEP_RESTORE_CHILD_DB_IMPORTED => false,
+            self::STEP_RESTORE_CHILD_DB_URLS => false,
+            self::STEP_RESTORE_CHILD_DB_PROMOTED => false,
         );
 
         return array(
@@ -4707,27 +5126,26 @@ class OCM_Backup
 
     /**
      * Shared cleanup for terminal stops that leave the live site unchanged
-     * (apart from this plugin's progress options).
+     * (apart from this plugin's progress options). The caller writes its one
+     * stop line first; this adds "review_ask: none (stopped)", clears the
+     * review flags, queue rows and staging tables, then the extracted SQL.
      */
     private static function cleanup_after_restore_no_change_stop()
     {
-        One_Click_Migration::reset_actions_start_mark();
+        self::fail_restore_before_file_swap();
         self::remove_extracted_restore_sql();
-        One_Click_Migration::disable_maintenance_mode();
-        OCM_Debug_Mode::disable();
-        update_option('ocm_is_stopped', true, true);
     }
 
     /**
-     * Remove extracted SQL under wp-content/ocm_restore after a no-change stop.
+     * Remove the restore workspace (extracted SQL dump and part archives),
+     * including a 3.1.20 wp-content/ocm_restore, after a no-change stop or a
+     * Restore failed.
      */
     private static function remove_extracted_restore_sql()
     {
-        $dbfiles = WP_CONTENT_DIR . '/ocm_restore';
-        if (!is_dir($dbfiles)) {
-            return;
+        foreach (self::existing_restore_work_paths() as $dir) {
+            self::deleteDirectoryBestEffort($dir);
         }
-        self::deleteDirectoryBestEffort($dbfiles);
     }
 
     /**
@@ -4779,15 +5197,16 @@ class OCM_Backup
 
     /**
      * Shared bookkeeping when restore fails before any file swap: clear review
-     * flags, restore active_plugins if needed, stop cleanly.
+     * flags, restore active_plugins if needed, drop staging tables and queue
+     * rows, log "review_ask: none (stopped)", stop cleanly.
      *
      * @return void
      */
     private static function fail_restore_before_file_swap()
     {
         self::restore_active_plugins_after_failed_restore();
-        self::clear_restore_batch_option_rows();
         self::drop_leftover_staging_tables_after_stop();
+        // No review CTA; do not consume the first-clean restore flag.
         update_option('ocm_show_restore_success', 0, false);
         update_option('ocm_show_review_cta', 0, false);
         update_option(self::OPTION_RESTORE_WAS_WARNED, 0, false);
@@ -4797,6 +5216,8 @@ class OCM_Backup
         OCM_Debug_Mode::disable();
         One_Click_Migration::reset_actions_start_mark();
         update_option('ocm_is_stopped', true, true);
+        // Drops the queue rows so no worker restarts the stopped restore.
+        self::end_restore_run();
     }
 
     /**
@@ -4857,6 +5278,7 @@ class OCM_Backup
             isset($wpdb->base_prefix) ? $wpdb->base_prefix : null
         );
         delete_option(OCM_SQL_Utils::OPTION_STAGING_PREFIX);
+        self::clear_db_import_state();
     }
 
     /**
@@ -4888,8 +5310,8 @@ class OCM_Backup
 
     /**
      * Shutdown callback: on fatal during import/URL stage, stop with
-     * LOG_RESTORE_STOPPED_IMPORT, drop staging tables, clear restore batches,
-     * and mirror fail_restore_before_file_swap review-flag bookkeeping.
+     * LOG_RESTORE_STOPPED_IMPORT and run the shared stop bookkeeping
+     * (fail_restore_before_file_swap: staging tables, restore batches, flags).
      *
      * @param array|null $error Optional error array (tests); defaults to error_get_last().
      * @return void
@@ -4917,18 +5339,7 @@ class OCM_Backup
         self::$import_oom_guard_active = false;
 
         One_Click_Migration::write_to_log(self::LOG_RESTORE_STOPPED_IMPORT);
-        self::restore_active_plugins_after_failed_restore();
-        self::clear_restore_batch_option_rows();
-        self::drop_leftover_staging_tables_after_stop();
-        update_option('ocm_show_restore_success', 0, false);
-        update_option('ocm_show_review_cta', 0, false);
-        update_option(self::OPTION_RESTORE_WAS_WARNED, 0, false);
-        delete_option(OCM_Extra_Domains::OPTION);
-        One_Click_Migration::write_to_log('SYSLOG: review_ask: none (stopped)');
-        One_Click_Migration::disable_maintenance_mode();
-        OCM_Debug_Mode::disable();
-        One_Click_Migration::reset_actions_start_mark();
-        update_option('ocm_is_stopped', true, true);
+        self::fail_restore_before_file_swap();
     }
 
     /**
@@ -4976,7 +5387,7 @@ class OCM_Backup
         if (!is_array($skipped_restore_files)) {
             $skipped_restore_files = array();
         }
-        $content_dir = WP_CONTENT_DIR . '/ocm_restore';
+        $content_dir = self::get_restore_work_path();
 
         self::gate_restore_before_file_replace();
         // Plugins stay active through DB staging/validation; isolate only now.
@@ -5082,7 +5493,7 @@ class OCM_Backup
     public static function binary_preflight_fingerprint()
     {
         $bucket = (string) get_option('ocm_bucket_id', '');
-        $dbfiles = WP_CONTENT_DIR . '/ocm_restore/db/';
+        $dbfiles = self::get_restore_work_path() . '/db/';
         $parts = array('bucket=' . $bucket);
         $files = OCM_SQL_Utils::list_restore_sql_dump_files($dbfiles);
         foreach ($files as $filepath) {
@@ -5119,7 +5530,7 @@ class OCM_Backup
     }
 
     /**
-     * Scan already-extracted dumps under ocm_restore/db before replacing files.
+     * Scan already-extracted dumps under the workspace's db/ before replacing files.
      * Verdicts are persisted against binary_preflight_fingerprint(); a mismatched
      * key is treated as no verdict (rescan). Large dumps resume across requests.
      *
@@ -5145,7 +5556,7 @@ class OCM_Backup
             return true;
         }
 
-        $dbfiles = WP_CONTENT_DIR . '/ocm_restore/db/';
+        $dbfiles = self::get_restore_work_path() . '/db/';
         if (!is_dir($dbfiles)) {
             // DB not extracted yet. Callers with db-first ordering only replace
             // files after the db iteration has finished extract+preflight.
@@ -5229,20 +5640,7 @@ class OCM_Backup
         self::$db_restore_refused_binary = true;
         self::clear_import_oom_guard();
         One_Click_Migration::write_to_log(self::LOG_RESTORE_STOPPED_IMPORT);
-        self::restore_active_plugins_after_failed_restore();
-        self::clear_restore_batch_option_rows();
-        self::drop_leftover_staging_tables_after_stop();
-        // No review CTA; do not consume the first-clean restore flag.
-        update_option('ocm_show_restore_success', 0, false);
-        update_option('ocm_show_review_cta', 0, false);
-        update_option(self::OPTION_RESTORE_WAS_WARNED, 0, false);
-        delete_option(OCM_Extra_Domains::OPTION);
-        One_Click_Migration::write_to_log('SYSLOG: review_ask: none (stopped)');
-        One_Click_Migration::reset_actions_start_mark();
-        self::remove_extracted_restore_sql();
-        One_Click_Migration::disable_maintenance_mode();
-        OCM_Debug_Mode::disable();
-        update_option('ocm_is_stopped', true, true);
+        self::cleanup_after_restore_no_change_stop();
         exit;
     }
 
@@ -5253,7 +5651,7 @@ class OCM_Backup
 
         // Get current site URL here
         $current_url = site_url();
-        $dbfiles = WP_CONTENT_DIR . '/ocm_restore/db/';
+        $dbfiles = self::get_restore_work_path() . '/db/';
         $excluded_folders = get_option( 'ocm_excluded_folders', []);
 
 
@@ -5273,6 +5671,10 @@ class OCM_Backup
           OCM_SQL_Utils::preflight_db_memory($sql_bytes, 'import');
         }
 
+        // Progress of an import an earlier worker started. Its dumps on disk
+        // are already rewritten for its staging prefix.
+        $state = self::db_import_state();
+
         // Detect source table prefix from backup SQL filenames (via usermeta.sql).
         $source_prefix = is_dir($dbfiles)
             ? OCM_SQL_Utils::get_table_prefix($dbfiles . 'dummy.sql')
@@ -5281,12 +5683,14 @@ class OCM_Backup
             One_Click_Migration::write_to_log('Error: Database restore could not determine one unambiguous source table prefix.');
             return false;
         }
-        One_Click_Migration::write_to_log(sprintf(
-            'Detected source_prefix="%s" dest_base_prefix="%s" dest_prefix="%s"',
-            $source_prefix,
-            $wpdb->base_prefix,
-            $wpdb->prefix
-        ));
+        if ($state === null) {
+            One_Click_Migration::write_to_log(sprintf(
+                'Detected source_prefix="%s" dest_base_prefix="%s" dest_prefix="%s"',
+                $source_prefix,
+                $wpdb->base_prefix,
+                $wpdb->prefix
+            ));
+        }
 
         $found_files = OCM_SQL_Utils::list_restore_sql_dump_files($dbfiles);
         if (is_dir($dbfiles)) {
@@ -5296,6 +5700,11 @@ class OCM_Backup
                     continue;
                 }
                 if (strtolower(substr($fileinfo->getFilename(), -4)) === '.sql') {
+                    continue;
+                }
+                // Untouched copy of a dump whose prefix rewrite was cut off;
+                // prepare_dump_for_staging_once() takes it back.
+                if (substr($fileinfo->getFilename(), -strlen(self::PRISTINE_DUMP_SUFFIX)) === self::PRISTINE_DUMP_SUFFIX) {
                     continue;
                 }
                 // Leftover work files from an interrupted run (e.g. *.ocm-stream.tmp)
@@ -5351,188 +5760,597 @@ class OCM_Backup
             self::stop_restore_during_db_import();
         }
 
-        // Drop leftover staging tables from restores killed mid-import. Trash
-        // (ocd…/ocmd…) is kept when live counterparts are missing.
-        OCM_SQL_Utils::drop_stale_temp_tables($wpdb, null, $wpdb->base_prefix);
+        $dump_names = array_values(array_map('basename', $sorted_table_list));
+        if ($state !== null && !self::db_import_state_matches($state, $source_prefix, $dump_names)) {
+            if (!empty($state['prepared'])) {
+                // Some dumps were rewritten for a prefix this worker can't confirm.
+                One_Click_Migration::write_to_log('Error: Database restore could not resume: the saved staging import no longer matches the extracted database dumps.');
+                return false;
+            }
+            // Nothing was rewritten yet: start over.
+            self::clear_db_import_state();
+            $state = null;
+        }
+        if ($state === null && (string) get_option(OCM_SQL_Utils::OPTION_STAGING_PREFIX, '') !== '') {
+            // An earlier attempt rewrote the dumps for that prefix without
+            // recording how far it got.
+            One_Click_Migration::write_to_log('Error: Database restore could not resume: an earlier attempt left a staging import without its progress.');
+            return false;
+        }
 
-        // Import into a temporary staging prefix first. Live destination tables
-        // and site files stay intact until every dump imports cleanly and the
-        // options/prefix gate passes; then we promote tables and swap files.
-        $staging_prefix = OCM_SQL_Utils::allocate_staging_prefix($wpdb);
-        if ($staging_prefix === false || $staging_prefix === '') {
-            One_Click_Migration::write_to_log('Error: Database restore could not allocate a staging table prefix.');
-            return false;
+        if ($state === null) {
+            // Drop leftover staging tables from restores killed mid-import. Trash
+            // (ocd…/ocmd…) is kept when live counterparts are missing.
+            OCM_SQL_Utils::drop_stale_temp_tables($wpdb, null, $wpdb->base_prefix);
+
+            // Import into a temporary staging prefix first. Live destination tables
+            // and site files stay intact until every dump imports cleanly and the
+            // options/prefix gate passes; then we promote tables and swap files.
+            $staging_prefix = OCM_SQL_Utils::allocate_staging_prefix($wpdb);
+            if ($staging_prefix === false || $staging_prefix === '') {
+                One_Click_Migration::write_to_log('Error: Database restore could not allocate a staging table prefix.');
+                return false;
+            }
+            if (!OCM_SQL_Utils::assert_staging_identifier_headroom($sorted_table_list, $staging_prefix, $source_prefix)) {
+                return false;
+            }
+            // A worker cut off from here on resumes with this prefix: the dumps
+            // are rewritten for it in place.
+            $state = array(
+                'prefix' => $staging_prefix,
+                'source_prefix' => $source_prefix,
+                'files' => $dump_names,
+                'prepared' => array(),
+                'imported' => array(),
+                'site_url' => '',
+                'unit' => '',
+                'attempts' => 0,
+            );
+            self::save_db_import_state($state);
+            update_option(OCM_SQL_Utils::OPTION_STAGING_PREFIX, $staging_prefix, false);
+            One_Click_Migration::write_to_log(sprintf(
+                'SYSLOG: Importing database into staging prefix "%s"; live tables with prefix "%s" stay intact until import succeeds.',
+                $staging_prefix,
+                $wpdb->base_prefix
+            ));
+
+            $leftover_foreign_options = 0;
+            $tables_before_import = $wpdb->get_results('SHOW TABLES');
+            foreach ($tables_before_import as $table) {
+                foreach ($table as $table_name) {
+                    if (substr($table_name, -8) === '_options'
+                        && strpos($table_name, $wpdb->base_prefix) !== 0
+                        && strpos($table_name, $staging_prefix) !== 0
+                    ) {
+                        $leftover_foreign_options++;
+                    }
+                }
+            }
+            if ($leftover_foreign_options > 0) {
+                One_Click_Migration::write_to_log(sprintf(
+                    'Notice: Found %d leftover foreign-prefix *_options table(s) on destination; siteurl/home gate will use staging "%soptions" matching source_prefix="%s" only.',
+                    $leftover_foreign_options,
+                    $staging_prefix,
+                    $source_prefix
+                ));
+            }
+        } else {
+            $staging_prefix = $state['prefix'];
+            // Keep this import's tables; anything else under ocmXXXX_ is stale.
+            OCM_SQL_Utils::drop_stale_temp_tables($wpdb, $staging_prefix, $wpdb->base_prefix);
+            One_Click_Migration::write_to_log(sprintf(
+                'SYSLOG: Resuming database import into staging prefix "%s" (%d of %d dumps rewritten, %d imported).',
+                $staging_prefix,
+                count($state['prepared']),
+                count($dump_names),
+                count($state['imported'])
+            ));
         }
-        if (!OCM_SQL_Utils::assert_staging_identifier_headroom($sorted_table_list, $staging_prefix, $source_prefix)) {
-            return false;
-        }
-        update_option(OCM_SQL_Utils::OPTION_STAGING_PREFIX, $staging_prefix, false);
-        One_Click_Migration::write_to_log(sprintf(
-            'SYSLOG: Importing database into staging prefix "%s"; live tables with prefix "%s" stay intact until import succeeds.',
-            $staging_prefix,
-            $wpdb->base_prefix
-        ));
         // Fatals (including memory exhausted) during staging import / URL rewrite
         // must stop with LOG_RESTORE_STOPPED_IMPORT and never retry the URL step.
         self::register_import_oom_guard();
 
         $source_suffixes = OCM_SQL_Utils::source_table_suffixes_from_dumps($sorted_table_list, $source_prefix);
-        $pre_rewrite_key = self::binary_preflight_fingerprint();
 
-        // Data swap source → live dest; remap only statement table names to staging
-        // so row data keeps {dest}capabilities / {dest}user_roles. Foreign-prefix
-        // dumps (ktv_options, nst_options) are also pulled under staging.
-        foreach ($sorted_table_list as $filepath) {
-            if (!OCM_SQL_Utils::prepare_sql_dump_for_staging($filepath, $wpdb->base_prefix, $staging_prefix, $source_prefix)) {
-                One_Click_Migration::write_to_log(sprintf('Error: Database restore failed while remapping the table prefix in "%s".', basename($filepath)));
-                self::clear_import_oom_guard();
-                self::discard_staging_import($staging_prefix, $wpdb->base_prefix);
-                return false;
-            }
-            if (!is_file($filepath) || !is_readable($filepath) || filesize($filepath) === 0) {
-                One_Click_Migration::write_to_log(sprintf('Error: Database restore rejected invalid SQL dump "%s".', basename($filepath)));
-                self::clear_import_oom_guard();
-                self::discard_staging_import($staging_prefix, $wpdb->base_prefix);
-                return false;
-            }
-        }
-        // Prefix rewrite changes dump size/mtime; keep a stored pass valid only
-        // when it still matches the pre-rewrite fingerprint from this restore.
-        self::rekey_binary_preflight_after_prefix_rewrite($pre_rewrite_key);
-
-        $review_options = self::snapshot_destination_review_options($wpdb);
-
-        $leftover_foreign_options = 0;
-        $tables_before_import = $wpdb->get_results('SHOW TABLES');
-        foreach ($tables_before_import as $table) {
-            foreach ($table as $table_name) {
-                if (substr($table_name, -8) === '_options'
-                    && strpos($table_name, $wpdb->base_prefix) !== 0
-                    && strpos($table_name, $staging_prefix) !== 0
-                ) {
-                    $leftover_foreign_options++;
+        if (!self::check_is_complete_restore_step('db', self::STEP_RESTORE_CHILD_DB_IMPORTED)) {
+            // Data swap source → live dest; remap only statement table names to staging
+            // so row data keeps {dest}capabilities / {dest}user_roles. Foreign-prefix
+            // dumps (ktv_options, nst_options) are also pulled under staging.
+            foreach ($sorted_table_list as $filepath) {
+                $dump = basename($filepath);
+                if (!empty($state['prepared'][$dump])) {
+                    // Recorded already; drop the untouched copy a cut-off worker left.
+                    @unlink($filepath . self::PRISTINE_DUMP_SUFFIX);
+                    continue;
                 }
+                if (!self::begin_db_unit($state, sprintf('rewriting the table prefix in "%s"', $dump))) {
+                    self::clear_import_oom_guard();
+                    self::discard_staging_import($staging_prefix, $wpdb->base_prefix);
+                    return false;
+                }
+                // Prefix rewrite changes dump size/mtime; keep a stored pass valid only
+                // when it still matches the fingerprint from before this rewrite.
+                $pre_rewrite_key = self::binary_preflight_fingerprint();
+                if (!self::prepare_dump_for_staging_once($filepath, $wpdb->base_prefix, $staging_prefix, $source_prefix)) {
+                    One_Click_Migration::write_to_log(sprintf('Error: Database restore failed while remapping the table prefix in "%s".', $dump));
+                    self::clear_import_oom_guard();
+                    self::discard_staging_import($staging_prefix, $wpdb->base_prefix);
+                    return false;
+                }
+                if (!is_file($filepath) || !is_readable($filepath) || filesize($filepath) === 0) {
+                    One_Click_Migration::write_to_log(sprintf('Error: Database restore rejected invalid SQL dump "%s".', $dump));
+                    self::clear_import_oom_guard();
+                    self::discard_staging_import($staging_prefix, $wpdb->base_prefix);
+                    return false;
+                }
+                $state['prepared'][$dump] = true;
+                self::end_db_unit($state);
+                @unlink($filepath . self::PRISTINE_DUMP_SUFFIX);
+                self::rekey_binary_preflight_after_prefix_rewrite($pre_rewrite_key);
+                self::maybe_yield_db_phase('table prefix rewrite');
             }
-        }
-        if ($leftover_foreign_options > 0) {
-            One_Click_Migration::write_to_log(sprintf(
-                'Notice: Found %d leftover foreign-prefix *_options table(s) on destination; siteurl/home gate will use staging "%soptions" matching source_prefix="%s" only.',
-                $leftover_foreign_options,
-                $staging_prefix,
-                $source_prefix
-            ));
-        }
 
-        $main_options_seen = false;
-        foreach ($sorted_table_list as $filepath) {
-            // Import remaps statement heads from source_prefix → staging for any
-            // remaining source-prefixed names; foreign tables already use staging.
-            if (!OCM_SQL_Utils::import($filepath, $source_prefix, $staging_prefix)) {
-                One_Click_Migration::write_to_log(sprintf('Error: Database restore failed while importing "%s".', basename($filepath)));
-                self::clear_import_oom_guard();
-                self::discard_staging_import($staging_prefix, $wpdb->base_prefix);
-                return false;
+            foreach ($sorted_table_list as $filepath) {
+                $dump = basename($filepath);
+                if (!empty($state['imported'][$dump])) {
+                    continue;
+                }
+                if (!self::begin_db_unit($state, sprintf('importing "%s"', $dump))) {
+                    self::clear_import_oom_guard();
+                    self::discard_staging_import($staging_prefix, $wpdb->base_prefix);
+                    return false;
+                }
+                // Import remaps statement heads from source_prefix → staging for any
+                // remaining source-prefixed names; foreign tables already use staging.
+                if (!OCM_SQL_Utils::import($filepath, $source_prefix, $staging_prefix)) {
+                    One_Click_Migration::write_to_log(sprintf('Error: Database restore failed while importing "%s".', $dump));
+                    self::clear_import_oom_guard();
+                    self::discard_staging_import($staging_prefix, $wpdb->base_prefix);
+                    return false;
+                }
+
+                // Gate siteurl/home only after the source-prefix options dump imports.
+                // Stray *options.sql files (ktv_options, nst_options, multisite
+                // {base}{id}_options) must import without this check.
+                if ($dump === $source_prefix . 'options.sql') {
+                    if (!self::verify_staged_main_options($wpdb, $source_prefix, $staging_prefix, $current_url)) {
+                        return self::refuse_options_prefix_gate($staging_prefix, $source_prefix, $wpdb);
+                    }
+                    $state['site_url'] = (string) self::$restore_site_url;
+                }
+                $state['imported'][$dump] = true;
+                self::end_db_unit($state);
+                self::maybe_yield_db_phase('import');
             }
 
-            // Gate siteurl/home only after the source-prefix options dump imports.
-            // Stray *options.sql files (ktv_options, nst_options, multisite
-            // {base}{id}_options) must import without this check.
-            if (basename($filepath) === $source_prefix . 'options.sql') {
-                $main_options_seen = true;
+            if (!in_array($source_prefix . 'options.sql', $dump_names, true)) {
+                // No source-prefix options dump — still require a resolvable options
+                // table with siteurl/home under staging before promoting.
                 $table_name = OCM_SQL_Utils::resolve_main_options_table($wpdb, $source_prefix, $staging_prefix);
                 if ($table_name === false) {
                     return self::refuse_options_prefix_gate($staging_prefix, $source_prefix, $wpdb);
                 }
-
                 $db_url = $wpdb->get_results("SELECT option_value FROM `{$table_name}` WHERE option_name = 'siteurl'");
-                self::$restore_site_url = $db_url[0]->option_value;
-
-                One_Click_Migration::write_to_log(sprintf(
-                    'Main options verified on staging table "%s" (source_prefix="%s" staging_prefix="%s" dest_base_prefix="%s" dest_prefix="%s").',
-                    $table_name,
-                    $source_prefix,
-                    $staging_prefix,
-                    $wpdb->base_prefix,
-                    $wpdb->prefix
-                ));
-
-                if ($current_url !== self::$restore_site_url) {
-                    $wpdb->update(
-                        $table_name,
-                        array('option_value' => $current_url),
-                        array('option_name' => 'siteurl'),
-                        array('%s'),
-                        array('%s')
-                    );
-
-                    $wpdb->update(
-                        $table_name,
-                        array('option_value' => $current_url),
-                        array('option_name' => 'home'),
-                        array('%s'),
-                        array('%s')
-                    );
+                if (!empty($db_url) && !empty($db_url[0]->option_value)) {
+                    $state['site_url'] = (string) $db_url[0]->option_value;
+                    self::save_db_import_state($state);
                 }
             }
+            self::set_complete_restore_step('db', self::STEP_RESTORE_CHILD_DB_IMPORTED);
+        }
+        self::$restore_site_url = isset($state['site_url']) ? (string) $state['site_url'] : '';
+
+        if (!self::check_is_complete_restore_step('db', self::STEP_RESTORE_CHILD_DB_URLS)) {
+            // URL rewrite on temp-prefixed staging tables only — before atomic RENAME
+            // and before any file swap. Failure / OOM leaves the live site untouched.
+            if (!self::rewrite_urls_on_staging_tables($staging_prefix)) {
+                self::clear_import_oom_guard();
+                if (self::$url_rewrite_unpageable_table) {
+                    // Drop staging quietly so the dedicated Error stays immediately
+                    // before LOG_RESTORE_STOPPED_IMPORT (no discard Error in between).
+                    OCM_SQL_Utils::drop_tables_with_prefix($staging_prefix);
+                    delete_option(OCM_SQL_Utils::OPTION_STAGING_PREFIX);
+                    self::clear_db_import_state();
+                } else {
+                    self::discard_staging_import($staging_prefix, $wpdb->base_prefix);
+                }
+                return false;
+            }
+            self::set_complete_restore_step('db', self::STEP_RESTORE_CHILD_DB_URLS);
+            // Promote and the file swaps after it start with a full time budget.
+            self::maybe_yield_db_phase('URL update');
         }
 
-        if (!$main_options_seen) {
-            // No source-prefix options dump — still require a resolvable options
-            // table with siteurl/home under staging before promoting.
-            $table_name = OCM_SQL_Utils::resolve_main_options_table($wpdb, $source_prefix, $staging_prefix);
-            if ($table_name === false) {
-                return self::refuse_options_prefix_gate($staging_prefix, $source_prefix, $wpdb);
-            }
-            $db_url = $wpdb->get_results("SELECT option_value FROM `{$table_name}` WHERE option_name = 'siteurl'");
-            if (!empty($db_url) && !empty($db_url[0]->option_value)) {
-                self::$restore_site_url = $db_url[0]->option_value;
-            }
-        }
-
-        // URL rewrite on temp-prefixed staging tables only — before atomic RENAME
-        // and before any file swap. Failure / OOM leaves the live site untouched.
-        if (!self::rewrite_urls_on_staging_tables($staging_prefix)) {
-            self::clear_import_oom_guard();
-            if (self::$url_rewrite_unpageable_table) {
-                // Drop staging quietly so the dedicated Error stays immediately
-                // before LOG_RESTORE_STOPPED_IMPORT (no discard Error in between).
-                OCM_SQL_Utils::drop_tables_with_prefix($staging_prefix);
-                delete_option(OCM_SQL_Utils::OPTION_STAGING_PREFIX);
+        if (!self::check_is_complete_restore_step('db', self::STEP_RESTORE_CHILD_DB_PROMOTED)) {
+            $state = self::db_import_state();
+            $was_promoting = !empty($state['promoting']);
+            if ($was_promoting && !self::staging_tables_exist($wpdb, $staging_prefix)) {
+                // The RENAME went through and the worker was cut off after it.
+                One_Click_Migration::write_to_log(sprintf(
+                    'SYSLOG: Staging prefix "%s" was already promoted by an earlier worker.',
+                    $staging_prefix
+                ));
             } else {
-                self::discard_staging_import($staging_prefix, $wpdb->base_prefix);
-            }
-            return false;
-        }
+                // Saved before the RENAME, so the promoted options table (which
+                // keeps this site's restore_steps) carries the marker.
+                $state['promoting'] = true;
+                if (!self::begin_db_unit($state, 'promoting the staging tables')) {
+                    self::clear_import_oom_guard();
+                    self::discard_staging_import($staging_prefix, $wpdb->base_prefix);
+                    return false;
+                }
+                $review_options = self::snapshot_destination_review_options($wpdb);
+                if (!OCM_SQL_Utils::promote_staging_tables($staging_prefix, $wpdb->base_prefix, $source_suffixes)) {
+                    One_Click_Migration::write_to_log(sprintf(
+                        'Error: Database import failed while promoting staging prefix "%s" to live prefix "%s"; discarding staging tables and leaving any recoverable live tables in place.',
+                        $staging_prefix,
+                        $wpdb->base_prefix
+                    ));
+                    self::clear_import_oom_guard();
+                    self::discard_staging_import($staging_prefix, $wpdb->base_prefix);
+                    return false;
+                }
 
-        if (!OCM_SQL_Utils::promote_staging_tables($staging_prefix, $wpdb->base_prefix, $source_suffixes)) {
-            One_Click_Migration::write_to_log(sprintf(
-                'Error: Database import failed while promoting staging prefix "%s" to live prefix "%s"; discarding staging tables and leaving any recoverable live tables in place.',
-                $staging_prefix,
-                $wpdb->base_prefix
-            ));
-            self::clear_import_oom_guard();
-            self::discard_staging_import($staging_prefix, $wpdb->base_prefix);
-            return false;
+                self::clear_import_oom_guard();
+
+                // Destination review prefs were snapshotted from the live options table
+                // before promote; write them onto the newly promoted options table.
+                self::restore_destination_review_options($wpdb, $review_options);
+            }
+            self::set_complete_restore_step('db', self::STEP_RESTORE_CHILD_DB_PROMOTED);
         }
 
         self::clear_import_oom_guard();
 
-        // Destination review prefs were snapshotted from the live options table
-        // before promote; write them onto the newly promoted options table.
-        self::restore_destination_review_options($wpdb, $review_options);
-
-        // Clear any stale background process queues imported from the source site's database
-        // to prevent them from firing on the destination site after restore.
-        OCM_BackgroundHelper::delete_all_batch_process();
+        // The source's queue rows and step checkpoints never reach the live
+        // table: promote swaps them for this site's own (keep_destination_plugin_state).
+        // Deleting queue rows here would drop this restore's own queue item and
+        // restore_steps, and a worker restarted after promote could not resume.
 
         One_Click_Migration::write_to_log('Database has been restored');
         return true;
     }
 
     /**
+     * In-flight database import of this restore (restore_steps db/dbImport):
+     * staging prefix, dumps rewritten and imported so far, the source siteurl
+     * read at the options gate and the URL-rewrite position. Null when no
+     * import has started.
+     *
+     * @return array|null
+     */
+    private static function db_import_state()
+    {
+        $state = self::get_restore_step_value('db', self::STEP_RESTORE_CHILD_DB_IMPORT);
+        if (!is_array($state) || empty($state['prefix']) || !is_string($state['prefix'])) {
+            return null;
+        }
+        return $state + array(
+            'source_prefix' => '',
+            'files' => array(),
+            'prepared' => array(),
+            'imported' => array(),
+            'site_url' => '',
+            'unit' => '',
+            'attempts' => 0,
+        );
+    }
+
+    private static function save_db_import_state(array $state)
+    {
+        self::set_complete_restore_step('db', self::STEP_RESTORE_CHILD_DB_IMPORT, $state);
+    }
+
+    /**
+     * Forget the in-flight import: its staging tables were dropped.
+     *
+     * @return void
+     */
+    private static function clear_db_import_state()
+    {
+        $steps = get_option('restore_steps', null);
+        if (is_array($steps) && isset($steps['db']) && is_array($steps['db'])
+            && (!empty($steps['db'][self::STEP_RESTORE_CHILD_DB_IMPORT])
+                || !empty($steps['db'][self::STEP_RESTORE_CHILD_DB_IMPORTED])
+                || !empty($steps['db'][self::STEP_RESTORE_CHILD_DB_URLS])
+                || !empty($steps['db'][self::STEP_RESTORE_CHILD_DB_PROMOTED]))
+        ) {
+            $steps['db'][self::STEP_RESTORE_CHILD_DB_IMPORT] = null;
+            $steps['db'][self::STEP_RESTORE_CHILD_DB_IMPORTED] = false;
+            $steps['db'][self::STEP_RESTORE_CHILD_DB_URLS] = false;
+            $steps['db'][self::STEP_RESTORE_CHILD_DB_PROMOTED] = false;
+            update_option('restore_steps', $steps, true);
+        }
+        delete_option(self::OPTION_RESTORE_URL_HOSTS);
+    }
+
+    /**
+     * May this worker continue the saved import? The dumps, the source prefix
+     * and (until promote) the stored staging prefix must all still match.
+     *
+     * @param array    $state
+     * @param string   $source_prefix
+     * @param string[] $dump_names
+     * @return bool
+     */
+    private static function db_import_state_matches(array $state, $source_prefix, array $dump_names)
+    {
+        if ($state['source_prefix'] !== $source_prefix || array_values((array) $state['files']) !== $dump_names) {
+            return false;
+        }
+        return !empty($state['promoting'])
+            || (string) get_option(OCM_SQL_Utils::OPTION_STAGING_PREFIX, '') === $state['prefix'];
+    }
+
+    /**
+     * Record that this worker starts $unit of the import. Starting the same
+     * unit again without having finished it means the worker before was cut
+     * off in it (PHP-FPM request_terminate_timeout sends SIGTERM, which skips
+     * shutdown functions). After MAX_DB_UNIT_ATTEMPTS of those the restore
+     * stops instead of looping.
+     *
+     * @param array  $state
+     * @param string $unit  Human-readable step, e.g. 'importing "wp_posts.sql"'.
+     * @return bool False when the unit was cut off too often.
+     */
+    private static function begin_db_unit(array &$state, $unit)
+    {
+        $attempts = (isset($state['unit']) && $state['unit'] === $unit)
+            ? (int) $state['attempts'] + 1
+            : 1;
+        if ($attempts > self::MAX_DB_UNIT_ATTEMPTS) {
+            One_Click_Migration::write_to_log(sprintf(
+                'Error: Database restore was cut off %d times in a row while %s. The server stops PHP before this step can finish; raise its PHP time limit (max_execution_time, PHP-FPM request_terminate_timeout) and run the restore again.',
+                $attempts - 1,
+                $unit
+            ));
+            return false;
+        }
+        $state['unit'] = $unit;
+        $state['attempts'] = $attempts;
+        self::save_db_import_state($state);
+        return true;
+    }
+
+    /**
+     * The unit begin_db_unit() recorded has finished; save it with $state.
+     *
+     * @param array $state
+     * @return void
+     */
+    private static function end_db_unit(array &$state)
+    {
+        $state['unit'] = '';
+        $state['attempts'] = 0;
+        self::save_db_import_state($state);
+        self::$db_phase_progress = true;
+    }
+
+    /**
+     * True once this restore worker has used up its time budget.
+     *
+     * @return bool
+     */
+    private static function restore_worker_out_of_time()
+    {
+        $process = One_Click_Migration::$process_restore_single;
+        return is_object($process) && method_exists($process, 'time_exceeded') && $process->time_exceeded();
+    }
+
+    /**
+     * After a finished unit: when the worker is out of time, hand the rest of
+     * the DB phase to a new worker. Progress is saved, and the queue item stays
+     * queued, so the next worker re-enters restore_db() at the checkpoint.
+     *
+     * @param string $stage For the log.
+     * @return void
+     */
+    private static function maybe_yield_db_phase($stage)
+    {
+        if (self::$db_phase_progress && self::restore_worker_out_of_time()) {
+            self::yield_db_phase($stage);
+        }
+    }
+
+    /**
+     * @param string $stage For the log.
+     * @return never
+     */
+    private static function yield_db_phase($stage)
+    {
+        self::clear_import_oom_guard();
+        One_Click_Migration::write_to_log(sprintf('SYSLOG: Database restore: %s continues in a new worker.', $stage));
+        One_Click_Migration::write_to_log('Process is Restarting');
+        One_Click_Migration::$process_restore_single->restart_task();
+        exit;
+    }
+
+    /**
+     * Rewrite one extracted dump for the staging prefix. The untouched dump is
+     * kept (hard link, else a copy) until the caller records the rewrite: every
+     * rewrite pass replaces the file via a temp file and rename(), so the link
+     * still points at the original bytes. A worker cut off halfway leaves that
+     * copy behind, and the next one starts again from it instead of rewriting a
+     * half-rewritten dump a second time.
+     *
+     * @param string $filepath
+     * @param string $dest_prefix
+     * @param string $staging_prefix
+     * @param string $source_prefix
+     * @return bool
+     */
+    private static function prepare_dump_for_staging_once($filepath, $dest_prefix, $staging_prefix, $source_prefix)
+    {
+        $pristine = $filepath . self::PRISTINE_DUMP_SUFFIX;
+        @unlink($pristine . '.tmp');
+        if (is_file($pristine)) {
+            if (!@rename($pristine, $filepath)) {
+                One_Click_Migration::write_to_log(sprintf(
+                    'Error: Could not put back the untouched copy of "%s" after an interrupted table prefix rewrite.',
+                    basename($filepath)
+                ));
+                return false;
+            }
+            One_Click_Migration::write_to_log(sprintf(
+                'SYSLOG: Restarting the table prefix rewrite of "%s" from its untouched copy.',
+                basename($filepath)
+            ));
+        }
+        $kept = function_exists('link') && @link($filepath, $pristine);
+        if (!$kept) {
+            $kept = @copy($filepath, $pristine . '.tmp') && @rename($pristine . '.tmp', $pristine);
+        }
+        if (!$kept) {
+            @unlink($pristine . '.tmp');
+            One_Click_Migration::write_to_log(sprintf(
+                'Error: Could not keep an untouched copy of "%s" while rewriting its table prefix. Please check disk quota and write permissions.',
+                basename($filepath)
+            ));
+            return false;
+        }
+        return OCM_SQL_Utils::prepare_sql_dump_for_staging($filepath, $dest_prefix, $staging_prefix, $source_prefix);
+    }
+
+    /**
+     * Staging table a prepared dump creates: source- or destination-prefixed
+     * names keep their suffix under the staging prefix, foreign tables are
+     * nested under it (see OCM_SQL_Utils::prepare_sql_dump_for_staging()).
+     *
+     * @param string $filepath
+     * @param string $source_prefix
+     * @param string $dest_prefix
+     * @param string $staging_prefix
+     * @return string
+     */
+    private static function staged_table_for_dump($filepath, $source_prefix, $dest_prefix, $staging_prefix)
+    {
+        $table = preg_replace('/\.sql$/i', '', basename((string) $filepath));
+        foreach (array($source_prefix, $dest_prefix) as $prefix) {
+            if (is_string($prefix) && $prefix !== '' && strpos($table, $prefix) === 0) {
+                return $staging_prefix . substr($table, strlen($prefix));
+            }
+        }
+        return $staging_prefix . $table;
+    }
+
+    /**
+     * @param wpdb   $wpdb
+     * @param string $prefix
+     * @return bool
+     */
+    private static function staging_tables_exist(wpdb $wpdb, $prefix)
+    {
+        $tables = $wpdb->get_col('SHOW TABLES');
+        foreach (is_array($tables) ? $tables : array() as $table) {
+            if (strpos((string) $table, $prefix) === 0) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Options gate on the imported main options table: siteurl and home must be
+     * there. Remembers the source siteurl for the URL rewrite and points
+     * siteurl/home at this site.
+     *
+     * @return bool False when the gate refuses.
+     */
+    private static function verify_staged_main_options(wpdb $wpdb, $source_prefix, $staging_prefix, $current_url)
+    {
+        $table_name = OCM_SQL_Utils::resolve_main_options_table($wpdb, $source_prefix, $staging_prefix);
+        if ($table_name === false) {
+            return false;
+        }
+
+        $db_url = $wpdb->get_results("SELECT option_value FROM `{$table_name}` WHERE option_name = 'siteurl'");
+        self::$restore_site_url = $db_url[0]->option_value;
+
+        One_Click_Migration::write_to_log(sprintf(
+            'Main options verified on staging table "%s" (source_prefix="%s" staging_prefix="%s" dest_base_prefix="%s" dest_prefix="%s").',
+            $table_name,
+            $source_prefix,
+            $staging_prefix,
+            $wpdb->base_prefix,
+            $wpdb->prefix
+        ));
+
+        self::point_staged_options_at_destination($wpdb, $table_name, $current_url);
+        return true;
+    }
+
+    private static function point_staged_options_at_destination(wpdb $wpdb, $table_name, $current_url)
+    {
+        if ($current_url === self::$restore_site_url) {
+            return;
+        }
+        $wpdb->update(
+            $table_name,
+            array('option_value' => $current_url),
+            array('option_name' => 'siteurl'),
+            array('%s'),
+            array('%s')
+        );
+
+        $wpdb->update(
+            $table_name,
+            array('option_value' => $current_url),
+            array('option_name' => 'home'),
+            array('%s'),
+            array('%s')
+        );
+    }
+
+    /**
+     * Re-import the dump behind one staging table. A worker cut off while
+     * rewriting that table's URLs leaves rows after its last checkpoint
+     * possibly rewritten, and a second pass is not always safe (a new address
+     * can contain the old one), so the table starts over from its dump.
+     *
+     * @param string $table
+     * @param array  $state
+     * @return bool
+     */
+    private static function reimport_staging_table($table, array $state)
+    {
+        global $wpdb;
+        $dbfiles = self::get_restore_work_path() . '/db/';
+        foreach (OCM_SQL_Utils::list_restore_sql_dump_files($dbfiles) as $filepath) {
+            if (self::staged_table_for_dump($filepath, $state['source_prefix'], $wpdb->base_prefix, $state['prefix']) !== $table) {
+                continue;
+            }
+            $wpdb->query('DROP TABLE IF EXISTS `' . str_replace('`', '``', $table) . '`');
+            if (!OCM_SQL_Utils::import($filepath, $state['source_prefix'], $state['prefix'])) {
+                One_Click_Migration::write_to_log(sprintf(
+                    'Error: Database restore failed while importing "%s" again after an interrupted URL update.',
+                    basename($filepath)
+                ));
+                return false;
+            }
+            if (basename($filepath) === $state['source_prefix'] . 'options.sql') {
+                self::point_staged_options_at_destination($wpdb, $table, site_url());
+            }
+            One_Click_Migration::write_to_log(sprintf(
+                'SYSLOG: Imported "%s" again: a worker was cut off while updating its URLs.',
+                basename($filepath)
+            ));
+            return true;
+        }
+        One_Click_Migration::write_to_log(sprintf(
+            'Error: Database restore could not find the dump behind staging table "%s" to import it again after an interrupted URL update.',
+            $table
+        ));
+        return false;
+    }
+
+    /**
      * Run URL search-replace against staging-prefixed tables only. Must complete
      * before promote_staging_tables() / file swap. Returns false on rewrite errors
      * so the caller can discard staging and stop with LOG_RESTORE_STOPPED_IMPORT.
+     *
+     * Inside restore_db() the rewrite checkpoints after every table and when
+     * the worker runs out of time mid-table (keyset position), then hands over
+     * to a new worker. A table a worker was cut off in is imported again.
      *
      * @param string $staging_prefix
      * @return bool
@@ -5550,9 +6368,30 @@ class OCM_Backup
             $url_plan = array();
         }
         $extra_arguments = OCM_Restore_Precheck::replacement_args($url_plan, $old_url, $current_url);
+
+        // Checkpoints exist only for restore_db()'s own staging import.
+        $state = self::db_import_state();
+        if ($state !== null && $state['prefix'] !== $staging_prefix) {
+            $state = null;
+        }
+        $progress = ($state !== null && isset($state['url']) && is_array($state['url'])) ? $state['url'] : array();
+        $progress += array(
+            'done' => array(),
+            'table' => null,
+            'last_key' => null,
+            'clean' => true,
+            'updates' => 0,
+            'errors' => array(),
+            'error_count' => 0,
+            'failed_pairs' => array(),
+        );
+        $started = $progress['done'] || $progress['table'] !== null;
+
         $db_details = new OCM_DB();
-        if (empty($url_plan['reviewed'])) {
-            $db_details->enable_url_collection();
+        $collect = empty($url_plan['reviewed']);
+        if ($collect) {
+            $found = $started ? get_option(self::OPTION_RESTORE_URL_HOSTS, array()) : array();
+            $db_details->enable_url_collection(is_array($found) ? $found : array());
         }
         $all_tables = OCM_DB::get_tables();
         if (!is_array($all_tables)) {
@@ -5567,29 +6406,138 @@ class OCM_Backup
         if (!$staging_tables) {
             return true;
         }
-        $result = $db_details->search_replace_db($staging_tables, $extra_arguments);
-        // Dedicated stop (keyless unpageable or oversized row): Error was already
-        // logged; return before Finished/Number SYSLOG so that Error sits
-        // immediately before LOG_RESTORE_STOPPED_IMPORT.
-        if (!empty($result['unpageable_table'])) {
-            self::$url_rewrite_unpageable_table = (string) $result['unpageable_table'];
+        // Finish the table the last worker was in before any other: its
+        // checkpoint (or the mark that it was cut off) is only kept until the
+        // next table starts. SHOW TABLES order can change when it is re-imported.
+        $in_progress = array_search($progress['table'], $staging_tables, true);
+        if ($in_progress !== false) {
+            unset($staging_tables[$in_progress]);
+            array_unshift($staging_tables, $progress['table']);
+        } elseif ($progress['table'] !== null) {
+            One_Click_Migration::write_to_log(sprintf(
+                'Error: Database restore could not resume the URL update: staging table "%s" is gone.',
+                $progress['table']
+            ));
             return false;
         }
-        if (!empty($result['oversized_table'])) {
-            self::$url_rewrite_unpageable_table = (string) $result['oversized_table'];
+
+        $save_progress = static function (array $progress) use (&$state, $collect, $db_details) {
+            $state['url'] = $progress;
+            if ($collect) {
+                update_option(self::OPTION_RESTORE_URL_HOSTS, $db_details->collected_urls(), false);
+            }
+        };
+        $should_yield = $state !== null
+            ? static function () {
+                return self::restore_worker_out_of_time();
+            }
+            : null;
+
+        $remaining = count($staging_tables) - count(array_intersect_key(array_flip($staging_tables), $progress['done']));
+        foreach ($staging_tables as $table) {
+            if (!empty($progress['done'][$table])) {
+                continue;
+            }
+            $resume_key = null;
+            if ($progress['table'] === $table) {
+                if (empty($progress['clean'])) {
+                    if (!self::reimport_staging_table($table, $state)) {
+                        return false;
+                    }
+                } else {
+                    $resume_key = is_array($progress['last_key']) ? $progress['last_key'] : null;
+                }
+            }
+            if ($state !== null) {
+                $progress['table'] = $table;
+                $progress['last_key'] = $resume_key;
+                $progress['clean'] = false;
+                $state['url'] = $progress;
+                if (!self::begin_db_unit($state, sprintf('updating URLs in "%s"', $table))) {
+                    return false;
+                }
+            }
+
+            $table_result = $db_details->search_replace_db(array($table), $extra_arguments + array(
+                'continuing' => $started,
+                'log_summary' => false,
+                'resume_key' => $resume_key,
+                'should_yield' => $should_yield,
+            ));
+            $started = true;
+            // Dedicated stop (keyless unpageable or oversized row): Error was already
+            // logged; return before Finished/Number SYSLOG so that Error sits
+            // immediately before LOG_RESTORE_STOPPED_IMPORT.
+            if (!empty($table_result['unpageable_table'])) {
+                self::$url_rewrite_unpageable_table = (string) $table_result['unpageable_table'];
+                return false;
+            }
+            if (!empty($table_result['oversized_table'])) {
+                self::$url_rewrite_unpageable_table = (string) $table_result['oversized_table'];
+                return false;
+            }
+            if (!empty($table_result['paging_stuck_table'])) {
+                self::$url_rewrite_unpageable_table = (string) $table_result['paging_stuck_table'];
+                return false;
+            }
+
+            $progress['updates'] += isset($table_result['updates']) ? (int) $table_result['updates'] : 0;
+            $table_errors = isset($table_result['errors']) && is_array($table_result['errors']) ? $table_result['errors'] : array();
+            $progress['error_count'] += count($table_errors);
+            // Only the count is logged; keep a few messages, not one per row.
+            $progress['errors'] = array_slice(array_merge($progress['errors'], $table_errors), 0, 20);
+            if (isset($table_result['failed_pairs']) && is_array($table_result['failed_pairs'])) {
+                foreach ($table_result['failed_pairs'] as $pair) {
+                    if (is_array($pair) && isset($pair['search']) && !isset($progress['failed_pairs'][$pair['search']])) {
+                        $progress['failed_pairs'][$pair['search']] = $pair;
+                    }
+                }
+            }
+
+            if (!empty($table_result['yielded']) && $state !== null) {
+                $progress['last_key'] = isset($table_result['cursor']['last_key']) ? $table_result['cursor']['last_key'] : null;
+                $progress['clean'] = true;
+                $save_progress($progress);
+                self::end_db_unit($state);
+                self::yield_db_phase('URL update');
+            }
+
+            $progress['done'][$table] = true;
+            $progress['table'] = null;
+            $progress['last_key'] = null;
+            $progress['clean'] = true;
+            $remaining--;
+            if ($state !== null) {
+                $save_progress($progress);
+                self::end_db_unit($state);
+                if ($remaining > 0) {
+                    self::maybe_yield_db_phase('URL update');
+                }
+            }
+        }
+
+        // Logging the summary and the extra-domain candidates can take a while
+        // (every log line is uploaded); count cut-offs here too.
+        if ($state !== null && !self::begin_db_unit($state, 'finishing the URL update')) {
             return false;
         }
-        if (!empty($result['paging_stuck_table'])) {
-            self::$url_rewrite_unpageable_table = (string) $result['paging_stuck_table'];
-            return false;
-        }
+        $result = array(
+            'updates' => $progress['updates'],
+            'errors' => $progress['errors'],
+            'failed_pairs' => array_values($progress['failed_pairs']),
+        );
+        One_Click_Migration::write_to_log(sprintf(
+            'SYSLOG: URL update: peak_bytes=%d memory_limit=%s',
+            (int) memory_get_peak_usage(true),
+            (string) ini_get('memory_limit')
+        ));
         $report_update = isset($result['updates']) ? $result['updates'] : 0;
         One_Click_Migration::write_to_log(sprintf('SYSLOG: Number of updates made from replace "%s"', $report_update));
         One_Click_Migration::write_to_log('SYSLOG: Finished updating URLs in the database');
         if (!empty($result['errors'])) {
             One_Click_Migration::write_to_log(sprintf(
                 'Error: Database restore failed while updating URLs on staging tables (%d).',
-                count($result['errors'])
+                (int) $progress['error_count']
             ));
             $failed_pairs = isset($result['failed_pairs']) && is_array($result['failed_pairs'])
                 ? $result['failed_pairs']
@@ -5599,8 +6547,9 @@ class OCM_Backup
         }
         // Only after a clean rewrite: candidates make the admin page open the
         // restore-success modal, which must never follow a stopped restore.
-        if (empty($url_plan['reviewed'])) {
+        if ($collect) {
             self::store_extra_domain_candidates($db_details->collected_urls(), $old_url, $current_url);
+            delete_option(self::OPTION_RESTORE_URL_HOSTS);
         }
         if (!empty($url_plan['reviewed'])) {
             delete_option(OCM_Extra_Domains::OPTION);
@@ -5652,6 +6601,7 @@ class OCM_Backup
         ));
         OCM_SQL_Utils::drop_tables_with_prefix($staging_prefix);
         delete_option(OCM_SQL_Utils::OPTION_STAGING_PREFIX);
+        self::clear_db_import_state();
     }
 
     private static function snapshot_destination_review_options(wpdb $wpdb)
@@ -5717,9 +6667,10 @@ class OCM_Backup
 
         // Move every plugin from the restore directory one by one in to the existing plugins directory.
         // GLOB_ONLYDIR so the WP-generated index.php placeholder isn't treated as a plugin directory.
-        $restore_plugins = glob(WP_CONTENT_DIR . '/ocm_restore/plugins/*', GLOB_ONLYDIR) ?: array();
+        $restore_plugins_dir = self::get_restore_work_path() . '/plugins';
+        $restore_plugins = glob($restore_plugins_dir . '/*', GLOB_ONLYDIR) ?: array();
         foreach ($restore_plugins as $plugin) {
-            if ($plugin === WP_CONTENT_DIR . '/ocm_restore/plugins/1-click-migration') {
+            if ($plugin === $restore_plugins_dir . '/1-click-migration') {
                 continue;
             }
 
@@ -5928,6 +6879,9 @@ class OCM_Backup
       delete_option(self::OPTION_RESTORE_PART_WARNINGS);
       delete_option(self::OPTION_RESTORE_PLUGINS_ISOLATED);
       delete_option(self::OPTION_RESTORE_WAS_WARNED);
+      delete_option(self::OPTION_RESTORE_URL_HOSTS);
+      // A run abandoned mid-import left its prefix; this run's dumps are new.
+      delete_option(OCM_SQL_Utils::OPTION_STAGING_PREFIX);
       delete_option('ocm_restore_was_partial');
       // A new run's log must show its own PHP errors, not skip ones the
       // previous run already logged.
@@ -5937,6 +6891,7 @@ class OCM_Backup
       delete_option(OCM_SQL_Utils::OPTION_BACKUP_PLUGIN_VERSION);
       delete_option(OCM_Extra_Domains::OPTION);
       delete_option(OCM_Restore_Precheck::OPTION);
+      delete_option(self::RESTORE_RUN_OPTION);
 
     }
 

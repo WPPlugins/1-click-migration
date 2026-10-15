@@ -1912,8 +1912,147 @@ class OCM_SQL_Utils
                 (int) $kept,
                 $live_table
             ));
+
+            if ($suffix === 'options'
+                && !self::keep_destination_plugin_cron($wpdb, $staging_table, isset($live[$live_table]) ? $live_table : null)
+            ) {
+                return false;
+            }
         }
         return true;
+    }
+
+    /**
+     * The source's WP `cron` option still schedules its own 1CM events (the
+     * background processes' healthchecks), which would fire on the destination
+     * after promote. Drop them from the staged copy and carry over the
+     * destination's own 1CM events instead, like the option rows above (#95).
+     * Other plugins' events are left exactly as imported.
+     *
+     * @param \wpdb       $wpdb
+     * @param string      $staging_table
+     * @param string|null $live_table Null when the destination has no options table.
+     * @return bool False when the staged cron could not be rewritten; promote must stop.
+     */
+    private static function keep_destination_plugin_cron($wpdb, $staging_table, $live_table)
+    {
+        if (!method_exists($wpdb, 'get_var')) {
+            return true;
+        }
+        $staged = self::read_cron_option($wpdb, $staging_table);
+        if (!is_array($staged)) {
+            // No cron row, or one WordPress itself couldn't read: nothing to run.
+            return true;
+        }
+        $live = $live_table !== null ? self::read_cron_option($wpdb, $live_table) : null;
+        list($cron, $dropped, $kept) = self::merge_plugin_cron_events($staged, is_array($live) ? $live : array());
+        if ($dropped === 0 && $kept === 0) {
+            return true;
+        }
+
+        $staging_sql = '`' . str_replace('`', '``', $staging_table) . '`';
+        $wpdb->last_error = '';
+        $updated = $wpdb->query($wpdb->prepare(
+            "UPDATE {$staging_sql} SET `option_value` = %s WHERE `option_name` = 'cron'",
+            serialize($cron)
+        ));
+        if ($updated === false || !empty($wpdb->last_error)) {
+            One_Click_Migration::write_to_log(sprintf(
+                'Error: Could not clear the source site\'s scheduled plugin events from staging table "%s": %s',
+                $staging_table,
+                !empty($wpdb->last_error) ? $wpdb->last_error : 'UPDATE rejected'
+            ));
+            return false;
+        }
+        One_Click_Migration::write_to_log(sprintf(
+            'SYSLOG: Plugin cron events on "%s": dropped %d imported event(s), kept %d event(s) from "%s".',
+            $staging_table,
+            $dropped,
+            $kept,
+            $live_table !== null ? $live_table : '-'
+        ));
+        return true;
+    }
+
+    /**
+     * @param \wpdb  $wpdb
+     * @param string $table
+     * @return array|null The unserialized `cron` option, or null when missing or unreadable.
+     */
+    private static function read_cron_option($wpdb, $table)
+    {
+        $table_sql = '`' . str_replace('`', '``', $table) . '`';
+        $raw = $wpdb->get_var("SELECT `option_value` FROM {$table_sql} WHERE `option_name` = 'cron' LIMIT 1");
+        if (!is_string($raw) || $raw === '') {
+            return null;
+        }
+        // Event args never need live objects here; unknown classes round-trip
+        // through serialize() unchanged as __PHP_Incomplete_Class.
+        $cron = @unserialize($raw, array('allowed_classes' => false));
+        return is_array($cron) ? $cron : null;
+    }
+
+    /**
+     * True for hooks this plugin schedules: the background processes'
+     * healthchecks (wp_ocm_background_*_cron) and any ocm_* hook.
+     *
+     * @param string $hook
+     * @return bool
+     */
+    public static function is_plugin_cron_hook($hook)
+    {
+        $hook = (string) $hook;
+        return strpos($hook, 'ocm_') === 0 || strpos($hook, 'ocm_background_') !== false;
+    }
+
+    /**
+     * Remove 1CM hooks from the source cron array and add the destination's
+     * 1CM hooks. Keeps WordPress's layout: timestamps ascending, `version` last.
+     *
+     * @param array $staged Source cron array (from the dump).
+     * @param array $live   Destination cron array.
+     * @return array{0: array, 1: int, 2: int} Cron array, events dropped, events kept.
+     */
+    public static function merge_plugin_cron_events(array $staged, array $live)
+    {
+        $dropped = 0;
+        $kept = 0;
+        foreach ($staged as $timestamp => $hooks) {
+            if ($timestamp === 'version' || !is_array($hooks)) {
+                continue;
+            }
+            foreach ($hooks as $hook => $events) {
+                if (self::is_plugin_cron_hook($hook)) {
+                    $dropped += is_array($events) ? count($events) : 1;
+                    unset($staged[$timestamp][$hook]);
+                }
+            }
+            if (!$staged[$timestamp]) {
+                unset($staged[$timestamp]);
+            }
+        }
+        foreach ($live as $timestamp => $hooks) {
+            if ($timestamp === 'version' || !is_array($hooks)) {
+                continue;
+            }
+            foreach ($hooks as $hook => $events) {
+                if (!self::is_plugin_cron_hook($hook) || !is_array($events)) {
+                    continue;
+                }
+                foreach ($events as $event_key => $event) {
+                    $staged[$timestamp][$hook][$event_key] = $event;
+                    $kept++;
+                }
+            }
+        }
+
+        $version = array_key_exists('version', $staged) ? $staged['version'] : null;
+        unset($staged['version']);
+        ksort($staged, SORT_NUMERIC);
+        if ($version !== null) {
+            $staged['version'] = $version;
+        }
+        return array($staged, $dropped, $kept);
     }
 
     /**
