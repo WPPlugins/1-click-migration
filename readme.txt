@@ -1,15 +1,15 @@
-=== 1-Click Migration – WordPress Backup, Migrate & Clone ===
+=== 1-Click WordPress Migration Plugin – Backup, Migrate & Clone ===
 Contributors: 1clickmigration
 Tags: backup, migrate, migration, restore, clone
 Requires at least: 4.0
 Tested up to: 7.1
 Requires PHP: 7.4
-Stable tag: 3.1.24
+Stable tag: 3.1.25
 Author URI: https://1clickmigration.com
 License: GPLv3 or later
 License URI: http://www.gnu.org/licenses/gpl-3.0.html
 
-Free one-click migration with no 4GB cap. Clone, transfer or move a WordPress site to a new host or domain with an emailed restore code.
+Free one-click WordPress migration plugin with no 4GB cap. Clone, transfer or move a site to a new host or domain with an emailed restore code.
 
 == Description ==
 
@@ -104,6 +104,9 @@ Any host that runs WordPress on PHP 7.4 or later, including Bluehost, SiteGround
 4. Enter the restore code on the destination site to finish your WordPress migration.
 
 == Changelog ==
+= 3.1.25 =
+* **Listing update**: New plugin title and short description on WordPress.org. Backup and restore work exactly as in 3.1.24.
+
 = 3.1.24 =
 * **Help links go to the support forum**: When a backup or restore fails, stops or stalls, the progress card now links to the WordPress.org support forum instead of the 1clickmigration.com contact form. It asks you to share your site's domain and never your restore code, because anyone who has the code can restore your backup. The help sections on the plugin page and the summary of an unfinished restore link there too.
 * **Updated plugin listing**: New title, short description and description on WordPress.org. Two corrections: a restore needs only the restore code, and the plugin page is under Tools → One Click Migration.
@@ -334,6 +337,9 @@ Any host that runs WordPress on PHP 7.4 or later, including Bluehost, SiteGround
 * Initial release & dependency updates
 
 == Upgrade Notice ==
+
+= 3.1.25 =
+Listing-only update: a new title and short description on WordPress.org. No changes to backup or restore. Includes all 3.1.24 changes.
 
 = 3.1.24 =
 Help links now go to the WordPress.org support forum instead of a contact form, and the plugin listing has new copy. Includes all 3.1.23 changes.
