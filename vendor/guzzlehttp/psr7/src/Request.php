@@ -1,7 +1,5 @@
 <?php
 
-declare(strict_types=1);
-
 namespace GuzzleHttp\Psr7;
 
 use InvalidArgumentException;
@@ -28,26 +26,23 @@ class Request implements RequestInterface
     /**
      * @param string                               $method  HTTP method
      * @param string|UriInterface                  $uri     URI
-     * @param (string|string[])[]                  $headers Request headers
+     * @param array                                $headers Request headers
      * @param string|resource|StreamInterface|null $body    Request body
      * @param string                               $version Protocol version
      */
     public function __construct(
-        string $method,
+        $method,
         $uri,
         array $headers = [],
         $body = null,
-        string $version = '1.1'
+        $version = '1.1'
     ) {
         $this->assertMethod($method);
-        $this->assertProtocolVersion($version);
-
-        if (!$uri instanceof UriInterface) {
+        if (!($uri instanceof UriInterface)) {
             $uri = new Uri($uri);
         }
 
-        self::warnOnMethodCasingChange($method);
-        $this->method = Utils::asciiToUpper($method);
+        $this->method = strtoupper($method);
         $this->uri = $uri;
         $this->setHeaders($headers);
         $this->protocol = $version;
@@ -61,32 +56,26 @@ class Request implements RequestInterface
         }
     }
 
-    public function getRequestTarget(): string
+    public function getRequestTarget()
     {
         if ($this->requestTarget !== null) {
             return $this->requestTarget;
         }
 
         $target = $this->uri->getPath();
-        if ($target === '') {
+        if ($target == '') {
             $target = '/';
         }
         if ($this->uri->getQuery() != '') {
-            $target .= '?'.$this->uri->getQuery();
+            $target .= '?' . $this->uri->getQuery();
         }
 
         return $target;
     }
 
-    public function withRequestTarget($requestTarget): RequestInterface
+    public function withRequestTarget($requestTarget)
     {
-        $hasWhitespace = preg_match('#\s#', $requestTarget);
-
-        if ($hasWhitespace === false) {
-            throw new \RuntimeException('Unable to validate request target: '.preg_last_error_msg());
-        }
-
-        if ($hasWhitespace === 1) {
+        if (preg_match('#\s#', $requestTarget)) {
             throw new InvalidArgumentException(
                 'Invalid request target provided; cannot contain whitespace'
             );
@@ -94,41 +83,29 @@ class Request implements RequestInterface
 
         $new = clone $this;
         $new->requestTarget = $requestTarget;
-
         return $new;
     }
 
-    public function getMethod(): string
+    public function getMethod()
     {
         return $this->method;
     }
 
-    public function withMethod($method): RequestInterface
+    public function withMethod($method)
     {
         $this->assertMethod($method);
-        self::warnOnMethodCasingChange($method);
         $new = clone $this;
-        $new->method = Utils::asciiToUpper($method);
-
+        $new->method = strtoupper($method);
         return $new;
     }
 
-    public function getUri(): UriInterface
+    public function getUri()
     {
         return $this->uri;
     }
 
-    public function withUri(UriInterface $uri, $preserveHost = false): RequestInterface
+    public function withUri(UriInterface $uri, $preserveHost = false)
     {
-        if (!\is_bool($preserveHost)) {
-            \trigger_deprecation(
-                'guzzlehttp/psr7',
-                '2.11',
-                'Passing %s to RequestInterface::withUri() is deprecated; guzzlehttp/psr7 3.0 requires bool for $preserveHost.',
-                \get_debug_type($preserveHost)
-            );
-        }
-
         if ($uri === $this->uri) {
             return $this;
         }
@@ -143,7 +120,7 @@ class Request implements RequestInterface
         return $new;
     }
 
-    private function updateHostFromUri(): void
+    private function updateHostFromUri()
     {
         $host = $this->uri->getHost();
 
@@ -151,13 +128,9 @@ class Request implements RequestInterface
             return;
         }
 
-        Uri::assertValidHost($host);
-
         if (($port = $this->uri->getPort()) !== null) {
-            $host .= ':'.$port;
+            $host .= ':' . $port;
         }
-
-        $this->assertValue($host);
 
         if (isset($this->headerNames['host'])) {
             $header = $this->headerNames['host'];
@@ -166,30 +139,14 @@ class Request implements RequestInterface
             $this->headerNames['host'] = 'Host';
         }
         // Ensure Host is the first header.
-        // See: https://datatracker.ietf.org/doc/html/rfc7230#section-5.4
+        // See: http://tools.ietf.org/html/rfc7230#section-5.4
         $this->headers = [$header => [$host]] + $this->headers;
     }
 
-    /**
-     * @param mixed $method
-     */
-    private function assertMethod($method): void
+    private function assertMethod($method)
     {
         if (!is_string($method) || $method === '') {
-            throw new InvalidArgumentException('Method must be a non-empty string.');
-        }
-
-        $this->assertNoLineSeparators($method, 'Method');
-    }
-
-    private static function warnOnMethodCasingChange(string $method): void
-    {
-        if ($method !== Utils::asciiToUpper($method)) {
-            \trigger_deprecation(
-                'guzzlehttp/psr7',
-                '2.11',
-                'Passing a non-uppercase HTTP method is deprecated; guzzlehttp/psr7 3.0 preserves method casing and will no longer uppercase it. Normalize the method before constructing or modifying requests if uppercase is required.'
-            );
+            throw new \InvalidArgumentException('Method must be a non-empty string.');
         }
     }
 }

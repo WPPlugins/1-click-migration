@@ -1,14 +1,5 @@
 <?php
 
-declare(strict_types=1);
-
-/*
- * This file is part of the nelexa/zip package.
- * (c) Ne-Lexa <https://github.com/Ne-Lexa/php-zip>
- * For the full copyright and license information, please view the LICENSE
- * file that was distributed with this source code.
- */
-
 namespace PhpZip\IO\Filter\Cipher\Pkware;
 
 use PhpZip\Exception\RuntimeException;
@@ -19,27 +10,37 @@ use PhpZip\Model\ZipEntry;
  */
 class PKEncryptionStreamFilter extends \php_user_filter
 {
-    public const FILTER_NAME = 'phpzip.encryption.pkware';
+    const FILTER_NAME = 'phpzip.encryption.pkware';
 
-    private int $size;
+    /** @var int */
+    private $size;
 
-    private string $headerBytes;
+    /** @var string */
+    private $headerBytes;
 
-    private int $writeLength;
+    /** @var int */
+    private $writeLength;
 
-    private bool $writeHeader;
+    /** @var bool */
+    private $writeHeader;
 
-    private PKCryptContext $context;
+    /** @var PKCryptContext */
+    private $context;
 
-    public static function register(): bool
+    /**
+     * @return bool
+     */
+    public static function register()
     {
         return stream_filter_register(self::FILTER_NAME, __CLASS__);
     }
 
     /**
      * @see https://php.net/manual/en/php-user-filter.oncreate.php
+     *
+     * @return bool
      */
-    public function onCreate(): bool
+    public function onCreate()
     {
         if (\PHP_INT_SIZE === 4) {
             throw new RuntimeException('Traditional PKWARE Encryption is not supported in 32-bit PHP.');
@@ -65,9 +66,9 @@ class PKEncryptionStreamFilter extends \php_user_filter
         // init keys
         $this->context = new PKCryptContext($password);
 
-        $crc = $entry->isDataDescriptorRequired() || $entry->getCrc() === ZipEntry::UNKNOWN
-            ? ($entry->getDosTime() & 0x0000FFFF) << 16
-            : $entry->getCrc();
+        $crc = $entry->isDataDescriptorRequired() || $entry->getCrc() === ZipEntry::UNKNOWN ?
+            ($entry->getDosTime() & 0x0000ffff) << 16 :
+            $entry->getCrc();
 
         try {
             $headerBytes = random_bytes(PKCryptContext::STD_DEC_HDR_SIZE);
@@ -75,8 +76,8 @@ class PKEncryptionStreamFilter extends \php_user_filter
             throw new \RuntimeException('Oops, our server is bust and cannot generate any random data.', 1, $e);
         }
 
-        $headerBytes[PKCryptContext::STD_DEC_HDR_SIZE - 1] = pack('c', ($crc >> 24) & 0xFF);
-        $headerBytes[PKCryptContext::STD_DEC_HDR_SIZE - 2] = pack('c', ($crc >> 16) & 0xFF);
+        $headerBytes[PKCryptContext::STD_DEC_HDR_SIZE - 1] = pack('c', ($crc >> 24) & 0xff);
+        $headerBytes[PKCryptContext::STD_DEC_HDR_SIZE - 2] = pack('c', ($crc >> 16) & 0xff);
 
         $this->headerBytes = $headerBytes;
         $this->writeLength = 0;
@@ -88,16 +89,16 @@ class PKEncryptionStreamFilter extends \php_user_filter
     /**
      * Encryption filter.
      *
+     * @param resource $in
+     * @param resource $out
+     * @param int      $consumed
+     * @param bool     $closing
+     *
+     * @return int
+     *
      * @todo USE FFI in php 7.4
-     *
-     * @noinspection PhpDocSignatureInspection
-     *
-     * @param mixed $in
-     * @param mixed $out
-     * @param mixed $consumed
-     * @param mixed $closing
      */
-    public function filter($in, $out, &$consumed, $closing): int
+    public function filter($in, $out, &$consumed, $closing)
     {
         while ($bucket = stream_bucket_make_writeable($in)) {
             $buffer = $bucket->data;

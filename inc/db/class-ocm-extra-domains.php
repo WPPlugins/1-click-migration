@@ -104,12 +104,7 @@ class OCM_Extra_Domains {
 			$class = self::classify_host( $host_only );
 			$label = $search_host;
 			if ( ! empty( $row['path_prefixes'] ) ) {
-				$label = sprintf(
-					/* translators: 1: host name, 2: comma-separated URL paths on that host */
-					__( '%1$s (path %2$s)', '1-click-migration' ),
-					$search_host,
-					implode( ', ', $row['path_prefixes'] )
-				);
+				$label .= ' (path ' . implode( ', ', $row['path_prefixes'] ) . ')';
 			}
 			$example = $row['example'];
 			if ( strlen( $example ) > 160 ) {
@@ -474,9 +469,7 @@ class OCM_Extra_Domains {
 				'class'   => isset( $row['class'] ) ? (string) $row['class'] : 'other',
 				'checked' => ! empty( $row['checked'] ) ? 1 : 0,
 				'count'   => isset( $row['count'] ) ? (int) $row['count'] : 0,
-				// From the class, in the viewer's language: the stored note was
-				// written by whichever request found the address.
-				'note'    => self::note_for_class( isset( $row['class'] ) ? (string) $row['class'] : 'other' ),
+				'note'    => isset( $row['note'] ) ? (string) $row['note'] : '',
 			);
 		}
 		return $public;
@@ -546,12 +539,15 @@ class OCM_Extra_Domains {
 	 */
 	private static function note_for_class( $class ) {
 		if ( 'suggest' === $class ) {
-			return __( 'Possible old site address', '1-click-migration' );
+			return 'Possible old site address';
 		}
 		if ( 'leave_alone' === $class ) {
-			return __( 'CDN, embed, or affiliate address', '1-click-migration' );
+			return 'CDN, embed, or affiliate address';
 		}
-		return __( 'Other address', '1-click-migration' );
+		if ( 'other' === $class ) {
+			return 'Other address';
+		}
+		return 'Other address';
 	}
 
 	/**
