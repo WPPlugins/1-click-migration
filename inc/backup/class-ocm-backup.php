@@ -139,8 +139,6 @@ class OCM_Backup
         ['DB Size', '39%'],
         ['Database backup started', '40%'],
         // Removed: ['Database backup in progress. Please do not leave the plugin page', '40%'], - appears for every table, causes progress bar jumping
-        ['SYSLOG: Number of updates made from replace', '40%'],
-        ['SYSLOG: Finished updating URLs in the database', '40%'],
         ['SYSLOG: Table being backed up', '40%'],
         ['SYSLOG: No table structure for table', '40%'],
         ['SYSLOG: Inserting table data into table', '40%'],
@@ -252,7 +250,7 @@ class OCM_Backup
         ['Extracting uploads Retry 1', '61%'],
         ['Extracting uploads Retry 2', '61%'],
         ['Skipping uploads Extraction', '61%'],
-        ['Restoring "Uploads"', '61%'],
+        ['Restoring "Uploads"', '88%'],
 
         ['Downloading file: "themes.zip.crypt"', '62%'],
         ['Downloading themes Retry 1', '62%'],
@@ -266,7 +264,7 @@ class OCM_Backup
         ['Extracting themes Retry 1', '62%'],
         ['Extracting themes Retry 2', '62%'],
         ['Skipping themes Extraction', '62%'],
-        ['Restoring "Themes"', '62%'],
+        ['Restoring "Themes"', '88%'],
 
         ['Downloading file: "plugins.zip.crypt"', '63%'],
         ['Downloading plugins Retry 1', '63%'],
@@ -281,7 +279,7 @@ class OCM_Backup
         ['Extracting plugins Retry 1', '63%'],
         ['Extracting plugins Retry 2', '63%'],
         ['Skipping plugins Extraction', '63%'],
-        ['Restoring "Plugins"', '63%'],
+        ['Restoring "Plugins"', '88%'],
 
         ['Download Error:', '60%'],
         ['Notice: file uploads.zip.crypt not found', '60%'],
@@ -289,16 +287,20 @@ class OCM_Backup
         ['Notice: file plugins.zip.crypt not found', '60%'],
         ['Notice: file db.zip.crypt not found', '60%'],
 
-        ['Themes have been restored', '64%'],
-        ['Uploads have been restored', '64%'],
-        ['Plugins have been restored', '64%'],
+        // The file swaps run after the database step (apply_deferred_file_swaps()),
+        // so their steps sit between "Database has been restored" and "Cleaning up.".
+        ['Themes have been restored', '89%'],
+        ['Uploads have been restored', '89%'],
+        ['Plugins have been restored', '90%'],
 
         ['Restore plugins', '75%'],
         ['Notice: Database restore in progress. Please don\'t leave the plugin page.', '80%'],
         ['SYSLOG: DB memory preflight (import)', '80%'],
         ['Notice: Database is larger than PHP memory_limit; streaming import from disk.', '80%'],
-        ['Database has been restored', '83%'],
         ['Starting to update URLs in database', '84%'],
+        ['SYSLOG: Number of updates made from replace', '85%'],
+        ['SYSLOG: Finished updating URLs in the database', '85%'],
+        ['Database has been restored', '86%'],
         ['SYSLOG: Low memory available (', '84%'],
         ['SYSLOG: Low memory - Page Size reduced', '84%'],
         ['Cleaning up.', '92%'],
@@ -438,6 +440,7 @@ class OCM_Backup
         @set_time_limit(One_Click_Migration::get_timeout());
         update_option('ocm_action_start_backup', true, true);
         update_option('ocm_is_stopped', false, true);
+        One_Click_Migration::reset_worker_watchdog();
         update_option('ocm_upload_auto_try_nb_db', 0, true);
         update_option('ocm_upload_auto_try_nb_themes', 0, true);
         update_option('ocm_upload_auto_try_nb_plugins', 0, true);
@@ -762,6 +765,8 @@ class OCM_Backup
         One_Click_Migration::delete_log_file();
         $exluded_folders = self::get_excluded_folders();
 
+        // A fresh watchdog clock for this run (see reset_worker_watchdog()).
+        One_Click_Migration::reset_worker_watchdog();
         // cancel_all_process() above emptied the queue; any item still left
         // belongs to an older run and its worker drops it (#96).
         $run_id = self::claim_restore_run();
@@ -3294,7 +3299,6 @@ class OCM_Backup
     {
         $log_url = OCM_DEBUG_LOG_FILE_URL;
         $lastLog = self::get_last_log_message();
-        $lastLotNoSkip = self::get_last_log_message(false);
 
         $uploadFileData = get_option('ocm_upload_file');
         $isStopped = get_option('ocm_is_stopped');
@@ -3307,33 +3311,31 @@ class OCM_Backup
         // items are refused by run ownership.
         self::maybe_revive_stalled_worker($isStopped);
 
-        if ($lastLog && $lastLotNoSkip === self::LOG_MESSAGE_BG_PROCESS_RESTARTING_LOG) {
+        $action_in_flight = get_option('ocm_action_start_backup') || get_option('ocm_action_start_restore');
 
-            return [
-                'text' => $lastLog,
-                'value' => self::get_previous_log_percentage(),
-                'customNotice' => self::LOG_MESSAGE_BG_PROCESS_RESTARTING_LOG,
-                'maintenanceMode' => (bool) get_option('ocm_maintenance_mode', false)
-            ];
+        // Workers hand over every few seconds (the worker time budget), and some
+        // lines aren't in the progress map. Neither replaces the step on screen:
+        // that showed "Process is Restarting", or "Starting restore…" back at 1%.
+        // Nor does a PHP fatal's SYSLOG copy: it can come from any request during
+        // the run (a poll that loaded a plugin mid-swap), and the raw message
+        // logged right after it is what the card shows as the error.
+        // Show the newest step the map knows instead.
+        $last_message = is_string($lastLog) ? trim($lastLog) : '';
+        if ($last_message !== ''
+            && strpos($last_message, 'was skipped due to timeout') === false
+            && (self::is_handover_line($last_message)
+                || self::is_php_fatal_syslog_line($last_message)
+                || false === self::get_percent_by_log_message($last_message))
+        ) {
+            $step = self::get_last_progress_step();
+            $lastLog = null !== $step ? $step : '';
         }
 
-        if ($lastLog && $lastLotNoSkip === self::LOG_MESSAGE_BG_PROCESS_RESTARTING) {
-
-            return [
-                'text' => $lastLog,
-                'value' => self::get_previous_log_percentage(),
-                'maintenanceMode' => (bool) get_option('ocm_maintenance_mode', false)
-            ];
-        }
-
-        if ($lastLog && $lastLotNoSkip === "Process is Restarting") {
-
-            return [
-                'text' => 'Process is Restarting',
-                'value' => self::get_previous_log_percentage(),
-                'maintenanceMode' => (bool) get_option('ocm_maintenance_mode', false)
-            ];
-        }
+        // "Taking longer than expected" is for a real stall (the watchdog had to
+        // revive a worker), not for a planned hand-over.
+        $stall_notice = ($action_in_flight && (int) get_option('ocm_worker_revival_count', 0) > 0)
+            ? self::LOG_MESSAGE_BG_PROCESS_RESTARTING_LOG
+            : '';
 
         if ($lastLog && strpos($lastLog, 'was skipped due to timeout') !== false) {
 
@@ -3345,8 +3347,6 @@ class OCM_Backup
             ];
         }
 
-
-        $action_in_flight = get_option('ocm_action_start_backup') || get_option('ocm_action_start_restore');
         if ($action_in_flight) {
             $action_label = get_option('ocm_action_start_restore') ? 'restore' : 'backup';
             $default_text_value = sprintf('Starting %s&hellip;', $action_label);
@@ -3361,18 +3361,23 @@ class OCM_Backup
             'wpDebug' => defined('WP_DEBUG') && WP_DEBUG,  // Add WP_DEBUG flag for conditional console logging
             'maintenanceMode' => (bool) get_option('ocm_maintenance_mode', false)
         );
+        if ($stall_notice !== '') {
+            $default_text['customNotice'] = $stall_notice;
+        }
 
         $multipart_pct = self::get_multipart_upload_percentage($lastLog);
         if ($multipart_pct !== false) {
             $progress_item_text = array(
                 'uploadFileData' => $uploadFileData,
-                'text' => $lastLog,
+                'text' => self::progress_status_text($lastLog),
                 'value' => $multipart_pct,
                 'maintenanceMode' => (bool) get_option('ocm_maintenance_mode', false)
             );
 
             if ($isStopped) {
                 $progress_item_text['isStopped'] = true;
+            } elseif ($stall_notice !== '') {
+                $progress_item_text['customNotice'] = $stall_notice;
             }
 
             return $progress_item_text;
@@ -3383,20 +3388,14 @@ class OCM_Backup
 
             if (isset($progress_item[0]) && strpos($lastLog, $progress_item[0]) !== false) {
 
-                if (preg_match('/Notice:/', $lastLog)) {
-                    $progress_item_text = array(
-                        'uploadFileData' => $uploadFileData,
-                        'text' => $lastLog,
-                        'value' => $progress_item[1],
-                        'maintenanceMode' => (bool) get_option('ocm_maintenance_mode', false)
-                    );
-                } else {
-                    $progress_item_text = array(
-                        'uploadFileData' => $uploadFileData,
-                        'text' => $lastLog,
-                        'value' => $progress_item[1],
-                        'maintenanceMode' => (bool) get_option('ocm_maintenance_mode', false)
-                    );
+                $progress_item_text = array(
+                    'uploadFileData' => $uploadFileData,
+                    'text' => self::progress_status_text($lastLog),
+                    'value' => $progress_item[1],
+                    'maintenanceMode' => (bool) get_option('ocm_maintenance_mode', false)
+                );
+                if ($stall_notice !== '') {
+                    $progress_item_text['customNotice'] = $stall_notice;
                 }
 
                 $restore_terminal = ($lastLog === 'Restore completed.'
@@ -3404,7 +3403,7 @@ class OCM_Backup
                 if ($isStopped && !$restore_terminal) {
                     $progress_item_text = array(
                         'isStopped' => true,
-                        'text' => $lastLog,
+                        'text' => self::progress_status_text($lastLog),
                         'value' => $progress_item[1],
                         'maintenanceMode' => (bool) get_option('ocm_maintenance_mode', false)
                     );
@@ -5046,6 +5045,124 @@ class OCM_Backup
         }
 
         return $lastLine;
+    }
+
+    /**
+     * Lines a worker writes when it hands over to the next one (routine since
+     * the worker time budget, see One_Click_Migration::get_worker_time_budget()).
+     *
+     * @param string $line
+     * @return bool
+     */
+    private static function is_handover_line($line)
+    {
+        return in_array(trim((string) $line), array(
+            'Process is Restarting',
+            self::LOG_MESSAGE_BG_PROCESS_RESTARTING,
+            self::LOG_MESSAGE_BG_PROCESS_RESTARTING_LOG,
+        ), true);
+    }
+
+    /**
+     * The SYSLOG copy Error_Handler logs for a PHP fatal, in whichever request
+     * hit it. The raw message follows it on its own line.
+     *
+     * @param string $line
+     * @return bool
+     */
+    private static function is_php_fatal_syslog_line($line)
+    {
+        return strpos(trim((string) $line), 'SYSLOG: "[PHP ERR][FATAL]') === 0;
+    }
+
+    /**
+     * Lines that end a run (or report its failure): a look back for the
+     * current step must never cross one of them.
+     *
+     * @param string $line
+     * @return bool
+     */
+    private static function is_terminal_progress_line($line)
+    {
+        foreach (array('Backup completed', 'Backup failed:', 'Restore completed', 'Restore failed:', 'Restore stopped', 'Stop & Reset Finished') as $prefix) {
+            if (strpos($line, $prefix) === 0) {
+                return true;
+            }
+        }
+        return strpos($line, 'Error:') !== false;
+    }
+
+    /**
+     * The newest log line that names a progress step, for when the newest line
+     * doesn't. Skips hand-overs, hidden SYSLOG lines, fatals' SYSLOG copies and
+     * lines the map doesn't know, and stops at a terminal line: in a restore that can be the merged
+     * backup log's "Backup completed.", which must not count as this run's step.
+     *
+     * @return string|null
+     */
+    private static function get_last_progress_step()
+    {
+        $file = OCM_DEBUG_LOG_FILE;
+        if (!file_exists($file)) {
+            return null;
+        }
+        foreach (array_reverse(explode(PHP_EOL, (string) file_get_contents($file))) as $raw) {
+            $line = trim(self::log_line_message($raw));
+            if ($line === '' || self::is_handover_line($line) || self::is_php_fatal_syslog_line($line)) {
+                continue;
+            }
+            if (strpos($line, 'SYSLOG') !== false && !self::is_syslog_allowed_for_progress($line)) {
+                continue;
+            }
+            if (self::is_terminal_progress_line($line)) {
+                return null;
+            }
+            if (false !== self::get_percent_by_log_message($line)) {
+                return $line;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * What the progress card shows for a log line. SYSLOG lines are internal,
+     * so they become a plain label; routine steps drop the server path they
+     * log, which names the site's private folder. Error lines keep their
+     * paths: the admin needs them to fix permissions or quota.
+     *
+     * @param string $line
+     * @return string
+     */
+    private static function progress_status_text($line)
+    {
+        $line = trim((string) $line);
+        if (strpos($line, 'SYSLOG:') === 0) {
+            $labels = array(
+                'Dispatching backup worker' => 'Starting the backup worker',
+                'Using direct processing' => 'Starting the backup worker',
+                'Server IP:' => 'Checking the server',
+                'WP_HTTP_BLOCK_EXTERNAL:' => 'Checking the server',
+                'WP_ACCESSIBLE_HOSTS:' => 'Checking the server',
+                'Admin URL:' => 'Checking the server',
+                'Number of updates made from replace' => 'Updating site addresses',
+                'Finished updating URLs in the database' => 'Updating site addresses',
+                'DB memory preflight (import)' => 'Importing the database',
+                'Low memory' => 'Working with limited PHP memory',
+            );
+            foreach ($labels as $needle => $label) {
+                if (strpos($line, $needle) !== false) {
+                    return $label;
+                }
+            }
+            return 'Exporting the database';
+        }
+        if (preg_match('/^Archiving (\S+) to /', $line, $m)) {
+            return 'Archiving ' . $m[1];
+        }
+        if (preg_match('/^(Restoring "[^"]+") to directory "/', $line, $m)) {
+            return $m[1];
+        }
+        return $line;
     }
 
     public static function get_previous_log_percentage(){

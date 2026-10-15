@@ -5,6 +5,7 @@
     // -------- helpers --------
     var EMAIL_RE = /^([a-zA-Z0-9_.+\-])+@(([a-zA-Z0-9\-])+\.)+([a-zA-Z0-9]{2,})+$/;
     var noticeList = [];
+    var stallNotice = null;
     var timer = null;
     var timerInitiated = 0;
     var stopTimer = false;
@@ -48,11 +49,32 @@
         } else if (text.match(/Notice:/)) {
             if (noticeList.indexOf(text) === -1) {
                 noticeList.push(text);
-                $('.ocm-info.notice').append('<span>' + text + '</span><br>').addClass('show').show();
+                $('.ocm-info.notice').append($('<span></span>').attr('data-ocm-notice', text).html(text)).append('<br>').addClass('show').show();
             }
         } else {
             $('#ocm-pg-status').html(text);
         }
+    }
+
+    function removeNotice(text) {
+        var i = noticeList.indexOf(text);
+        if (i === -1) return;
+        noticeList.splice(i, 1);
+        $('.ocm-info.notice span[data-ocm-notice]').filter(function () {
+            return $(this).attr('data-ocm-notice') === text;
+        }).each(function () {
+            $(this).next('br').remove();
+            $(this).remove();
+        });
+        if (!noticeList.length) {
+            $('.ocm-info.notice').hide().removeClass('show').empty();
+        }
+    }
+
+    function clearNotices() {
+        noticeList = [];
+        stallNotice = null;
+        $('.ocm-info.notice').hide().removeClass('show').empty();
     }
 
     // -------- progress polling --------
@@ -79,9 +101,20 @@
                             $('.ocm-maintenance-mode-indicator').hide();
                         }
 
+                        // A finished or stopped run drops the notices it collected
+                        // (a notice that comes with the final state is shown again
+                        // below). While it runs, the "taking longer" notice goes
+                        // away as soon as the server stops sending it.
+                        if (response.isStopped || '100%' === response.value) {
+                            clearNotices();
+                        } else if (stallNotice && response.customNotice !== stallNotice) {
+                            removeNotice(stallNotice);
+                            stallNotice = null;
+                        }
                         renderMessage(response.text);
                         if (response.customNotice) {
                             renderMessage(response.customNotice);
+                            stallNotice = response.customNotice;
                         }
 
                         if (response.topBanner) {

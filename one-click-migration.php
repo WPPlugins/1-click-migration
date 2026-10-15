@@ -4,7 +4,7 @@
  * Plugin Name: 1 Click Migration
  * Plugin URI: https://wordpress.org/plugins/1-click-migration/
  * Description: Migrate, copy, or clone your entire site with 1 click. <strong>Any host, no size limitation, no premium versions.</strong>
- * Version: 3.1.22
+ * Version: 3.1.23
  * Author: 1ClickMigration
  * Author URI: https://1clickmigration.com/
  * Text Domain: 1-click-migration
@@ -1032,6 +1032,20 @@ PHP;
 
         // Reset watchdog state so the next run starts with a fresh clock
         // instead of inheriting a stale heartbeat from this one.
+        self::reset_worker_watchdog();
+    }
+
+    /**
+     * Forget the watchdog's heartbeat, last pump and revival count. A run's
+     * kickoff calls this too: the loopback request that cancel_all_process()
+     * dispatches after a run ends writes a heartbeat after the cleanup above,
+     * and the next run would see it as a stall at once (a needless revival,
+     * and the "taking longer than expected" notice for the whole run).
+     *
+     * @return void
+     */
+    public static function reset_worker_watchdog()
+    {
         delete_option('ocm_worker_heartbeat');
         delete_option('ocm_worker_watchdog_last');
         delete_option('ocm_worker_revival_count');

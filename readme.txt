@@ -4,7 +4,7 @@ Tags: backup, migrate, migration, restore, clone
 Requires at least: 4.0
 Tested up to: 7.1
 Requires PHP: 7.4
-Stable tag: 3.1.22
+Stable tag: 3.1.23
 Author URI: https://1clickmigration.com
 License: GPLv3 or later
 License URI: http://www.gnu.org/licenses/gpl-3.0.html
@@ -17,7 +17,7 @@ Free WordPress migration plugin. Move to a new host or domain with a restore cod
 
 1-Click Migration backs up a WordPress site, emails you an 8-character restore code, and restores it on a new host or domain. URLs and serialized data update automatically. The live site stays up during backup.
 
-https://vimeo.com/1220910737
+https://vimeo.com/1236211963
 
 **Why Choose 1-Click Migration for WordPress Backup & Migration?**
 
@@ -122,6 +122,11 @@ All of them! Migrate WordPress sites between any hosting providers: Bluehost, Si
 4. Enter the restore code on the destination site to finish your WordPress migration.
 
 == Changelog ==
+= 3.1.23 =
+* **Clearer progress card**: The progress card no longer shows internal log lines (such as "SYSLOG: Dispatching backup worker") or full server paths for routine steps. It now shows plain step names such as "Starting the backup worker" or "Archiving themes". Error messages still include the path, so you can fix permissions or quota.
+* **No more false "taking longer than expected" notice**: Workers hand over to the next worker every 20 seconds. These planned hand-overs no longer show "Process is Restarting" or the "taking longer than expected" notice. The notice now appears only when a worker has actually stalled. It goes away once the run is moving again and is cleared when the run finishes. A new run no longer picks up the previous run's stall state.
+* **The progress bar no longer jumps backwards**: During a restore the bar could drop back to 1% ("Starting restore…") on log lines it didn't recognize. After the database import it went 84% → 40% → 83% → 62%. It now keeps the current step and moves forward in the order the restore actually runs.
+
 = 3.1.22 =
 * **Quieter restore log**: Restores no longer log a warning for each temporary copy of a database file that was already removed.
 * **No empty folders after backups**: A finished or failed backup now removes its empty work folder instead of leaving one behind for every run.
@@ -343,6 +348,9 @@ All of them! Migrate WordPress sites between any hosting providers: Bluehost, Si
 * Initial release & dependency updates
 
 == Upgrade Notice ==
+
+= 3.1.23 =
+A clearer progress card: no internal log lines or server paths, no false "taking longer than expected" notice, and a bar that no longer jumps backwards during a restore. Includes all 3.1.22 changes.
 
 = 3.1.22 =
 Maintenance release: a quieter restore log, and backups no longer leave empty work folders behind. Includes all 3.1.21 changes.
