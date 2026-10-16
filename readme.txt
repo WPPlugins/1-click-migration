@@ -4,7 +4,7 @@ Tags: backup, migrate, migration, restore, clone
 Requires at least: 4.0
 Tested up to: 7.1
 Requires PHP: 7.4
-Stable tag: 3.1.26
+Stable tag: 3.1.27
 Author URI: https://1clickmigration.com
 License: GPLv3 or later
 License URI: http://www.gnu.org/licenses/gpl-3.0.html
@@ -21,11 +21,14 @@ https://vimeo.com/1236211963
 
 **What you can do with it**
 
-* **Move to a new host.** Transfer a website between any two hosts without downloading or uploading backup files yourself.
-* **Change your domain.** Restore on the new domain and the old address is replaced everywhere in the database, including inside serialized options and widgets.
-* **Go from localhost or staging to live.** Back up a local or staging site and restore it on the live server.
-* **Clone or duplicate a site.** Restore a backup on a second WordPress install to get a staging or test copy.
+* **Move to a new host.** [Transfer a website between any two hosts](https://1clickmigration.com/migrate-wordpress-to-new-host/) without downloading or uploading backup files yourself.
+* **Change your domain name.** [Copy a WordPress site to a new domain](https://1clickmigration.com/change-wordpress-domain-name/), and the old address is replaced everywhere in the database, including inside serialized options and widgets.
+* **Hand a site over to a client.** Move WordPress to the client's own hosting account. The site transfer takes one backup and one restore.
+* **Go from localhost or staging to live.** [Push staging to live, or move WordPress from localhost to a server](https://1clickmigration.com/move-wordpress-localhost-to-live/). Back up the staging or local site and restore it on the live server.
+* **Clone or duplicate a site.** Duplicate a WordPress site for staging or testing by restoring its backup on a second install.
 * **Move large sites.** There is no 4GB zip cap. Back up and restore the database, plugins, themes and uploads together, or one part at a time.
+
+Use it for any WordPress site migration: a hosting migration to a new provider, a server migration within the same host, a domain migration, or a move from localhost to live. You can move WordPress to another server, host or domain, and the migration itself needs no FTP, cPanel or phpMyAdmin, just a WordPress login on each site. It's a free, automatic migration tool for a complete website migration, from the database to the uploads folder.
 
 **Built to fail safely**
 
@@ -83,13 +86,16 @@ Yes. Use Advanced options to back up or restore the database, plugins, themes an
 Yes. The restore replaces the old site address throughout the database, including inside serialized data. You choose whether other domains found in the backup are rewritten too.
 
 = Is there a size limit? =
-There's no 4GB zip cap. Very large databases may need a higher PHP memory_limit on the source host. If a big site fails in one go, move it one part at a time.
+There's no 4GB zip cap, and [no 512MB import limit to fix or upload limit to bypass](https://1clickmigration.com/wordpress-migration-upload-limit/). You never upload a backup file through your browser, so there's no file size limit to increase in php.ini. Very large databases may need a higher PHP memory_limit on the source host. If a big site fails in one go, move it one part at a time.
 
 = Does my site go down during a migration? =
-The site you back up stays online. The site you restore onto shows a maintenance page while the restore runs.
+The site you back up stays online, so the migration causes no downtime there. The site you restore onto shows a maintenance page while the restore runs.
 
 = Can I use it to create a staging site? =
 Yes. Restore the backup on a separate WordPress install, such as a staging subdomain. The copy uses the staging site's address.
+
+= Can I migrate a WooCommerce store? =
+Yes. Products, orders and customers are in the database, so [a WooCommerce store moves like any other site](https://1clickmigration.com/migrate-woocommerce-store/). Orders placed on the old store after the backup starts may not be in it, so move the store at a quiet time or pause orders until the new site is live.
 
 = Does it work with WordPress Multisite? =
 Not yet. It supports single-site installs.
@@ -98,7 +104,7 @@ Not yet. It supports single-site installs.
 Yes. Back up the local site, then restore it on the live server with the restore code. The local site needs an internet connection to upload the backup.
 
 = Which hosts does it work with? =
-Any host that runs WordPress on PHP 7.4 or later, including Bluehost, SiteGround, Hostinger, GoDaddy, HostGator, DreamHost, Namecheap, IONOS, A2 Hosting, InMotion Hosting, Cloudways, WP Engine and Kinsta, plus local development sites. It also works on hosts that block background requests or cut long PHP requests short.
+Any host that runs WordPress on PHP 7.4 or later, including Bluehost, SiteGround, Hostinger, GoDaddy, HostGator, DreamHost, Namecheap, IONOS, A2 Hosting, InMotion Hosting, GreenGeeks, ScalaHosting, Liquid Web, Cloudways, WP Engine, Flywheel, Kinsta, Pressable and Pantheon, plus cloud servers on DigitalOcean, AWS Lightsail, Vultr and Linode, and local development sites. It works with cPanel, Plesk or no control panel at all. It also works on hosts that block background requests or cut long PHP requests short. On Pantheon, restore onto the Dev environment in SFTP mode, because code folders on Test and Live are read-only.
 
 == Screenshots ==
 1. Free one-click WordPress migration plugin. Back up a live site; it stays up while you migrate.
@@ -107,6 +113,9 @@ Any host that runs WordPress on PHP 7.4 or later, including Bluehost, SiteGround
 4. Enter the restore code on the destination site to finish your WordPress migration.
 
 == Changelog ==
+= 3.1.27 =
+* **Listing update**: The description and FAQ now cover WooCommerce stores, more hosts and cloud servers, staging to live and domain name changes, and link to step-by-step guides on 1clickmigration.com. Backup and restore work exactly as in 3.1.26.
+
 = 3.1.26 =
 * **Listing update**: More hosts and a local-to-live question in the FAQ. Changelog entries before 3.1.20 moved to changelog.txt. Backup and restore work exactly as in 3.1.25.
 
@@ -149,6 +158,9 @@ Any host that runs WordPress on PHP 7.4 or later, including Bluehost, SiteGround
 Older versions are listed in [changelog.txt](https://plugins.trac.wordpress.org/browser/1-click-migration/trunk/changelog.txt).
 
 == Upgrade Notice ==
+
+= 3.1.27 =
+Listing-only update: a WooCommerce FAQ, more hosts and links to migration guides. No changes to backup or restore. Includes all 3.1.26 changes.
 
 = 3.1.26 =
 Listing-only update: more hosts in the FAQ and a shorter changelog. No changes to backup or restore. Includes all 3.1.25 changes.
