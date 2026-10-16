@@ -16,6 +16,32 @@
         return EMAIL_RE.test(email);
     }
 
+    // Translated strings from OCM_Admin_Page::script_strings(). Escape them
+    // with escHtml() before inserting them as HTML.
+    function t(key) {
+        var strings = (typeof siteData !== 'undefined' && siteData.i18n) || {};
+        return typeof strings[key] === 'string' ? strings[key] : key;
+    }
+
+    // Fills %s / %d, or %1$s, %2$s, in a translated string. The replacement is
+    // a function so that "$&" in a value stays literal.
+    function fmt(format) {
+        var args = Array.prototype.slice.call(arguments, 1);
+        var next = 0;
+        return String(format).replace(/%(?:(\d+)\$)?[sd]/g, function (match, position) {
+            var value = position ? args[position - 1] : args[next++];
+            return value == null ? '' : String(value);
+        });
+    }
+
+    // The log line at the start of a progress text, before the help the server
+    // appends after a line break (OCM_Admin_Page::status_head()). Error, notice
+    // and completion checks read only this part: the log line is English
+    // protocol, the help after it is translated.
+    function statusHead(text) {
+        return String(text == null ? '' : text).split(/<\s*\/?\s*br\s*\/?\s*>/i)[0];
+    }
+
     function disableButtons() {
         $('.ocm-button.backup-button, .ocm-button.restore-button').addClass('one-click-disabled');
     }
@@ -42,11 +68,12 @@
 
     function renderMessage(text) {
         if (!text) return;
-        if (text.match(/Error/)) {
-            if (text.indexOf('SYSLOG: "[PHP ERR][FATAL]') === -1) {
+        var head = statusHead(text);
+        if (head.match(/Error/)) {
+            if (head.indexOf('SYSLOG: "[PHP ERR][FATAL]') === -1) {
                 $('.ocm-info.error').html(text).addClass('show').show();
             }
-        } else if (text.match(/Notice:/)) {
+        } else if (head.match(/Notice:/)) {
             if (noticeList.indexOf(text) === -1) {
                 noticeList.push(text);
                 $('.ocm-info.notice').append($('<span></span>').attr('data-ocm-notice', text).html(text)).append('<br>').addClass('show').show();
@@ -93,6 +120,8 @@
                 $.ajax({
                     url: siteData.progressUrl,
                     method: 'GET',
+                    // A JSON Accept header lets progressUrl's _locale=user apply.
+                    dataType: 'json',
                     beforeSend: function (xhr) { xhr.setRequestHeader('X-WP-Nonce', siteData.restNonce); },
                     success: function (response) {
                         if (response.maintenanceMode) {
@@ -127,7 +156,7 @@
                         $('#ocm-pg-fill').css('width', response.value).addClass('running');
                         $('#ocm-pg-pct').text(response.value);
 
-                        var responseText = response.text || '';
+                        var responseHead = statusHead(response.text);
 
                         if (response.isStopped) {
                             clearInterval(progressIntervalId);
@@ -139,16 +168,16 @@
                             $('.ocm-timer').hide();
                             $('.restart-button').hide();
                             enableButtons();
-                            if (responseText.indexOf('Backup completed') !== -1 || responseText.indexOf('Restore completed') !== -1) {
+                            if (responseHead.indexOf('Backup completed') !== -1 || responseHead.indexOf('Restore completed') !== -1) {
                                 clearInterval(progressIntervalId);
                                 clearTimeout(progressTimeoutId);
-                                if (responseText.indexOf('Restore completed') !== -1 || response.restoreCompleted) {
+                                if (responseHead.indexOf('Restore completed') !== -1 || response.restoreCompleted) {
                                     redirectToPluginPageAfterRestore();
                                 }
                             }
                         }
 
-                        if (responseText.indexOf('Process is Restarting') !== -1) {
+                        if (responseHead.indexOf('Process is Restarting') !== -1) {
                             if (isRestarting === 0) {
                                 isRestarted = true;
                                 isRestarting = 1;
@@ -198,7 +227,7 @@
         clearMessages();
         var email = $('#ocm_user_email').val();
         if (!validateEmail(email)) {
-            $('#ocm-pg-status').html('<span style="color:var(--ocm-err)">Please enter a valid email.</span>');
+            $('#ocm-pg-status').html('<span style="color:var(--ocm-err)">' + escHtml(t('invalidEmail')) + '</span>');
             return;
         }
         var excludes = getSelectedExcludes();
@@ -212,7 +241,7 @@
             + '&username=' + encodeURIComponent(email)
             + '&selected=' + encodeURIComponent(excludes.join(','))
             + '&_wpnonce=' + siteData.backupNonce;
-        setProgress('1%', 'Backup started');
+        setProgress('1%', escHtml(t('backupStarted')));
         displayProgressBar();
         displayDecreasingTimer();
         $.get(url).fail(function () { enableButtons(); });
@@ -250,9 +279,7 @@
         });
         $('#ocm-restore-precheck').prop('hidden', true);
         stopTimer = false;
-        setProgress('1%', preparation.legacy
-            ? 'Restore started. This older backup will be checked for extra addresses after restore.'
-            : 'Restore started');
+        setProgress('1%', escHtml(t(preparation.legacy ? 'restoreStartedLegacy' : 'restoreStarted')));
         displayProgressBar();
         displayDecreasingTimer();
     }
@@ -265,7 +292,7 @@
         clearRestorePreparation();
         $('#ocm_restore_code, input[data-ocm-exclude]').prop('disabled', false);
         $('#ocm-restore-precheck').prop('hidden', false)
-            .append($('<p role="alert"></p>').text(message || 'Check the backup again before starting restore.'));
+            .append($('<p role="alert"></p>').text(message || t('checkBackupAgain')));
     }
 
     function renderRestorePreparation(preparation) {
@@ -273,26 +300,26 @@
         preparation.candidates.forEach(function (row) {
             var item = '<li><label><input type="checkbox" name="ocm_precheck_domain" value="' + escHtml(row.id) + '">'
                 + '<span><strong>' + escHtml(row.label || row.host) + '</strong>'
-                + '<span class="ocm-precheck-note">' + (row.class === 'suggest' ? 'Possible old site address' : 'External or other address') + '</span>'
-                + '<span class="ocm-precheck-example">From: ' + escHtml(row.example) + '</span>'
-                + '<span class="ocm-precheck-example">To: ' + escHtml(row.preview) + '</span></span></label></li>';
+                + '<span class="ocm-precheck-note">' + escHtml(t(row.class === 'suggest' ? 'possibleOldAddress' : 'externalAddress')) + '</span>'
+                + '<span class="ocm-precheck-example">' + fmt(escHtml(t('fromExample')), escHtml(row.example)) + '</span>'
+                + '<span class="ocm-precheck-example">' + fmt(escHtml(t('toExample')), escHtml(row.preview)) + '</span></span></label></li>';
             if (row.class === 'suggest') likely += item;
             else other += item;
         });
-        var html = '<h3 tabindex="-1" id="ocm-precheck-title">Review remaining site addresses</h3>'
-            + '<p>Some links point to other domains. Select only addresses that belonged to the site you are restoring. Your primary site address updates automatically.</p>'
+        var html = '<h3 tabindex="-1" id="ocm-precheck-title">' + escHtml(t('reviewAddressesTitle')) + '</h3>'
+            + '<p>' + escHtml(t('reviewAddressesIntro')) + '</p>'
             + (likely ? '<ul>' + likely + '</ul>' : '')
-            + (other ? '<details' + (!likely ? ' open' : '') + '><summary>Other domains</summary><p>External services and links usually stay unchanged.</p><ul>' + other + '</ul></details>' : '')
-            + (preparation.omitted ? '<p>Some additional addresses are not listed. You can review remaining links on your restored site.</p>' : '')
-            + '<p id="ocm-precheck-selection" role="status">No extra addresses selected.</p>'
-            + '<p>Starting restore replaces the selected sections of this site with the backup.</p>'
-            + '<div class="ocm-precheck-actions"><button type="button" class="ocm-btn ocm-btn-primary" id="ocm-precheck-start">Start restore</button>'
-            + '<button type="button" class="ocm-btn ocm-btn-ghost" id="ocm-precheck-back">Back</button></div>';
+            + (other ? '<details' + (!likely ? ' open' : '') + '><summary>' + escHtml(t('otherDomains')) + '</summary><p>' + escHtml(t('otherDomainsNote')) + '</p><ul>' + other + '</ul></details>' : '')
+            + (preparation.omitted ? '<p>' + escHtml(t('addressesOmitted')) + '</p>' : '')
+            + '<p id="ocm-precheck-selection" role="status">' + escHtml(t('noAddressesSelected')) + '</p>'
+            + '<p>' + escHtml(t('restoreReplaces')) + '</p>'
+            + '<div class="ocm-precheck-actions"><button type="button" class="ocm-btn ocm-btn-primary" id="ocm-precheck-start">' + escHtml(t('startRestore')) + '</button>'
+            + '<button type="button" class="ocm-btn ocm-btn-ghost" id="ocm-precheck-back">' + escHtml(t('back')) + '</button></div>';
         $('#ocm-restore-precheck').html(html).prop('hidden', false);
         $('#ocm-precheck-title').trigger('focus');
         $('#ocm-restore-precheck input').on('change', function () {
             var count = $('#ocm-restore-precheck input:checked').length;
-            $('#ocm-precheck-selection').text(count ? count + ' extra domain(s) will be updated.' : 'No extra addresses selected.');
+            $('#ocm-precheck-selection').text(count ? fmt(t('addressesSelected'), count) : t('noAddressesSelected'));
         });
         $('#ocm-precheck-back').on('click', function () {
             clearRestorePreparation();
@@ -311,7 +338,7 @@
         clearMessages();
         var raw = ($('#ocm_restore_code').val() || '').replace(/[\s\-]+/g, '').toUpperCase();
         if (raw.length < 6 || raw.length > 32) {
-            $('#ocm-restore-precheck').prop('hidden', false).text('Paste the restore code from your backup email.');
+            $('#ocm-restore-precheck').prop('hidden', false).text(t('pasteRestoreCode'));
             return;
         }
         var excludes = getSelectedExcludes();
@@ -324,7 +351,7 @@
         var generation = prepareGeneration;
         disableButtons();
         $('#ocm-btn-restore').prop('disabled', true);
-        $('#ocm-restore-precheck').prop('hidden', false).html('<p role="status">Checking backup addresses…</p>');
+        $('#ocm-restore-precheck').prop('hidden', false).html('<p role="status">' + escHtml(t('checkingAddresses')) + '</p>');
         $.post(siteData.ajaxurl, {
             action: 'ocm_prepare_restore',
             _wpnonce: siteData.prepareRestoreNonce,
@@ -349,7 +376,7 @@
         }).fail(function (xhr) {
             if (generation !== prepareGeneration) return;
             restoreStartFailed(xhr.responseJSON && xhr.responseJSON.data && xhr.responseJSON.data.message
-                || 'Could not check the backup. Please try again.');
+                || t('checkFailed'));
         });
     }
 
@@ -412,10 +439,10 @@
         }
         return ''
             + '<div class="ocm-extra-domains">'
-            + '  <h3>Other addresses found</h3>'
-            + '  <p>Checked addresses will be rewritten to this site. Close to leave them unchanged.</p>'
+            + '  <h3>' + escHtml(t('otherAddressesFound')) + '</h3>'
+            + '  <p>' + escHtml(t('otherAddressesIntro')) + '</p>'
             + '  <ul>' + items + '</ul>'
-            + '  <button type="button" class="ocm-btn ocm-btn-primary" id="ocm-extra-domains-apply">Update checked addresses</button>'
+            + '  <button type="button" class="ocm-btn ocm-btn-primary" id="ocm-extra-domains-apply">' + escHtml(t('updateAddresses')) + '</button>'
             + '  <p id="ocm-extra-domains-status" class="ocm-extra-status" hidden></p>'
             + '</div>';
     }
@@ -448,7 +475,7 @@
         });
         $btn.prop('disabled', true);
         $('#ocm-restore-success-modal input[name="ocm_extra_domain"]').prop('disabled', true);
-        $status.prop('hidden', false).text('Updating addresses…');
+        $status.prop('hidden', false).text(t('updatingAddresses'));
         $.post(siteData.ajaxurl, {
             action: 'ocm_apply_extra_domains',
             _wpnonce: siteData.extraDomainsNonce,
@@ -457,20 +484,20 @@
             extraDomainsSettled = true;
             var updates = resp && resp.data && typeof resp.data.updates !== 'undefined' ? parseInt(resp.data.updates, 10) : 0;
             if (!resp || !resp.success) {
-                $status.text('Some addresses may not have been updated. Retry to finish updating.');
+                $status.text(t('addressesRetry'));
                 extraDomainsApplyStarted = false;
                 extraDomainsSettled = false;
                 $btn.prop('disabled', false);
                 $('#ocm-restore-success-modal input[name="ocm_extra_domain"]').prop('disabled', false);
                 return;
             }
-            $status.text(updates > 0 ? ('Updated ' + updates + ' database rows.') : 'No addresses were rewritten.');
+            $status.text(updates > 0 ? fmt(t('rowsUpdated'), updates) : t('noAddressesRewritten'));
         }).fail(function () {
             extraDomainsApplyStarted = false;
             extraDomainsSettled = false;
             $btn.prop('disabled', false);
             $('#ocm-restore-success-modal input[name="ocm_extra_domain"]').prop('disabled', false);
-            $status.prop('hidden', false).text('Some addresses may not have been updated. Retry to finish updating.');
+            $status.prop('hidden', false).text(t('addressesRetry'));
         });
     }
 
@@ -488,22 +515,20 @@
         var isPartial = typeof siteData !== 'undefined' && ocmFlagOn(siteData.showRestorePartial);
         var isWarned = typeof siteData !== 'undefined' && ocmFlagOn(siteData.showRestoreWarned);
         var isIncomplete = isPartial || isWarned;
-        var titleText = isPartial
-            ? 'Restore completed with partial updates'
-            : (isWarned ? 'Restore completed with warnings' : 'Restore complete');
-        var bodyText = isPartial
-            ? 'Your site was restored, but some address updates did not apply. Review remaining links on your site.'
+        var titleText = t(isPartial
+            ? 'restorePartialTitle'
+            : (isWarned ? 'restoreWarnedTitle' : 'restoreDoneTitle'));
+        var bodyText = t(isPartial
+            ? 'restorePartialBody'
             : (isWarned
-                ? 'Your site was restored, but some parts were skipped or incomplete. Check the migration log for details.'
-                : (withReviewCta
-                    ? 'Your site was restored successfully. If this plugin helped, leave a quick review on WordPress.org.'
-                    : 'Your site was restored successfully.'));
+                ? 'restoreWarnedBody'
+                : (withReviewCta ? 'restoreReviewBody' : 'restoreDoneBody')));
         var reviewBlock = '';
         if (withReviewCta && !isIncomplete) {
             reviewBlock = ''
-                + '      <a class="ocm-btn ocm-btn-primary ocm-modal-review" id="ocm-review-btn" href="' + reviewUrl + '" target="_blank" rel="noopener noreferrer">Leave a review</a>'
+                + '      <a class="ocm-btn ocm-btn-primary ocm-modal-review" id="ocm-review-btn" href="' + reviewUrl + '" target="_blank" rel="noopener noreferrer">' + escHtml(t('leaveReview')) + '</a>'
                 + (dismissUrl
-                    ? '      <a class="ocm-btn-link ocm-modal-never" id="ocm-dismiss-review" href="' + dismissUrl + '">Don\'t ask again</a>'
+                    ? '      <a class="ocm-btn-link ocm-modal-never" id="ocm-dismiss-review" href="' + dismissUrl + '">' + escHtml(t('dontAskAgain')) + '</a>'
                     : '');
         }
         var domains = extraDomainsBlock();
@@ -512,19 +537,20 @@
             + '<div id="ocm-restore-success-modal" class="ocm-modal" role="dialog" aria-modal="true" aria-labelledby="ocm-restore-success-title" hidden>'
             + '  <div class="ocm-modal-backdrop" data-ocm-modal-close></div>'
             + '  <div class="' + cardClass + '">'
-            + '    <button type="button" class="ocm-modal-close" data-ocm-modal-close aria-label="Close">&times;</button>'
+            + '    <button type="button" class="ocm-modal-close" data-ocm-modal-close aria-label="' + escHtml(t('close')) + '">&times;</button>'
             + '    <div class="ocm-modal-icon" aria-hidden="true">' + (isIncomplete ? '!' : '✓') + '</div>'
-            + '    <h2 id="ocm-restore-success-title" class="ocm-modal-title">' + titleText + '</h2>'
-            + '    <p class="ocm-modal-body">' + bodyText + '</p>'
+            + '    <h2 id="ocm-restore-success-title" class="ocm-modal-title">' + escHtml(titleText) + '</h2>'
+            + '    <p class="ocm-modal-body">' + escHtml(bodyText) + '</p>'
             // The forum is public: anyone with the restore code can restore the backup.
             + (isIncomplete
-                ? '    <p class="ocm-modal-body ocm-modal-support">Need help? <a href="' + escHtml(supportUrl) + '" target="_blank" rel="noopener noreferrer">Ask on the support forum</a>'
-                    + ' and share your site\'s domain. Never post your restore code: anyone who has it can restore your backup.</p>'
+                ? '    <p class="ocm-modal-body ocm-modal-support">' + escHtml(t('needHelp')) + ' '
+                    + fmt(escHtml(t('supportForum')), '<a href="' + escHtml(supportUrl) + '" target="_blank" rel="noopener noreferrer">', '</a>')
+                    + '</p>'
                 : '')
             + domains
             + '    <div class="ocm-modal-actions">'
             + reviewBlock
-            + '      <button type="button" class="ocm-btn ocm-btn-ghost ocm-modal-dismiss" data-ocm-modal-close>Close</button>'
+            + '      <button type="button" class="ocm-btn ocm-btn-ghost ocm-modal-dismiss" data-ocm-modal-close>' + escHtml(t('close')) + '</button>'
             + '    </div>'
             + '  </div>'
             + '</div>';

@@ -15,25 +15,25 @@ class OCM_Restore_Precheck {
 
     public static function prepare() {
         if (!current_user_can('manage_options')) {
-            wp_send_json_error(array('message' => 'Forbidden'), 403);
+            wp_send_json_error(array('message' => __('Forbidden', '1-click-migration')), 403);
         }
         check_ajax_referer('ocm_prepare_restore');
         if (get_option('ocm_action_start_backup') || get_option('ocm_action_start_restore')) {
-            wp_send_json_error(array('message' => 'Wait for the current operation to finish, or stop it before preparing a restore.'), 409);
+            wp_send_json_error(array('message' => __('Wait for the current operation to finish, or stop it before preparing a restore.', '1-click-migration')), 409);
         }
         $code = isset($_POST['restore_code']) && is_string($_POST['restore_code'])
             ? strtoupper(preg_replace('/[\s-]+/', '', wp_unslash($_POST['restore_code']))) : '';
         if (!preg_match('/^[A-Z0-9]{6,32}$/', $code)) {
-            wp_send_json_error(array('message' => 'Enter the restore code from your backup email.'), 400);
+            wp_send_json_error(array('message' => __('Enter the restore code from your backup email.', '1-click-migration')), 400);
         }
         $excluded = self::exclusions($_POST['selected'] ?? '');
         if (count($excluded) === 4) {
-            wp_send_json_error(array('message' => 'Select at least one section to restore.'), 400);
+            wp_send_json_error(array('message' => __('Select at least one section to restore.', '1-click-migration')), 400);
         }
         $redeem = OCM_S3::redeem_restore_code($code);
         if (!is_object($redeem) || ($redeem->_status ?? 0) !== 200 || !empty($redeem->error)
             || empty($redeem->bucket_id) || empty($redeem->aes_key_b64) || empty($redeem->urls)) {
-            wp_send_json_error(array('message' => 'The backup could not be opened. Check your restore code and try again.'), 400);
+            wp_send_json_error(array('message' => __('The backup could not be opened. Check your restore code and try again.', '1-click-migration')), 400);
         }
         $manifest = null;
         if (!in_array('db', $excluded, true) && !empty($redeem->urls->log_download)) {
@@ -41,7 +41,7 @@ class OCM_Restore_Precheck {
                 'timeout' => 30, 'limit_response_size' => 4 * 1024 * 1024,
             ));
             if (is_wp_error($response) || !in_array((int) wp_remote_retrieve_response_code($response), array(200, 404), true)) {
-                wp_send_json_error(array('message' => 'The backup address check could not be downloaded. Please try again.'), 502);
+                wp_send_json_error(array('message' => __('The backup address check could not be downloaded. Please try again.', '1-click-migration')), 502);
             }
             if ((int) wp_remote_retrieve_response_code($response) === 200) {
                 $manifest = OCM_URL_Manifest::from_log(wp_remote_retrieve_body($response), $redeem->bucket_id);
@@ -60,7 +60,7 @@ class OCM_Restore_Precheck {
             'candidates' => $report['candidates'],
         );
         if (!set_transient('ocm_restore_precheck_' . $token, $plan, self::TTL)) {
-            wp_send_json_error(array('message' => 'The restore preparation could not be saved. Please try again.'), 500);
+            wp_send_json_error(array('message' => __('The restore preparation could not be saved. Please try again.', '1-click-migration')), 500);
         }
         $rows = OCM_Extra_Domains::public_rows($report['candidates']);
         $db = new OCM_DB();
@@ -91,23 +91,23 @@ class OCM_Restore_Precheck {
     /** Selection IDs are resolved exclusively against the server-side inventory. */
     public static function consume($token, $code, $excluded, $ids) {
         if (!is_string($token) || !preg_match('/^[a-zA-Z0-9]{32}$/', $token)) {
-            return new \WP_Error('precheck_missing', 'Check the backup again before starting restore.');
+            return new \WP_Error('precheck_missing', __('Check the backup again before starting restore.', '1-click-migration'));
         }
         $key = 'ocm_restore_precheck_' . $token;
         $plan = get_transient($key);
         if (!is_array($plan) || $plan['user'] !== get_current_user_id()
             || !hash_equals($plan['code_hash'], hash('sha256', $code))
             || $plan['destination'] !== site_url() || $plan['excluded'] !== self::exclusions($excluded)) {
-            return new \WP_Error('precheck_expired', 'The restore details changed or the check expired. Check the backup again.');
+            return new \WP_Error('precheck_expired', __('The restore details changed or the check expired. Check the backup again.', '1-click-migration'));
         }
         if (!is_array($ids) || count($ids) > OCM_Extra_Domains::MAX_CANDIDATES) {
-            return new \WP_Error('precheck_selection', 'The address selection is invalid. Check the backup again.');
+            return new \WP_Error('precheck_selection', __('The address selection is invalid. Check the backup again.', '1-click-migration'));
         }
         $selected = array();
         $available = array_column($plan['candidates'], null, 'id');
         foreach ($ids as $id) {
             if (!is_string($id) || !isset($available[$id])) {
-                return new \WP_Error('precheck_selection', 'The address selection is invalid. Check the backup again.');
+                return new \WP_Error('precheck_selection', __('The address selection is invalid. Check the backup again.', '1-click-migration'));
             }
             $selected[$id] = $available[$id];
         }

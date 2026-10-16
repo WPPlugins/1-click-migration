@@ -1,10 +1,10 @@
 === 1-Click WordPress Migration Plugin – Backup, Migrate & Clone ===
 Contributors: 1clickmigration
 Tags: backup, migrate, migration, restore, clone
-Requires at least: 4.0
+Requires at least: 4.9
 Tested up to: 7.1
 Requires PHP: 7.4
-Stable tag: 3.1.27
+Stable tag: 3.1.28
 Author URI: https://1clickmigration.com
 License: GPLv3 or later
 License URI: http://www.gnu.org/licenses/gpl-3.0.html
@@ -113,6 +113,9 @@ Any host that runs WordPress on PHP 7.4 or later, including Bluehost, SiteGround
 4. Enter the restore code on the destination site to finish your WordPress migration.
 
 == Changelog ==
+= 3.1.28 =
+* **Ready for translation**: The plugin page, its notices and the help shown with backup and restore progress can now be translated on translate.wordpress.org. Once a translation for your language is ready, WordPress installs it with the plugin. Progress steps come from the migration log and stay in English. The minimum WordPress version is now listed as 4.9, which the plugin already needed.
+
 = 3.1.27 =
 * **Listing update**: The description and FAQ now cover WooCommerce stores, more hosts and cloud servers, staging to live and domain name changes, and link to step-by-step guides on 1clickmigration.com. Backup and restore work exactly as in 3.1.26.
 
@@ -158,6 +161,9 @@ Any host that runs WordPress on PHP 7.4 or later, including Bluehost, SiteGround
 Older versions are listed in [changelog.txt](https://plugins.trac.wordpress.org/browser/1-click-migration/trunk/changelog.txt).
 
 == Upgrade Notice ==
+
+= 3.1.28 =
+The plugin's screens can now be translated on translate.wordpress.org. The minimum WordPress version is now 4.9. Includes all 3.1.27 changes.
 
 = 3.1.27 =
 Listing-only update: a WooCommerce FAQ, more hosts and links to migration guides. No changes to backup or restore. Includes all 3.1.26 changes.

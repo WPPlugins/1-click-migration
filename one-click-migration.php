@@ -4,7 +4,9 @@
  * Plugin Name: 1 Click Migration
  * Plugin URI: https://wordpress.org/plugins/1-click-migration/
  * Description: Migrate, copy, or clone your entire site with 1 click. <strong>Any host, no size limitation, no premium versions.</strong>
- * Version: 3.1.27
+ * Version: 3.1.28
+ * Requires at least: 4.9
+ * Requires PHP: 7.4
  * Author: 1ClickMigration
  * Author URI: https://1clickmigration.com/
  * Text Domain: 1-click-migration
@@ -238,14 +240,7 @@ class One_Click_Migration
         }
         $timeout = One_Click_Migration::get_timeout();
 
-        $active_plugins = get_option('active_plugins', array());
-        $this_plugin_basename = plugin_basename(OCM_MAIN_FILE);
-        $other_active_count = 0;
-        foreach ($active_plugins as $plugin) {
-            if ($plugin !== $this_plugin_basename) {
-                $other_active_count++;
-            }
-        }
+        $other_active_count = OCM_Admin_Page::other_active_plugins_count();
 
         // Permanent dismiss of the in-plugin Review ask is handled on admin_init
         // (handle_review_dismiss), which runs before this hook, so the modal's
@@ -276,7 +271,9 @@ class One_Click_Migration
         $show_restore_warned = (bool) get_option(OCM_Backup::OPTION_RESTORE_WAS_WARNED, false);
 
         wp_localize_script('custom_ocm_admin_js', 'siteData', array(
-            'progressUrl' => get_rest_url(null, 'ocm/v1/progress'),
+            // _locale=user: the poll's help text in the admin's own language,
+            // like the rest of this page (WordPress 5.0+; ignored before).
+            'progressUrl' => add_query_arg('_locale', 'user', get_rest_url(null, 'ocm/v1/progress')),
             'userEmail' => $user_email,
             'domain' => $domain,
             'timeout' => $timeout,
@@ -297,6 +294,7 @@ class One_Click_Migration
             'supportUrl' => OCM_Backup::SUPPORT_FORUM_URL,
             'extraDomains' => $extra_domains,
             'extraDomainsNonce' => wp_create_nonce('ocm_apply_extra_domains'),
+            'i18n' => OCM_Admin_Page::script_strings(),
         ));
     }
 
@@ -340,10 +338,10 @@ class One_Click_Migration
         $dismiss_url = wp_nonce_url(add_query_arg('ocm_dismiss_review', '1'), 'ocm_dismiss_review');
         ?>
         <div class="notice notice-info ocm-review-notice">
-            <p>Your site was restored. If 1-Click Migration helped, leave a review.</p>
+            <p><?php esc_html_e('Your site was restored. If 1-Click Migration helped, leave a review.', '1-click-migration'); ?></p>
             <p>
-                <a class="button button-primary" href="<?php echo esc_url($review_url); ?>" target="_blank" rel="noopener noreferrer">Leave a review</a>
-                <a href="<?php echo esc_url($dismiss_url); ?>" style="margin-left: 12px;">Don&#8217;t ask again</a>
+                <a class="button button-primary" href="<?php echo esc_url($review_url); ?>" target="_blank" rel="noopener noreferrer"><?php esc_html_e('Leave a review', '1-click-migration'); ?></a>
+                <a href="<?php echo esc_url($dismiss_url); ?>" style="margin-left: 12px;"><?php esc_html_e('Don\'t ask again', '1-click-migration'); ?></a>
             </p>
         </div>
         <?php
@@ -838,12 +836,12 @@ class One_Click_Migration
     public static function download_log()
     {
         if (!current_user_can('manage_options')) {
-            wp_die('You do not have sufficient permissions to access this log.');
+            wp_die(esc_html__('You do not have sufficient permissions to access this log.', '1-click-migration'));
         }
         check_admin_referer('ocm_download_log');
         self::ensure_private_log_directory();
         if (!is_file(OCM_DEBUG_LOG_FILE) || !is_readable(OCM_DEBUG_LOG_FILE)) {
-            wp_die('Migration log not found.');
+            wp_die(esc_html__('Migration log not found.', '1-click-migration'));
         }
 
         nocache_headers();
@@ -1312,14 +1310,12 @@ PHP;
         status_header(503);
         nocache_headers();
         
-        $maintenance_message = 'Site is currently being restored. Please check back in a few minutes.';
-        
         echo '<!DOCTYPE html>
 <html>
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Site Maintenance</title>
+    <title>' . esc_html__('Site Maintenance', '1-click-migration') . '</title>
     <style>
         body { 
             font-family: Arial, sans-serif; 
@@ -1343,9 +1339,9 @@ PHP;
 <body>
     <div class="maintenance-container">
         <div class="icon">🛠️</div>
-        <h1>Site Under Maintenance</h1>
-        <p>' . esc_html($maintenance_message) . '</p>
-        <p>We apologize for any inconvenience. Please check back shortly.</p>
+        <h1>' . esc_html__('Site Under Maintenance', '1-click-migration') . '</h1>
+        <p>' . esc_html__('Site is currently being restored. Please check back in a few minutes.', '1-click-migration') . '</p>
+        <p>' . esc_html__('We apologize for any inconvenience. Please check back shortly.', '1-click-migration') . '</p>
     </div>
 </body>
 </html>';
@@ -1375,7 +1371,7 @@ new One_Click_Migration();
 
 add_filter('plugin_action_links_' . plugin_basename(__FILE__), static function ($links) {
     $links[] = '<a href="' .
-        admin_url('tools.php?page=one-click-migration') .
-        '">' . __('Settings') . '</a>';
+        esc_url(admin_url('tools.php?page=one-click-migration')) .
+        '">' . esc_html__('Settings', '1-click-migration') . '</a>';
     return $links;
 });

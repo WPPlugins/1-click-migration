@@ -80,6 +80,12 @@ class OCM_Backup
     /** Where the UI sends users who need help (the WordPress.org forum is public). */
     const SUPPORT_FORUM_URL = 'https://wordpress.org/support/plugin/1-click-migration/';
 
+    /** Sender of the restore code email, named on the backup-completed banner. */
+    const RESTORE_CODE_SENDER = 'pr@1clickmigration.com';
+
+    /** Inline markup translated progress-card text may keep (ui_html()). */
+    const UI_HTML = array('strong' => array(), 'code' => array(), 'em' => array());
+
     private static $skipMessages = [
         self::LOG_MESSAGE_BG_PROCESS_RESTARTING,
         self::LOG_MESSAGE_BG_PROCESS_RESTARTING_LOG
@@ -389,12 +395,12 @@ class OCM_Backup
     {
         // Add nonce verification
         if (!isset($_GET['_wpnonce']) || !wp_verify_nonce($_GET['_wpnonce'], 'one_click_migration_cancel_action')) {
-            wp_die('Security check failed. Please try again.');
+            wp_die(esc_html__('Security check failed. Please try again.', '1-click-migration'));
         }
         
         // Check user capabilities
         if (!current_user_can('manage_options')) {
-            wp_die('You do not have sufficient permissions to perform this action.');
+            wp_die(esc_html__('You do not have sufficient permissions to perform this action.', '1-click-migration'));
         }
 
         wp_safe_redirect(admin_url('tools.php?page=one-click-migration'));
@@ -414,12 +420,12 @@ class OCM_Backup
     {
         // Verify nonce for security
         if (!isset($_GET['_wpnonce']) || !wp_verify_nonce($_GET['_wpnonce'], 'one_click_migration_start_backup')) {
-            wp_die('Security check failed. Please try again.');
+            wp_die(esc_html__('Security check failed. Please try again.', '1-click-migration'));
         }
 
         // Check user capabilities
         if (!current_user_can('manage_options')) {
-            wp_die('You do not have sufficient permissions to perform this action.');
+            wp_die(esc_html__('You do not have sufficient permissions to perform this action.', '1-click-migration'));
         }
 
         // Claim ownership before touching any shared options or queues. The
@@ -721,16 +727,16 @@ class OCM_Backup
     {
         // Verify nonce for security
         if (!isset($_GET['_wpnonce']) || !wp_verify_nonce($_GET['_wpnonce'], 'one_click_migration_start_restore')) {
-            wp_die('Security check failed. Please try again.');
+            wp_die(esc_html__('Security check failed. Please try again.', '1-click-migration'));
         }
         
         // Check user capabilities
         if (!current_user_can('manage_options')) {
-            wp_die('You do not have sufficient permissions to perform this action.');
+            wp_die(esc_html__('You do not have sufficient permissions to perform this action.', '1-click-migration'));
         }
 
         if (get_option('ocm_action_start_backup') || get_option('ocm_action_start_restore')) {
-            wp_send_json_error(array('message' => 'Another operation started. Wait for it to finish or stop it first.'), 409);
+            wp_send_json_error(array('message' => __('Another operation started. Wait for it to finish or stop it first.', '1-click-migration')), 409);
             return;
         }
         $restore_code = self::get_restore_code();
@@ -756,7 +762,7 @@ class OCM_Backup
         self::reset_current_restore_steps();
         self::delete_restore_options();
         if (!update_option(OCM_Restore_Precheck::OPTION, $url_plan, false)) {
-            wp_send_json_error(array('message' => 'The address choices could not be saved. Check the backup again before restoring.'), 500);
+            wp_send_json_error(array('message' => __('The address choices could not be saved. Check the backup again before restoring.', '1-click-migration')), 500);
             return;
         }
         // Clear stale presigned URLs from a prior migration so early write_to_log
@@ -3336,8 +3342,10 @@ class OCM_Backup
 
         // "Taking longer than expected" is for a real stall (the watchdog had to
         // revive a worker), not for a planned hand-over.
+        // The notice itself stays English: admin-script.js files it under
+        // "Notice:". The forum help goes after a line break, out of that check.
         $stall_notice = ($action_in_flight && (int) get_option('ocm_worker_revival_count', 0) > 0)
-            ? self::LOG_MESSAGE_BG_PROCESS_RESTARTING_LOG . '. ' . self::support_forum_html('Stuck for a long time?')
+            ? self::LOG_MESSAGE_BG_PROCESS_RESTARTING_LOG . '.</br>' . self::support_forum_html(__('Stuck for a long time?', '1-click-migration'))
             : '';
 
         if ($lastLog && strpos($lastLog, 'was skipped due to timeout') !== false) {
@@ -3351,10 +3359,13 @@ class OCM_Backup
         }
 
         if ($action_in_flight) {
-            $action_label = get_option('ocm_action_start_restore') ? 'restore' : 'backup';
-            $default_text_value = sprintf('Starting %s&hellip;', $action_label);
+            $default_text_value = get_option('ocm_action_start_restore')
+                ? esc_html__('Starting restore…', '1-click-migration')
+                : esc_html__('Starting backup…', '1-click-migration');
         } else {
-            $default_text_value = 'Start a backup or a restore to see current progress here.</br></br>Entire process runs in the background, independent of your browser activity.</br> </br>If you get logged out during restore, log back in using your backup old WordPress credentials and refresh this page for progress.';
+            $default_text_value = esc_html__('Start a backup or a restore to see current progress here.', '1-click-migration')
+                . '</br></br>' . esc_html__('Entire process runs in the background, independent of your browser activity.', '1-click-migration')
+                . '</br> </br>' . esc_html__('If you get logged out during restore, log back in using your backup old WordPress credentials and refresh this page for progress.', '1-click-migration');
         }
 
         $default_text = array(
@@ -3413,44 +3424,57 @@ class OCM_Backup
                 }
 
 
+                $faq_link = '<a target="_blank" href="https://1clickmigration.com/faq/">';
                 if ($lastLog === 'Downloading restore files. Please wait.') {
-                    $progress_item_text['text'] .= '</br></br>This step could take a while depending on your backup size';
+                    $progress_item_text['text'] .= '</br></br>' . esc_html__('This step could take a while depending on your backup size', '1-click-migration');
 
                 } elseif ($lastLog === 'Plugins have been restored') {
-                    $progress_item_text['text'] .= '</br></br>Around this step you might get logged out. Log back in using your old WordPress credentials and refresh this page for progress updates.';
+                    $progress_item_text['text'] .= '</br></br>' . esc_html__('Around this step you might get logged out. Log back in using your old WordPress credentials and refresh this page for progress updates.', '1-click-migration');
                 } elseif ($restore_terminal) {
                     if (strpos($lastLog, self::LOG_RESTORE_COMPLETED_WARNINGS_PREFIX) === 0) {
-                        $progress_item_text['text'] .= '</br></br>Restore finished, but some parts were skipped or missing. Check the migration log, then verify themes, plugins, and media on your site.'
-                            . ' Our <a target="_blank" href="https://1clickmigration.com/faq/">FAQ page</a> covers common fixes.';
+                        $progress_item_text['text'] .= '</br></br>' . esc_html__('Restore finished, but some parts were skipped or missing. Check the migration log, then verify themes, plugins, and media on your site.', '1-click-migration')
+                            /* translators: 1: opening link tag to the FAQ page, 2: closing link tag. */
+                            . ' ' . sprintf(self::ui_html(__('Our %1$sFAQ page%2$s covers common fixes.', '1-click-migration')), $faq_link, '</a>');
                     } else {
-                        $progress_item_text['text'] .= '</br></br>Please check your website. If you have any issues, see our <a target="_blank" href="https://1clickmigration.com/faq/">FAQ page</a>.';
+                        /* translators: 1: opening link tag to the FAQ page, 2: closing link tag. */
+                        $progress_item_text['text'] .= '</br></br>' . sprintf(self::ui_html(__('Please check your website. If you have any issues, see our %1$sFAQ page%2$s.', '1-click-migration')), $faq_link, '</a>');
                     }
-                    $progress_item_text['text'] .= '</br></br>' . self::support_forum_html('Need help?');
+                    $progress_item_text['text'] .= '</br></br>' . self::support_forum_html(__('Need help?', '1-click-migration'));
                     $progress_item_text['restoreCompleted'] = true;
                 } elseif ($lastLog === 'Backup completed.') {
-                    $bucket_id = (string) get_option('ocm_bucket_id', '');
-                    $bucket_line = $bucket_id !== ''
-                        ? '<br>Backup ID: <code>' . esc_html($bucket_id) . '</code>'
-                        : '';
-                    $progress_item_text['topBanner'] = '<strong>Check your email</strong> for the restore code from <strong>pr@1clickmigration.com</strong>. If you don\'t see it within a few minutes, check your <strong>spam/junk folder</strong> and mark messages from <code>pr@1clickmigration.com</code> as not spam so future restore codes arrive in your inbox.'
-                        . $bucket_line;
+                    $progress_item_text['topBanner'] = sprintf(
+                        /* translators: 1: sender address of the restore code email (bold), 2: the same address (code) */
+                        self::ui_html(__('<strong>Check your email</strong> for the restore code from %1$s. If you don\'t see it within a few minutes, check your <strong>spam/junk folder</strong> and mark messages from %2$s as not spam so future restore codes arrive in your inbox.', '1-click-migration')),
+                        '<strong>' . self::RESTORE_CODE_SENDER . '</strong>',
+                        '<code>' . self::RESTORE_CODE_SENDER . '</code>'
+                    ) . self::backup_id_banner_line();
                 } elseif (strpos($lastLog, 'Backup completed with missing parts') === 0) {
-                    $bucket_id = (string) get_option('ocm_bucket_id', '');
-                    $bucket_line = $bucket_id !== ''
-                        ? '<br>Backup ID: <code>' . esc_html($bucket_id) . '</code>'
-                        : '';
                     $missing_label = esc_html(trim((string) substr($lastLog, strlen('Backup completed with missing parts:'))));
-                    $progress_item_text['topBanner'] = '<strong>Backup finished, but it is INCOMPLETE.</strong> These parts could not be backed up and will NOT be restored: <strong>' . $missing_label . '</strong>.'
-                        . '<br>A restore code was still emailed from <strong>pr@1clickmigration.com</strong> in case you want to migrate the rest.'
-                        . '<br>To get a complete backup, ask your host to raise the PHP <code>max_execution_time</code>, then run the backup again.'
-                        . $bucket_line;
+                    $progress_item_text['topBanner'] = sprintf(
+                        /* translators: %s: backup parts that are missing, e.g. "uploads, plugins" */
+                        self::ui_html(__('<strong>Backup finished, but it is INCOMPLETE.</strong> These parts could not be backed up and will NOT be restored: <strong>%s</strong>.', '1-click-migration')),
+                        $missing_label
+                    )
+                        . '<br>' . sprintf(
+                            /* translators: %s: sender address of the restore code email */
+                            self::ui_html(__('A restore code was still emailed from %s in case you want to migrate the rest.', '1-click-migration')),
+                            '<strong>' . self::RESTORE_CODE_SENDER . '</strong>'
+                        )
+                        . '<br>' . sprintf(
+                            /* translators: %s: the PHP setting max_execution_time */
+                            self::ui_html(__('To get a complete backup, ask your host to raise the PHP %s, then run the backup again.', '1-click-migration')),
+                            '<code>max_execution_time</code>'
+                        )
+                        . self::backup_id_banner_line();
                 }
                 $recovery_hint = self::get_recovery_hint_for_log($lastLog);
                 if ($recovery_hint !== '') {
-                    $progress_item_text['text'] .= '</br></br><strong>How to fix:</strong> ' . $recovery_hint;
+                    $progress_item_text['text'] .= '</br></br><strong>' . esc_html__('How to fix:', '1-click-migration') . '</strong> ' . self::ui_html($recovery_hint);
                 }
                 if (self::is_failure_progress_line($lastLog, $progress_item[1], $isStopped)) {
-                    $progress_item_text['text'] .= '</br></br>' . self::support_forum_html($recovery_hint !== '' ? 'Still stuck?' : 'Need help?');
+                    $progress_item_text['text'] .= '</br></br>' . self::support_forum_html($recovery_hint !== ''
+                        ? __('Still stuck?', '1-click-migration')
+                        : __('Need help?', '1-click-migration'));
                 }
                 return $progress_item_text;
             }
@@ -3462,15 +3486,43 @@ class OCM_Backup
     /**
      * "Ask on the support forum" line for the progress card. The forum is
      * public, so it asks for the site's domain only: anyone with the restore
-     * code can restore the backup.
+     * code can restore the backup. Same sentence as
+     * OCM_Admin_Page::support_forum_sentence().
      *
-     * @param string $lead Short question in front of the link, e.g. "Need help?".
+     * @param string $lead Translated question in front of the link, e.g. "Need help?".
      * @return string HTML
      */
     private static function support_forum_html($lead)
     {
-        return $lead . ' <a target="_blank" rel="noopener noreferrer" href="' . self::SUPPORT_FORUM_URL . '">Ask on the support forum</a>'
-            . ' and share your site\'s domain. Never post your restore code: anyone who has it can restore your backup.';
+        return esc_html($lead) . ' ' . sprintf(
+            /* translators: 1: opening link tag to the WordPress.org support forum, 2: closing link tag. */
+            self::ui_html(__('%1$sAsk on the support forum%2$s and share your site\'s domain. Never post your restore code: anyone who has it can restore your backup.', '1-click-migration')),
+            '<a target="_blank" rel="noopener noreferrer" href="' . self::SUPPORT_FORUM_URL . '">',
+            '</a>'
+        );
+    }
+
+    /**
+     * Translated progress-card text, safe to send as HTML: only the inline
+     * tags in UI_HTML survive. Apostrophes stay as they are.
+     *
+     * @param string $text
+     * @return string
+     */
+    private static function ui_html($text)
+    {
+        return wp_kses($text, self::UI_HTML);
+    }
+
+    /** @return string "<br>Backup ID: …" for the backup-completed banner, or ''. */
+    private static function backup_id_banner_line()
+    {
+        $bucket_id = (string) get_option('ocm_bucket_id', '');
+        if ($bucket_id === '') {
+            return '';
+        }
+        /* translators: %s: backup ID */
+        return '<br>' . sprintf(esc_html__('Backup ID: %s', '1-click-migration'), '<code>' . esc_html($bucket_id) . '</code>');
     }
 
     /**
@@ -3499,13 +3551,22 @@ class OCM_Backup
     }
 
     /**
-     * @return string " and <code>…</code>" naming the private folder that
-     *                holds the restore workspace, or '' without one.
+     * @param string[] $folders Folder names, unescaped.
+     * @return string The folders as a comma-separated list of <code> items,
+     *                ending with the private folder that holds the restore
+     *                workspace when there is one.
      */
-    private static function restore_workspace_hint_folder()
+    private static function hint_folder_list(array $folders)
     {
         $dir = self::get_private_work_dir();
-        return '' === $dir ? '' : ' and <code>' . esc_html(dirname($dir)) . '</code>';
+        if ('' !== $dir) {
+            $folders[] = dirname($dir);
+        }
+        $items = array();
+        foreach ($folders as $folder) {
+            $items[] = '<code>' . esc_html($folder) . '</code>';
+        }
+        return implode(', ', $items);
     }
 
     private static function get_recovery_hint_for_log($log)
@@ -3515,62 +3576,76 @@ class OCM_Backup
         }
 
         if (strpos($log, 'disk quota') !== false || strpos($log, 'Not enough disk space') !== false || strpos($log, 'Restore workspace is not writable') !== false) {
-            return 'Free space or increase the hosting account disk quota, then run the restore again. If the hosting panel shows enough space, ask the host to check account quota or inode limits because PHP may report filesystem space instead of account quota.';
+            return __('Free space or increase the hosting account disk quota, then run the restore again. If the hosting panel shows enough space, ask the host to check account quota or inode limits because PHP may report filesystem space instead of account quota.', '1-click-migration');
         }
 
         if (strpos($log, 'write permissions') !== false || strpos($log, 'could not be moved or copied') !== false || strpos($log, 'could not be moved into place') !== false || strpos($log, 'could not be extracted') !== false) {
-            return 'Make sure WordPress can write to <code>wp-content</code>, <code>wp-content/plugins</code>, <code>wp-content/themes</code>, <code>wp-content/uploads</code>' . self::restore_workspace_hint_folder() . ', then retry the restore.';
+            return sprintf(
+                /* translators: %s: comma-separated list of folders */
+                __('Make sure WordPress can write to %s, then retry the restore.', '1-click-migration'),
+                self::hint_folder_list(array('wp-content', 'wp-content/plugins', 'wp-content/themes', 'wp-content/uploads'))
+            );
         }
 
         if (strpos($log, 'Restore failed while downloading') !== false) {
-            return 'Create a fresh backup and restore with the new code. Backups expire after the retention window, and some hosts or firewalls can interrupt large downloads.';
+            return __('Create a fresh backup and restore with the new code. Backups expire after the retention window, and some hosts or firewalls can interrupt large downloads.', '1-click-migration');
         }
 
         if (strpos($log, 'Restore failed while decrypting') !== false || strpos($log, 'could not be opened for extraction') !== false) {
-            return 'Retry after freeing space. If it fails again, create a fresh backup because the downloaded archive may be incomplete.';
+            return __('Retry after freeing space. If it fails again, create a fresh backup because the downloaded archive may be incomplete.', '1-click-migration');
         }
 
         if (strpos($log, 'cannot be restored safely (not hex-encoded)') !== false
             || strpos($log, 'binary/BLOB column values that cannot be restored safely') !== false
         ) {
-            return 'Update 1-Click Migration on the <strong>source</strong> site to 3.1.19 or later, take a new backup, then restore using the new backup\'s restore code. Nothing on this site was changed.';
+            return self::fresh_3_1_19_backup_hint();
         }
 
         if (strpos($log, 'Restore stopped before import: backup needs a fresh 3.1.19 backup') !== false) {
-            return 'Update 1-Click Migration on the <strong>source</strong> site to 3.1.19 or later, take a new backup, then restore using the new backup\'s restore code. Nothing on this site was changed.';
+            return self::fresh_3_1_19_backup_hint();
         }
 
         if (strpos($log, 'Restore stopped: database part could not be downloaded or unpacked') !== false) {
-            return 'The database archive could not be downloaded or unpacked, so nothing on this site was changed. Free disk space or check write permissions under <code>wp-content</code>' . self::restore_workspace_hint_folder() . ', then retry. If it fails again, create a fresh backup and restore with the new code.';
+            return sprintf(
+                /* translators: %s: comma-separated list of folders */
+                __('The database archive could not be downloaded or unpacked, so nothing on this site was changed. Free disk space or check write permissions under %s, then retry. If it fails again, create a fresh backup and restore with the new code.', '1-click-migration'),
+                self::hint_folder_list(array('wp-content'))
+            );
         }
 
         if (strpos($log, "Restore stopped: the backup's main options table didn't pass the check") !== false
             || strpos($log, 'incomplete or wrong-prefix') !== false
         ) {
-            return 'The backup\'s main options table did not pass the check, so nothing on this site was changed. No files, tables or plugins were touched. Take a fresh backup from the source (or fix the source options table) and restore again with the new backup\'s restore code.';
+            return __('The backup\'s main options table did not pass the check, so nothing on this site was changed. No files, tables or plugins were touched. Take a fresh backup from the source (or fix the source options table) and restore again with the new backup\'s restore code.', '1-click-migration');
         }
 
         if (strpos($log, 'Restore stopped: the database could not be imported') !== false) {
-            return 'The database could not be imported, so nothing on this site was changed. No files, tables or plugins were touched. Take a fresh backup from the source and restore again with the new backup\'s restore code. If the log mentions a table name that is too long, shorten that table name or the source table prefix before taking the new backup. If the log says a table has no primary or unique key, ask your host or developer to add one to that table on the source site, then take a new backup. If the log says a table has a row too large, ask your host to raise the PHP memory limit on this site, or ask your developer to shrink the large rows in that table on the source site, then take a new backup. If the log says a table stopped making progress, ask on the support forum below, and don\'t run the restore again until we\'ve checked it.';
+            return __('The database could not be imported, so nothing on this site was changed. No files, tables or plugins were touched. Take a fresh backup from the source and restore again with the new backup\'s restore code. If the log mentions a table name that is too long, shorten that table name or the source table prefix before taking the new backup. If the log says a table has no primary or unique key, ask your host or developer to add one to that table on the source site, then take a new backup. If the log says a table has a row too large, ask your host to raise the PHP memory limit on this site, or ask your developer to shrink the large rows in that table on the source site, then take a new backup. If the log says a table stopped making progress, ask on the support forum below, and don\'t run the restore again until we\'ve checked it.', '1-click-migration');
         }
 
         if (strpos($log, 'Database restore failed while importing') !== false || strpos($log, 'DB Restore') !== false) {
-            return 'The database import failed on a SQL file. If <code>proc_open</code> is disabled, ask the host to enable it so the restore can use the MySQL CLI path. If that is not possible, export a new backup after cleaning invalid or binary data stored in options by third-party plugins.';
+            return __('The database import failed on a SQL file. If <code>proc_open</code> is disabled, ask the host to enable it so the restore can use the MySQL CLI path. If that is not possible, export a new backup after cleaning invalid or binary data stored in options by third-party plugins.', '1-click-migration');
         }
 
         if (strpos($log, 'Backup worker dispatch failed') !== false || strpos($log, 'admin-ajax loopback check failed') !== false || strpos($log, 'blocks loopback requests') !== false) {
-            return 'Ask the host to allow WordPress loopback requests to <code>wp-admin/admin-ajax.php</code>. Security plugins, WAF rules, basic auth, or firewall settings can block the background worker.';
+            return __('Ask the host to allow WordPress loopback requests to <code>wp-admin/admin-ajax.php</code>. Security plugins, WAF rules, basic auth, or firewall settings can block the background worker.', '1-click-migration');
         }
 
         if (strpos($log, 'was skipped due to timeout') !== false || strpos($log, 'Backup completed with missing parts') !== false) {
-            return 'Parts get skipped when the host repeatedly hits its PHP execution time limit. Ask the host to raise <code>max_execution_time</code> (or temporarily reduce the folder size), then run the backup again so every part is included.';
+            return __('Parts get skipped when the host repeatedly hits its PHP execution time limit. Ask the host to raise <code>max_execution_time</code> (or temporarily reduce the folder size), then run the backup again so every part is included.', '1-click-migration');
         }
 
         if (strpos($log, 'Could not register backup') !== false || strpos($log, 'endpoint') !== false) {
-            return 'Check outbound HTTPS access from the server and try again. If outbound requests are blocked, ask the host to allow connections to 1Click Migration endpoints.';
+            return __('Check outbound HTTPS access from the server and try again. If outbound requests are blocked, ask the host to allow connections to 1Click Migration endpoints.', '1-click-migration');
         }
 
         return '';
+    }
+
+    /** @return string Hint for a restore that needs a backup from 1-Click Migration 3.1.19 or later. */
+    private static function fresh_3_1_19_backup_hint()
+    {
+        return __('Update 1-Click Migration on the <strong>source</strong> site to 3.1.19 or later, take a new backup, then restore using the new backup\'s restore code. Nothing on this site was changed.', '1-click-migration');
     }
 
     private static function get_multipart_upload_percentage($log)
@@ -5184,26 +5259,27 @@ class OCM_Backup
         $line = trim((string) $line);
         if (strpos($line, 'SYSLOG:') === 0) {
             $labels = array(
-                'Dispatching backup worker' => 'Starting the backup worker',
-                'Using direct processing' => 'Starting the backup worker',
-                'Server IP:' => 'Checking the server',
-                'WP_HTTP_BLOCK_EXTERNAL:' => 'Checking the server',
-                'WP_ACCESSIBLE_HOSTS:' => 'Checking the server',
-                'Admin URL:' => 'Checking the server',
-                'Number of updates made from replace' => 'Updating site addresses',
-                'Finished updating URLs in the database' => 'Updating site addresses',
-                'DB memory preflight (import)' => 'Importing the database',
-                'Low memory' => 'Working with limited PHP memory',
+                'Dispatching backup worker' => __('Starting the backup worker', '1-click-migration'),
+                'Using direct processing' => __('Starting the backup worker', '1-click-migration'),
+                'Server IP:' => __('Checking the server', '1-click-migration'),
+                'WP_HTTP_BLOCK_EXTERNAL:' => __('Checking the server', '1-click-migration'),
+                'WP_ACCESSIBLE_HOSTS:' => __('Checking the server', '1-click-migration'),
+                'Admin URL:' => __('Checking the server', '1-click-migration'),
+                'Number of updates made from replace' => __('Updating site addresses', '1-click-migration'),
+                'Finished updating URLs in the database' => __('Updating site addresses', '1-click-migration'),
+                'DB memory preflight (import)' => __('Importing the database', '1-click-migration'),
+                'Low memory' => __('Working with limited PHP memory', '1-click-migration'),
             );
             foreach ($labels as $needle => $label) {
                 if (strpos($line, $needle) !== false) {
-                    return $label;
+                    return esc_html($label);
                 }
             }
-            return 'Exporting the database';
+            return esc_html__('Exporting the database', '1-click-migration');
         }
         if (preg_match('/^Archiving (\S+) to /', $line, $m)) {
-            return 'Archiving ' . $m[1];
+            /* translators: %s: backup part being archived: db, themes, plugins or uploads */
+            return esc_html(sprintf(__('Archiving %s', '1-click-migration'), $m[1]));
         }
         if (preg_match('/^(Restoring "[^"]+") to directory "/', $line, $m)) {
             return $m[1];
@@ -6933,12 +7009,12 @@ class OCM_Backup
     public static function restart_failed_process(){
         // Check user capabilities
         if (!current_user_can('manage_options')) {
-            wp_die('You do not have sufficient permissions to perform this action.');
+            wp_die(esc_html__('You do not have sufficient permissions to perform this action.', '1-click-migration'));
         }
         
         // Verify nonce
         if (!wp_verify_nonce($_POST['_wpnonce'] ?? '', 'ocm_restart_failed_process')) {
-            wp_die('Security check failed. Please try again.');
+            wp_die(esc_html__('Security check failed. Please try again.', '1-click-migration'));
         }
 
         if(isset($_POST['process'])){
@@ -6967,7 +7043,7 @@ class OCM_Backup
     public static function apply_extra_domains()
     {
         if (!current_user_can('manage_options')) {
-            wp_send_json_error(array('message' => 'Forbidden'), 403);
+            wp_send_json_error(array('message' => __('Forbidden', '1-click-migration')), 403);
         }
         check_ajax_referer('ocm_apply_extra_domains');
 
@@ -7025,7 +7101,7 @@ class OCM_Backup
                 if (!empty($result['errors'])) {
                     One_Click_Migration::write_to_log(sprintf('Error: Extra-domain rewrite failed for %d rows.', count($result['errors'])));
                     wp_send_json_error(array(
-                        'message' => 'Some addresses could not be updated. Please retry.',
+                        'message' => __('Some addresses could not be updated. Please retry.', '1-click-migration'),
                         'updates' => $updates,
                     ), 500);
                     return;
