@@ -169,7 +169,9 @@ class OCM_Admin_Page
         $start_action_value       = $ocm_action_start_backup ? 'backup' : ($ocm_action_start_restore ? 'restore' : '');
         $progress_text_safe       = wp_kses_post($progress['text']);
         $progress_completed       = isset($progress['value']) && $progress['value'] === '100%';
-        $show_progress_text       = $log_file_exists && ($action_active || $progress_completed);
+        // A failed run's outcome, fix and forum link stay on the page after a
+        // reload; before, it showed "Idle" and the user had nothing to go on.
+        $show_progress_text       = $log_file_exists && ($action_active || $progress_completed || !empty($progress['failed']));
         $other_plugins            = self::other_active_plugins_count();
 
         $messages = [
@@ -208,7 +210,7 @@ class OCM_Admin_Page
                 <div class="ocm-banner ocm-banner-warning" id="ocm-top-banner" style="display:none;"></div>
 
                 <h1 class="ocm-h1"><?php esc_html_e('Backup & Restore', '1-click-migration'); ?></h1>
-                <p class="ocm-lede"><?php esc_html_e('Create a backup of your site or restore from a previous backup using a recovery code.', '1-click-migration'); ?></p>
+                <p class="ocm-lede"><?php esc_html_e('Create a backup of your site or restore from a previous backup using a restore code.', '1-click-migration'); ?></p>
 
                 <?php if ($top_message): ?>
                     <div class="ocm-banner ocm-banner-error"><?php echo esc_html($top_message); ?></div>

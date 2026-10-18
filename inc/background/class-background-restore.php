@@ -376,6 +376,20 @@ class OCM_BackgroundRestore extends WP_Background_Process
 
     }
 
+    /**
+     * Drop the library's "cancelled" flag. cancel() sets it and dispatches a
+     * request that deletes the queue once it sees the flag; the flag stays
+     * until that request arrives. A worker dispatched for a new run before it
+     * did would delete the new run's queue instead (maybe_handle() ->
+     * delete_all()), and the run would wait forever.
+     *
+     * @return void
+     */
+    public function clear_cancel_status()
+    {
+        delete_site_option($this->identifier . '_status');
+    }
+
     public function cancel_scheduled_event()
     {
 

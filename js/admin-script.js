@@ -140,6 +140,12 @@
                             removeNotice(stallNotice);
                             stallNotice = null;
                         }
+                        // The run is past an error it showed (it resumed on its
+                        // own, or the error came from an unrelated request):
+                        // don't leave the old red box up.
+                        if (!response.isStopped && !/Error/.test(statusHead(response.text || ''))) {
+                            $('.ocm-info.error').hide().removeClass('show').empty();
+                        }
                         renderMessage(response.text);
                         if (response.customNotice) {
                             renderMessage(response.customNotice);

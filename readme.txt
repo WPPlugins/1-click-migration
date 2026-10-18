@@ -4,7 +4,7 @@ Tags: backup, migrate, migration, restore, clone
 Requires at least: 5.3
 Tested up to: 7.1
 Requires PHP: 7.4
-Stable tag: 3.1.31
+Stable tag: 3.1.32
 Author URI: https://1clickmigration.com
 License: GPLv3 or later
 License URI: http://www.gnu.org/licenses/gpl-3.0.html
@@ -113,6 +113,11 @@ Any host that runs WordPress on PHP 7.4 or later, including Bluehost, SiteGround
 4. Enter the restore code on the destination site to finish your WordPress migration.
 
 == Changelog ==
+= 3.1.32 =
+* **Backups recover on their own too**: If an unexpected error stops a backup partway, it now picks up again from where it stopped, up to two times, even with the plugin page closed. A backup that crashed no longer blocks Start backup until you click Stop & Reset.
+* **Clearer messages**: The progress card explains problems in plain language instead of showing server errors, and a failed backup or restore still shows what happened and how to fix it after you reload the page. Hosts that need the page kept open now say so.
+* **Fix**: A backup or restore could stall after handing its work to a new background request and wait forever. It now continues, and a run that truly can't continue ends with a clear message. Each backup's log also no longer includes the previous backup's log.
+
 = 3.1.31 =
 * **Restores recover on their own**: If an unexpected error stops a restore partway, it now picks up again from where it stopped, up to two times, and the site stays in maintenance mode while it does. It can also recover with the plugin page closed, and a download that had already finished before the interruption no longer makes it fail. In 3.1.30, a PHP time-limit error could take the site out of maintenance mode while the restore was still running.
 
@@ -171,6 +176,9 @@ Any host that runs WordPress on PHP 7.4 or later, including Bluehost, SiteGround
 Older versions are listed in [changelog.txt](https://plugins.trac.wordpress.org/browser/1-click-migration/trunk/changelog.txt).
 
 == Upgrade Notice ==
+
+= 3.1.32 =
+Backups now resume on their own after an unexpected error, messages are in plain language, and a stall after a background hand-off is fixed. Includes all 3.1.31 changes.
 
 = 3.1.31 =
 A restore interrupted by an unexpected error now resumes on its own and keeps the site in maintenance mode. Includes all 3.1.30 changes.

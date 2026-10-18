@@ -40,10 +40,18 @@ class OCM_Backup
     const RESTORE_CRASH_OPTION = 'ocm_restore_crash_resumes';
     /** Set by a dying restore worker: the watchdog resumes the run without waiting for a stale heartbeat. */
     const RESTORE_RESUME_OPTION = 'ocm_restore_resume_requested';
-    /** WordPress cron hook that checks on the restore worker while a restore is active. */
+    /** Same as RESTORE_CRASH_OPTION, for backup runs. */
+    const BACKUP_CRASH_OPTION = 'ocm_backup_crash_resumes';
+    /** Same as RESTORE_RESUME_OPTION, for backup runs. */
+    const BACKUP_RESUME_OPTION = 'ocm_backup_resume_requested';
+    /** WordPress cron hook that checks on the backup or restore worker while a run is active. */
+    const WORKER_WATCHDOG_HOOK = 'ocm_worker_watchdog';
+    /** 3.1.31's name for WORKER_WATCHDOG_HOOK; still handled for checks queued before an update. */
     const RESTORE_WATCHDOG_HOOK = 'ocm_restore_watchdog';
     /** Start of the visible line a crashed restore writes when it resumes on its own. No "Error:" in it. */
     const LOG_RESTORE_RESUMING = 'Notice: The restore was interrupted by an unexpected problem and is picking up again on its own from where it stopped';
+    /** The same for a backup. */
+    const LOG_BACKUP_RESUMING = 'Notice: The backup was interrupted by an unexpected problem and is picking up again on its own from where it stopped';
 
     /** Restore workspace under wp-content when the private work dir can't be used. */
     const RESTORE_WORKSPACE_FALLBACK_PREFIX = 'ocm_restore-';
@@ -369,6 +377,10 @@ class OCM_Backup
      * own "Error:" log line clears ocm_action_start_restore before the guard runs.
      */
     private static $restore_crash_guard_armed = false;
+    /** @var bool The backup crash guard's shutdown callback is registered. */
+    private static $backup_crash_guard_registered = false;
+    /** @var bool This request is inside a backup task. */
+    private static $backup_crash_guard_armed = false;
     /**
      * Staging table name when URL rewrite hit a dedicated stop (keyless/unpageable
      * or oversized row). Used so discard staging does not insert a log line between
@@ -412,7 +424,7 @@ class OCM_Backup
     {
         // Add nonce verification
         if (!isset($_GET['_wpnonce']) || !wp_verify_nonce($_GET['_wpnonce'], 'one_click_migration_cancel_action')) {
-            wp_die(esc_html__('Security check failed. Please try again.', '1-click-migration'));
+            wp_die(esc_html__('This page has expired. Reload the page and try again.', '1-click-migration'));
         }
         
         // Check user capabilities
@@ -437,7 +449,7 @@ class OCM_Backup
     {
         // Verify nonce for security
         if (!isset($_GET['_wpnonce']) || !wp_verify_nonce($_GET['_wpnonce'], 'one_click_migration_start_backup')) {
-            wp_die(esc_html__('Security check failed. Please try again.', '1-click-migration'));
+            wp_die(esc_html__('This page has expired. Reload the page and try again.', '1-click-migration'));
         }
 
         // Check user capabilities
@@ -458,6 +470,14 @@ class OCM_Backup
         }
 
         $run_id = self::claim_backup_run();
+        // No backup or restore is active and no worker holds the lock (both
+        // checked above), so a run still reserved was left by a backup that
+        // crashed. Before 3.1.32 only Stop & Reset could clear it.
+        $released_stale_run = false;
+        if (false === $run_id && self::release_stale_backup_run()) {
+            $released_stale_run = true;
+            $run_id = self::claim_backup_run();
+        }
         if (false === $run_id) {
             wp_safe_redirect(admin_url('tools.php?page=one-click-migration&message=backup_in_progress'));
             exit;
@@ -472,6 +492,11 @@ class OCM_Backup
         update_option('ocm_upload_auto_try_nb_plugins', 0, true);
         update_option('ocm_upload_auto_try_nb_uploads', 0, true);
 
+        // As start_restore() does: with the previous run's presigned URLs still
+        // set, the first write_to_log() below finds no local log and downloads
+        // the old bucket's S3 log (with every restore of it) into this backup's
+        // log, which then grows with each backup.
+        delete_option('ocm_presigned_urls');
         One_Click_Migration::delete_log_file();
         One_Click_Migration::cancel_all_process();
 
@@ -480,6 +505,9 @@ class OCM_Backup
         self::delete_backup_options();
         delete_option('ocm_log_merged_bucket');
         One_Click_Migration::write_to_log('Backup started');
+        if ($released_stale_run) {
+            One_Click_Migration::write_to_log(' SYSLOG: Released a backup run left by an earlier backup that did not finish.');
+        }
 
         if (!One_Click_Migration::$process_backup_single->is_queue_empty()) {
             self::fail_backup('stale backup queue could not be cleared; use Stop & Reset before retrying');
@@ -629,6 +657,9 @@ class OCM_Backup
         One_Click_Migration::start_backup_plugin_isolation();
 
         One_Click_Migration::$process_backup_single->save();
+        // Checks on the worker once a minute until the run ends, so a stalled or
+        // crashed backup resumes even if the plugin page is closed.
+        self::schedule_worker_watchdog(60);
         self::dispatch_backup_worker_with_diagnostics();
 
         wp_die('Backup started');
@@ -744,7 +775,7 @@ class OCM_Backup
     {
         // Verify nonce for security
         if (!isset($_GET['_wpnonce']) || !wp_verify_nonce($_GET['_wpnonce'], 'one_click_migration_start_restore')) {
-            wp_die(esc_html__('Security check failed. Please try again.', '1-click-migration'));
+            wp_die(esc_html__('This page has expired. Reload the page and try again.', '1-click-migration'));
         }
         
         // Check user capabilities
@@ -828,10 +859,13 @@ class OCM_Backup
         One_Click_Migration::$process_restore_single->push_to_queue(array($restore_code, $run_id));
 
         // Save the queue and use direct processing for maximum reliability
+        // A "cancelled" flag left by an earlier Stop & Reset would make the
+        // first dispatched worker delete this run's queue.
+        One_Click_Migration::clear_background_cancel_status();
         One_Click_Migration::$process_restore_single->save();
         // Checks on the worker once a minute until the run ends, so a stalled or
         // crashed restore resumes even if the plugin page is closed.
-        self::schedule_restore_watchdog(60);
+        self::schedule_worker_watchdog(60);
         One_Click_Migration::write_to_log(' SYSLOG: Using direct restore processing for maximum compatibility');
         // handle() ends the request with wp_die(), so false means no worker
         // ran: the run would wait forever with nothing to restart it.
@@ -850,7 +884,7 @@ class OCM_Backup
     private static function refuse_restore_start()
     {
         One_Click_Migration::write_to_log('Error: Restore could not start because a previous restore worker still holds its lock or did not shut down cleanly. Click Stop & Reset, then start the restore again.');
-        wp_send_json_error(array('message' => __('A previous restore is still running or did not shut down cleanly. Click Stop & Reset, then start the restore again.', '1-click-migration')), 409);
+        wp_send_json_error(array('message' => __('A restore is already running on this site. Wait for it to finish, or click Stop & Reset to cancel it, then start again.', '1-click-migration')), 409);
     }
 
     public static function start_restore_process($restore_code)
@@ -3331,9 +3365,10 @@ class OCM_Backup
         }
 
         $now = time();
-        // A restore worker that died on a PHP fatal asked for this: no need to
-        // wait for its heartbeat to go stale.
-        $resume_requested = $restore_active && (int) get_option(self::RESTORE_RESUME_OPTION, 0) > 0;
+        // A worker that died on a PHP fatal asked for this: no need to wait for
+        // its heartbeat to go stale.
+        $resume_option = $restore_active ? self::RESTORE_RESUME_OPTION : self::BACKUP_RESUME_OPTION;
+        $resume_requested = (int) get_option($resume_option, 0) > 0;
         // On hosts where the loopback gate already failed there is no healthy
         // dispatch chain to wait for, so stale means stalled much sooner.
         $threshold = get_option('ocm_dispatch_blocked') ? 25 : 45;
@@ -3364,16 +3399,33 @@ class OCM_Backup
         }
         update_option('ocm_worker_watchdog_last', $now, false);
 
+        // Still marked active, but no work item left: nothing can ever move
+        // this run on. Without this it kept the backup slot (Start backup
+        // answered "in progress") or the maintenance page forever.
+        if (is_callable(array($process, 'is_queue_empty')) && $process->is_queue_empty()) {
+            self::end_orphaned_run($restore_active);
+            return;
+        }
+
         if ($resume_requested) {
-            delete_option(self::RESTORE_RESUME_OPTION);
+            if ($restore_active) {
+                delete_option(self::RESTORE_RESUME_OPTION);
+            } else {
+                delete_option(self::BACKUP_RESUME_OPTION);
+            }
             One_Click_Migration::write_to_log(sprintf(
-                ' SYSLOG: Resuming the restore after its worker stopped on a PHP fatal (%s)',
+                ' SYSLOG: Resuming the %s after its worker stopped on a PHP fatal (%s)',
+                $restore_active ? 'restore' : 'backup',
                 $from_cron ? 'cron' : 'progress poll'
             ));
             // trigger_processing() never returns once a worker runs; false means
             // it couldn't start one yet, so ask again on the next check.
             if (false === $process->trigger_processing()) {
-                update_option(self::RESTORE_RESUME_OPTION, $now, false);
+                if ($restore_active) {
+                    update_option(self::RESTORE_RESUME_OPTION, $now, false);
+                } else {
+                    update_option(self::BACKUP_RESUME_OPTION, $now, false);
+                }
             }
             return;
         }
@@ -3423,9 +3475,27 @@ class OCM_Backup
         // logged right after it is what the card shows as the error.
         // Show the newest step the map knows instead.
         $last_message = is_string($lastLog) ? trim($lastLog) : '';
-        // A crashed restore resuming on its own: show its notice at the
-        // percentage of the step it was on, not the crash's 0%.
-        if (0 === strpos($last_message, self::LOG_RESTORE_RESUMING)) {
+        // A raw PHP error while a run is active: Error_Handler logs fatals from
+        // any request on the site then, and the run itself either resumes or
+        // isn't affected. Say so in plain words and keep the step's percentage
+        // instead of dropping to 0%.
+        if ($action_in_flight && self::is_raw_php_fatal_line($last_message)) {
+            $step = self::get_last_progress_step(true);
+            $percent = null !== $step ? self::get_percent_by_log_message($step) : false;
+            if (0 === strpos($last_message, 'Maximum execution time of ') || 0 === strpos($last_message, 'Allowed memory size of ')) {
+                $text = self::progress_status_text($last_message);
+            } else {
+                $text = esc_html__('The site reported an unexpected error. The migration keeps going on its own; if it stops, the details are in the log.', '1-click-migration');
+            }
+            return array(
+                'text' => $text,
+                'value' => false !== $percent ? $percent : '1%',
+                'maintenanceMode' => (bool) get_option('ocm_maintenance_mode', false),
+            );
+        }
+        // A crashed backup or restore resuming on its own: show its notice at
+        // the percentage of the step it was on, not the crash's 0%.
+        if (self::is_resume_notice($last_message)) {
             $step = self::get_last_progress_step();
             $percent = null !== $step ? self::get_percent_by_log_message($step) : false;
             return array(
@@ -3451,6 +3521,13 @@ class OCM_Backup
         $stall_notice = ($action_in_flight && (int) get_option('ocm_worker_revival_count', 0) > 0)
             ? self::LOG_MESSAGE_BG_PROCESS_RESTARTING_LOG . '.</br>' . self::support_forum_html(__('Stuck for a long time?', '1-click-migration'))
             : '';
+        // On a host that blocks loopback requests, the run moves on only while
+        // this page polls (or WordPress cron gets traffic): the one case where
+        // the user should keep the page open, so tell them.
+        if ($action_in_flight && get_option('ocm_dispatch_blocked')) {
+            $keep_open = 'Notice: ' . esc_html__('This host limits background work, so keep this page open until it finishes.', '1-click-migration');
+            $stall_notice = '' === $stall_notice ? $keep_open : $keep_open . '</br>' . $stall_notice;
+        }
 
         if ($lastLog && strpos($lastLog, 'was skipped due to timeout') !== false) {
 
@@ -3468,8 +3545,8 @@ class OCM_Backup
                 : esc_html__('Starting backup…', '1-click-migration');
         } else {
             $default_text_value = esc_html__('Start a backup or a restore to see current progress here.', '1-click-migration')
-                . '</br></br>' . esc_html__('Entire process runs in the background, independent of your browser activity.', '1-click-migration')
-                . '</br> </br>' . esc_html__('If you get logged out during restore, log back in using your backup old WordPress credentials and refresh this page for progress.', '1-click-migration');
+                . '</br></br>' . esc_html__('Backups and restores run in the background, so you can leave this page and come back later.', '1-click-migration')
+                . '</br> </br>' . esc_html__('If you get logged out during a restore, log back in with the username and password of the site you backed up, then refresh this page.', '1-click-migration');
         }
 
         $default_text = array(
@@ -3518,6 +3595,10 @@ class OCM_Backup
 
                 $restore_terminal = ($lastLog === 'Restore completed.'
                     || strpos($lastLog, self::LOG_RESTORE_COMPLETED_WARNINGS_PREFIX) === 0);
+                // An "Error:" line with no backup or restore active ended the
+                // run (write_to_log() resets the marks on it). Some failures
+                // don't set ocm_is_stopped, and the page polled forever.
+                $isStopped = $isStopped || (!$action_in_flight && strpos($lastLog, 'Error:') !== false);
                 if ($isStopped && !$restore_terminal) {
                     $progress_item_text = array(
                         'isStopped' => true,
@@ -3533,7 +3614,7 @@ class OCM_Backup
                     $progress_item_text['text'] .= '</br></br>' . esc_html__('This step could take a while depending on your backup size', '1-click-migration');
 
                 } elseif ($lastLog === 'Plugins have been restored') {
-                    $progress_item_text['text'] .= '</br></br>' . esc_html__('Around this step you might get logged out. Log back in using your old WordPress credentials and refresh this page for progress updates.', '1-click-migration');
+                    $progress_item_text['text'] .= '</br></br>' . esc_html__('You may be logged out around now. If so, log back in with the username and password of the site you backed up, then refresh this page.', '1-click-migration');
                 } elseif ($restore_terminal) {
                     if (strpos($lastLog, self::LOG_RESTORE_COMPLETED_WARNINGS_PREFIX) === 0) {
                         $progress_item_text['text'] .= '</br></br>' . esc_html__('Restore finished, but some parts were skipped or missing. Check the migration log, then verify themes, plugins, and media on your site.', '1-click-migration')
@@ -3579,6 +3660,8 @@ class OCM_Backup
                     $progress_item_text['text'] .= '</br></br>' . self::support_forum_html($recovery_hint !== ''
                         ? __('Still stuck?', '1-click-migration')
                         : __('Need help?', '1-click-migration'));
+                    // The admin page keeps showing a failed run's outcome after a reload.
+                    $progress_item_text['failed'] = true;
                 }
                 return $progress_item_text;
             }
@@ -3680,23 +3763,23 @@ class OCM_Backup
         }
 
         if (strpos($log, 'disk quota') !== false || strpos($log, 'Not enough disk space') !== false || strpos($log, 'Restore workspace is not writable') !== false) {
-            return __('Free space or increase the hosting account disk quota, then run the restore again. If the hosting panel shows enough space, ask the host to check account quota or inode limits because PHP may report filesystem space instead of account quota.', '1-click-migration');
+            return __('The hosting account is out of disk space. Delete files you no longer need or ask your host for more space, then try again. If your hosting panel shows plenty of free space, ask your host to check the account\'s disk and file limits.', '1-click-migration');
         }
 
         if (strpos($log, 'write permissions') !== false || strpos($log, 'could not be moved or copied') !== false || strpos($log, 'could not be moved into place') !== false || strpos($log, 'could not be extracted') !== false) {
             return sprintf(
                 /* translators: %s: comma-separated list of folders */
-                __('Make sure WordPress can write to %s, then retry the restore.', '1-click-migration'),
+                __('WordPress isn\'t allowed to write to some folders (%s). Ask your host to fix the folder permissions, then try again.', '1-click-migration'),
                 self::hint_folder_list(array('wp-content', 'wp-content/plugins', 'wp-content/themes', 'wp-content/uploads'))
             );
         }
 
         if (strpos($log, 'Restore failed while downloading') !== false) {
-            return __('Create a fresh backup and restore with the new code. Backups expire after the retention window, and some hosts or firewalls can interrupt large downloads.', '1-click-migration');
+            return __('The backup could not be downloaded. Backups are kept for 48 hours: if yours is older, make a new backup on the old site and use its new restore code. Otherwise try again, because some hosts and firewalls interrupt large downloads.', '1-click-migration');
         }
 
         if (strpos($log, 'Restore failed while decrypting') !== false || strpos($log, 'could not be opened for extraction') !== false) {
-            return __('Retry after freeing space. If it fails again, create a fresh backup because the downloaded archive may be incomplete.', '1-click-migration');
+            return __('The downloaded backup file looks incomplete. Free some disk space and try again. If it fails again, make a new backup on the old site and use its new restore code.', '1-click-migration');
         }
 
         if (strpos($log, 'cannot be restored safely (not hex-encoded)') !== false
@@ -3712,7 +3795,7 @@ class OCM_Backup
         if (strpos($log, 'Restore stopped: database part could not be downloaded or unpacked') !== false) {
             return sprintf(
                 /* translators: %s: comma-separated list of folders */
-                __('The database archive could not be downloaded or unpacked, so nothing on this site was changed. Free disk space or check write permissions under %s, then retry. If it fails again, create a fresh backup and restore with the new code.', '1-click-migration'),
+                __('The database part of the backup could not be downloaded or unpacked, so nothing on this site was changed. Free some disk space, or ask your host to check write permissions for %s, then try again. If it fails again, make a new backup and use its new restore code.', '1-click-migration'),
                 self::hint_folder_list(array('wp-content'))
             );
         }
@@ -3720,27 +3803,27 @@ class OCM_Backup
         if (strpos($log, "Restore stopped: the backup's main options table didn't pass the check") !== false
             || strpos($log, 'incomplete or wrong-prefix') !== false
         ) {
-            return __('The backup\'s main options table did not pass the check, so nothing on this site was changed. No files, tables or plugins were touched. Take a fresh backup from the source (or fix the source options table) and restore again with the new backup\'s restore code.', '1-click-migration');
+            return __('The backup\'s site settings did not pass our safety check, so nothing on this site was changed. Make a new backup on the old site and restore with its new restore code. If this happens again, ask in the support forum.', '1-click-migration');
         }
 
         if (strpos($log, 'Restore stopped: the database could not be imported') !== false) {
-            return __('The database could not be imported, so nothing on this site was changed. No files, tables or plugins were touched. Take a fresh backup from the source and restore again with the new backup\'s restore code. If the log mentions a table name that is too long, shorten that table name or the source table prefix before taking the new backup. If the log says a table has no primary or unique key, ask your host or developer to add one to that table on the source site, then take a new backup. If the log says a table has a row too large, ask your host to raise the PHP memory limit on this site, or ask your developer to shrink the large rows in that table on the source site, then take a new backup. If the log says a table stopped making progress, ask on the support forum below, and don\'t run the restore again until we\'ve checked it.', '1-click-migration');
+            return __('The database could not be imported, so nothing on this site was changed. Make a new backup on the old site and restore with its new restore code. If it stops again, download the log and ask in the support forum: the log tells us exactly what to change, and we\'ll walk you through it.', '1-click-migration');
         }
 
         if (strpos($log, 'Database restore failed while importing') !== false || strpos($log, 'DB Restore') !== false) {
-            return __('The database import failed on a SQL file. If <code>proc_open</code> is disabled, ask the host to enable it so the restore can use the MySQL CLI path. If that is not possible, export a new backup after cleaning invalid or binary data stored in options by third-party plugins.', '1-click-migration');
+            return __('The database import ran into data it could not handle. Download the log and ask in the support forum, and we\'ll help you finish the move.', '1-click-migration');
         }
 
         if (strpos($log, 'Backup worker dispatch failed') !== false || strpos($log, 'admin-ajax loopback check failed') !== false || strpos($log, 'blocks loopback requests') !== false) {
-            return __('Ask the host to allow WordPress loopback requests to <code>wp-admin/admin-ajax.php</code>. Security plugins, WAF rules, basic auth, or firewall settings can block the background worker.', '1-click-migration');
+            return __('This host blocks the background requests the plugin uses, so keep this page open while it works. To make it run in the background, ask your host to allow WordPress loopback requests to <code>wp-admin/admin-ajax.php</code>.', '1-click-migration');
         }
 
         if (strpos($log, 'was skipped due to timeout') !== false || strpos($log, 'Backup completed with missing parts') !== false) {
-            return __('Parts get skipped when the host repeatedly hits its PHP execution time limit. Ask the host to raise <code>max_execution_time</code> (or temporarily reduce the folder size), then run the backup again so every part is included.', '1-click-migration');
+            return __('Some parts were skipped because the server\'s time limit is too short for them. Ask your host to raise the PHP time limit (<code>max_execution_time</code>), then run the backup again so everything is included.', '1-click-migration');
         }
 
-        if (strpos($log, 'Could not register backup') !== false || strpos($log, 'endpoint') !== false) {
-            return __('Check outbound HTTPS access from the server and try again. If outbound requests are blocked, ask the host to allow connections to 1Click Migration endpoints.', '1-click-migration');
+        if (stripos($log, 'could not register backup') !== false || strpos($log, 'endpoint') !== false) {
+            return __('The plugin could not reach the 1-Click Migration service. Try again in a few minutes. If it keeps failing, ask your host to allow outgoing HTTPS connections from the server.', '1-click-migration');
         }
 
         return '';
@@ -3749,7 +3832,7 @@ class OCM_Backup
     /** @return string Hint for a restore that needs a backup from 1-Click Migration 3.1.19 or later. */
     private static function fresh_3_1_19_backup_hint()
     {
-        return __('Update 1-Click Migration on the <strong>source</strong> site to 3.1.19 or later, take a new backup, then restore using the new backup\'s restore code. Nothing on this site was changed.', '1-click-migration');
+        return __('This backup was made with an older version of 1-Click Migration. Update the plugin on the <strong>old</strong> site, make a new backup, then restore with its new restore code. Nothing on this site was changed.', '1-click-migration');
     }
 
     private static function get_multipart_upload_percentage($log)
@@ -4027,6 +4110,8 @@ class OCM_Backup
             return false;
         }
 
+        delete_option(self::BACKUP_CRASH_OPTION);
+        delete_option(self::BACKUP_RESUME_OPTION);
         self::$backup_run_id = $run_id;
         return $run_id;
     }
@@ -4048,6 +4133,22 @@ class OCM_Backup
             && isset($run['id'])
             && is_string($run_id)
             && hash_equals((string) $run['id'], $run_id);
+    }
+
+    /**
+     * Free the backup slot held by a run that can no longer finish. Only call
+     * it when no backup or restore is active and no backup worker holds its
+     * lock: then the reserved run was left by a backup whose worker crashed.
+     *
+     * @return bool True when a stale run was released.
+     */
+    private static function release_stale_backup_run()
+    {
+        $run = get_option(self::BACKUP_RUN_OPTION, array());
+        if (!is_array($run) || empty($run['id'])) {
+            return false;
+        }
+        return self::release_backup_run((string) $run['id']);
     }
 
     private static function backup_context_owns_current_run()
@@ -4095,6 +4196,8 @@ class OCM_Backup
         $released = self::delete_option_if_value(self::BACKUP_RUN_OPTION, $serialized);
         if ($released) {
             delete_option(self::BACKUP_UPLOADED_PARTS_OPTION);
+            delete_option(self::BACKUP_CRASH_OPTION);
+            delete_option(self::BACKUP_RESUME_OPTION);
             if (hash_equals(self::$backup_run_id, $run_id)) {
                 self::$backup_run_id = '';
             }
@@ -5356,6 +5459,30 @@ class OCM_Backup
     }
 
     /**
+     * The raw message Error_Handler logs for a PHP fatal (not its SYSLOG copy).
+     *
+     * @param string $line
+     * @return bool
+     */
+    private static function is_raw_php_fatal_line($line)
+    {
+        return (bool) preg_match('/^(?:PHP Fatal error|Uncaught (?:[A-Za-z]*Error|[A-Za-z]*Exception)\b)/', $line)
+            || 0 === strpos($line, 'Maximum execution time of ')
+            || 0 === strpos($line, 'Allowed memory size of ');
+    }
+
+    /**
+     * The notice a crashed backup or restore writes when it resumes on its own.
+     *
+     * @param string $line
+     * @return bool
+     */
+    private static function is_resume_notice($line)
+    {
+        return 0 === strpos($line, self::LOG_RESTORE_RESUMING) || 0 === strpos($line, self::LOG_BACKUP_RESUMING);
+    }
+
+    /**
      * A line that ends a backup or restore run.
      *
      * @param string $line
@@ -5379,7 +5506,7 @@ class OCM_Backup
      *
      * @return string|null
      */
-    private static function get_last_progress_step()
+    private static function get_last_progress_step($skip_error_lines = false)
     {
         $file = OCM_DEBUG_LOG_FILE;
         if (!file_exists($file)) {
@@ -5387,13 +5514,14 @@ class OCM_Backup
         }
         // Lines before an automatic-resume notice belong to the crash it
         // recovered from: skip its error lines and find the step it was on.
-        $crash_block = false;
+        // $skip_error_lines does the same from the newest line on.
+        $crash_block = (bool) $skip_error_lines;
         foreach (array_reverse(explode(PHP_EOL, (string) file_get_contents($file))) as $raw) {
             $line = trim(self::log_line_message($raw));
             if ($line === '' || self::is_handover_line($line) || self::is_php_fatal_syslog_line($line)) {
                 continue;
             }
-            if (0 === strpos($line, self::LOG_RESTORE_RESUMING)) {
+            if (self::is_resume_notice($line)) {
                 $crash_block = true;
                 continue;
             }
@@ -5429,8 +5557,8 @@ class OCM_Backup
         $line = trim((string) $line);
         if (strpos($line, 'SYSLOG:') === 0) {
             $labels = array(
-                'Dispatching backup worker' => __('Starting the backup worker', '1-click-migration'),
-                'Using direct processing' => __('Starting the backup worker', '1-click-migration'),
+                'Dispatching backup worker' => __('Starting the backup', '1-click-migration'),
+                'Using direct processing' => __('Starting the backup', '1-click-migration'),
                 'Server IP:' => __('Checking the server', '1-click-migration'),
                 'WP_HTTP_BLOCK_EXTERNAL:' => __('Checking the server', '1-click-migration'),
                 'WP_ACCESSIBLE_HOSTS:' => __('Checking the server', '1-click-migration'),
@@ -5438,7 +5566,7 @@ class OCM_Backup
                 'Number of updates made from replace' => __('Updating site addresses', '1-click-migration'),
                 'Finished updating URLs in the database' => __('Updating site addresses', '1-click-migration'),
                 'DB memory preflight (import)' => __('Importing the database', '1-click-migration'),
-                'Low memory' => __('Working with limited PHP memory', '1-click-migration'),
+                'Low memory' => __('Working with limited server memory', '1-click-migration'),
             );
             foreach ($labels as $needle => $label) {
                 if (strpos($line, $needle) !== false) {
@@ -5454,7 +5582,105 @@ class OCM_Backup
         if (preg_match('/^(Restoring "[^"]+") to directory "/', $line, $m)) {
             return $m[1];
         }
-        return $line;
+        $plain = self::plain_language_status($line);
+        return null !== $plain ? $plain : $line;
+    }
+
+    /**
+     * Plain-language wording for log lines that would otherwise show
+     * server jargon on the progress card. Display only: the log keeps the
+     * original line, which the monitor, the restore side and the progress
+     * logic parse.
+     *
+     * @param string $line
+     * @return string|null HTML-safe text, or null to show the line as it is.
+     */
+    private static function plain_language_status($line)
+    {
+        if ((self::is_raw_php_fatal_line($line) && 0 !== strpos($line, 'Maximum execution time of ') && 0 !== strpos($line, 'Allowed memory size of '))
+            || 0 === strpos($line, 'Restore worker crashed on a PHP fatal')
+        ) {
+            return esc_html__('The server stopped this step with an unexpected error. The details are in the log.', '1-click-migration');
+        }
+        if (0 === strpos($line, 'Maximum execution time of ')) {
+            return esc_html__('This step reached the server\'s time limit. The plugin picks it up again on its own.', '1-click-migration');
+        }
+        if (0 === strpos($line, 'Allowed memory size of ')) {
+            return esc_html__('The server ran short of memory on this step. The plugin picks it up again on its own.', '1-click-migration');
+        }
+        if (preg_match('/^(?:Compressing|Uploading|Encrypting|Downloading|Decrypting|Extracting) (\S+) Retry (\d+)$/', $line, $m)) {
+            return esc_html(sprintf(
+                /* translators: 1: part of the site (the database, themes, plugins or media uploads), 2: attempt number */
+                __('Trying %1$s again (attempt %2$d)', '1-click-migration'),
+                self::part_label($m[1]),
+                (int) $m[2] + 1
+            ));
+        }
+        if (preg_match('/^Retrying backup registration \(attempt (\d+)\/(\d+)\)/', $line, $m)) {
+            return esc_html(sprintf(
+                /* translators: 1: attempt number, 2: number of attempts */
+                __('Connecting to the 1-Click Migration service (attempt %1$d of %2$d)', '1-click-migration'),
+                (int) $m[1] + 1,
+                (int) $m[2] + 1
+            ));
+        }
+        foreach (array('PHP Version:', 'WP Version:', 'default max_execution_time:', 'max_execution_time:', 'timeout set:',
+            'proc_open / proc_close:', 'Current IP Address:', 'Available Space:', 'Site URL:', 'Email address:',
+            'OCM Plugin Version:', 'Other active plugins:', 'Backup ID:') as $prefix) {
+            if (0 === strpos($line, $prefix)) {
+                return esc_html__('Checking the server', '1-click-migration');
+            }
+        }
+        if (0 === strpos($line, 'Excluding "') || 0 === strpos($line, 'URL generated:') || preg_match('/^\w+ added to queue$/', $line)) {
+            return esc_html__('Preparing the backup', '1-click-migration');
+        }
+        if (0 === strpos($line, 'Notice: Database restore in progress.')) {
+            return esc_html__('Notice: Importing the database. This can take a while.', '1-click-migration');
+        }
+        if (0 === strpos($line, 'Notice: This host blocks loopback requests') || 0 === strpos($line, 'Notice: Backup worker dispatch failed')) {
+            return esc_html__('Notice: This host limits background work, so keep this page open until the backup finishes.', '1-click-migration');
+        }
+        if (0 === strpos($line, 'Notice: Background dispatch appears blocked')) {
+            return esc_html__('Notice: Background work is slow on this host. It keeps going, and keeping this page open helps it finish sooner.', '1-click-migration');
+        }
+        if (0 === strpos($line, 'Notice: Database is larger than PHP memory_limit')) {
+            return esc_html__('Notice: The database is large for this server\'s memory, so it is handled in smaller pieces. This takes longer but works.', '1-click-migration');
+        }
+        if (preg_match('/^Notice: File (\S+?)(?:\.zip(?:\.crypt)?)? was skipped due to timeout/', $line, $m)) {
+            return esc_html(sprintf(
+                /* translators: %s: part of the site (the database, themes, plugins or media uploads) */
+                __('Notice: %s took longer than the server allows and was skipped.', '1-click-migration'),
+                self::part_label($m[1])
+            ));
+        }
+        if (0 === strpos($line, 'Error: Restore could not start because a previous restore worker still holds its lock')) {
+            return esc_html__('A restore is already running on this site. Wait for it to finish, or click Stop & Reset to cancel it, then start again.', '1-click-migration');
+        }
+        if (0 === strpos($line, 'Restore failed: Restore failed ')) {
+            return 'Restore failed ' . substr($line, strlen('Restore failed: Restore failed '));
+        }
+        return null;
+    }
+
+    /**
+     * A backup part for people: "the database", "themes", "plugins", "media uploads".
+     *
+     * @param string $part db, themes, plugins or uploads (any other value is returned as is).
+     * @return string
+     */
+    private static function part_label($part)
+    {
+        switch ($part) {
+            case 'db':
+                return __('the database', '1-click-migration');
+            case 'themes':
+                return __('themes', '1-click-migration');
+            case 'plugins':
+                return __('plugins', '1-click-migration');
+            case 'uploads':
+                return __('media uploads', '1-click-migration');
+        }
+        return (string) $part;
     }
 
     public static function get_previous_log_percentage(){
@@ -5830,6 +6056,111 @@ class OCM_Backup
     }
 
     /**
+     * Arm a shutdown guard for the backup worker, like the restore one: a
+     * backup whose worker dies on a PHP fatal resumes on its own.
+     *
+     * @return void
+     */
+    public static function register_backup_crash_guard()
+    {
+        self::$backup_crash_guard_armed = true;
+        if (self::$backup_crash_guard_registered) {
+            return;
+        }
+        self::$backup_crash_guard_registered = true;
+        register_shutdown_function(array(__CLASS__, 'handle_backup_crash_shutdown'));
+    }
+
+    /**
+     * The backup task returned normally.
+     *
+     * @return void
+     */
+    public static function disarm_backup_crash_guard()
+    {
+        self::$backup_crash_guard_armed = false;
+    }
+
+    /**
+     * Shutdown callback after a PHP fatal inside a backup task. Runs at most
+     * once per request.
+     *
+     * - The run is still active (a time-limit or memory fatal logs no
+     *   "Error:" line): it resumes from its last completed step.
+     * - The fatal's own "Error:" line ended the run: it gets up to
+     *   RESTORE_CRASH_RESUMES automatic resumes, then fails with "Backup
+     *   failed:" and frees the backup slot, so Start backup works again.
+     *
+     * @param array|null $error Optional error array (tests); defaults to error_get_last().
+     * @return void
+     */
+    public static function handle_backup_crash_shutdown($error = null)
+    {
+        if (!self::$backup_crash_guard_armed) {
+            return;
+        }
+        if ($error === null) {
+            $error = error_get_last();
+        }
+        if (!is_array($error) || empty($error['type'])) {
+            return;
+        }
+        $fatal_types = array(E_ERROR, E_PARSE, E_CORE_ERROR, E_COMPILE_ERROR, E_USER_ERROR);
+        if (!in_array((int) $error['type'], $fatal_types, true)) {
+            return;
+        }
+        self::$backup_crash_guard_armed = false;
+        $message = isset($error['message']) ? strtok((string) $error['message'], "\n") : '';
+
+        if (get_option('ocm_action_start_backup')) {
+            One_Click_Migration::write_to_log(sprintf(
+                ' SYSLOG: Backup worker stopped on a PHP fatal (%s); the run is still active and resumes from its last completed step.',
+                $message
+            ));
+            self::request_worker_resume('backup');
+            One_Click_Migration::flush_log_upload();
+            return;
+        }
+
+        $run_id = self::$backup_run_id;
+        if ('' === $run_id || !self::is_current_backup_run($run_id)) {
+            // A worker from an ended or replaced run: nothing to resume.
+            return;
+        }
+        $used = self::crash_resumes_used(self::BACKUP_CRASH_OPTION, $run_id);
+        if ($used < self::RESTORE_CRASH_RESUMES) {
+            update_option(self::BACKUP_CRASH_OPTION, array('run' => $run_id, 'count' => $used + 1), false);
+            One_Click_Migration::write_to_log(sprintf(
+                ' SYSLOG: Backup worker crashed on a PHP fatal (%s); resuming from the last completed step (automatic resume %d of %d).',
+                $message,
+                $used + 1,
+                self::RESTORE_CRASH_RESUMES
+            ));
+            One_Click_Migration::write_to_log(sprintf(
+                '%s (attempt %d of %d). You don\'t need to do anything.',
+                self::LOG_BACKUP_RESUMING,
+                $used + 1,
+                self::RESTORE_CRASH_RESUMES
+            ));
+            // After the log lines: the fatal's text quoted above can hold
+            // "Error:", and write_to_log() ends the run on any such line.
+            update_option('ocm_action_start_backup', true, true);
+            self::request_worker_resume('backup');
+            One_Click_Migration::flush_log_upload();
+            return;
+        }
+        One_Click_Migration::write_to_log(sprintf(
+            ' SYSLOG: Backup worker crashed on a PHP fatal (%s); no automatic resumes left.',
+            $message
+        ));
+        self::fail_backup(sprintf(
+            'it stopped after %d unexpected problems. Start the backup again. If it stops again, ask for help in the support forum.',
+            $used + 1
+        ));
+        One_Click_Migration::flush_log_upload();
+    }
+
+    /**
      * Arm a shutdown guard for the restore worker. A PHP fatal anywhere in the
      * restore must not leave the site serving the maintenance page (#127).
      * Error_Handler also calls the guard before it die()s on a plugin-file
@@ -5898,14 +6229,14 @@ class OCM_Backup
                 ' SYSLOG: Restore worker stopped on a PHP fatal (%s); the run is still active and resumes from its last completed step.',
                 $message
             ));
-            self::request_restore_resume();
+            self::request_worker_resume('restore');
             One_Click_Migration::flush_log_upload();
             return;
         }
 
         $run_id = self::$restore_run_id;
         if ('' !== $run_id && self::is_current_restore_run($run_id)) {
-            $used = self::restore_crash_resumes_used($run_id);
+            $used = self::crash_resumes_used(self::RESTORE_CRASH_OPTION, $run_id);
             if ($used < self::RESTORE_CRASH_RESUMES) {
                 update_option(self::RESTORE_CRASH_OPTION, array('run' => $run_id, 'count' => $used + 1), false);
                 One_Click_Migration::write_to_log(sprintf(
@@ -5923,7 +6254,7 @@ class OCM_Backup
                 // After the log lines: the fatal's text quoted above can hold
                 // "Error:", and write_to_log() ends the run on any such line.
                 update_option('ocm_action_start_restore', true, true);
-                self::request_restore_resume();
+                self::request_worker_resume('restore');
                 One_Click_Migration::flush_log_upload();
                 return;
             }
@@ -5956,14 +6287,43 @@ class OCM_Backup
     }
 
     /**
-     * Automatic resumes the current run has used after worker crashes.
+     * End a run that is still marked active but has no work item left, with a
+     * plain-language failure line.
      *
+     * @param bool $restore True for a restore run, false for a backup.
+     * @return void
+     */
+    private static function end_orphaned_run($restore)
+    {
+        if (!$restore) {
+            One_Click_Migration::write_to_log(' SYSLOG: Backup queue is empty while the run is still active; ending it.');
+            // fail_backup() releases the run this request knows about.
+            $run = get_option(self::BACKUP_RUN_OPTION, array());
+            if (is_array($run) && !empty($run['id'])) {
+                self::$backup_run_id = (string) $run['id'];
+            }
+            self::fail_backup('it stopped unexpectedly and could not continue. Start the backup again. If it stops again, ask for help in the support forum.');
+            return;
+        }
+        One_Click_Migration::write_to_log(' SYSLOG: Restore queue is empty while the run is still active; ending it.');
+        One_Click_Migration::write_to_log('Restore failed: it stopped unexpectedly and could not continue. Start the restore again. If it stops again, ask for help in the support forum.');
+        One_Click_Migration::disable_maintenance_mode();
+        OCM_Debug_Mode::disable();
+        One_Click_Migration::reset_actions_start_mark();
+        update_option('ocm_is_stopped', true, true);
+        self::end_restore_run();
+    }
+
+    /**
+     * Automatic resumes a run has used after worker crashes.
+     *
+     * @param string $option RESTORE_CRASH_OPTION or BACKUP_CRASH_OPTION.
      * @param string $run_id
      * @return int
      */
-    private static function restore_crash_resumes_used($run_id)
+    private static function crash_resumes_used($option, $run_id)
     {
-        $state = get_option(self::RESTORE_CRASH_OPTION, array());
+        $state = get_option($option, array());
         if (!is_array($state) || !isset($state['run'], $state['count']) || !is_string($state['run'])
             || !hash_equals($state['run'], (string) $run_id)
         ) {
@@ -5973,60 +6333,71 @@ class OCM_Backup
     }
 
     /**
-     * Called from a dying restore worker: free its locks now instead of when
-     * they expire, and ask the watchdog to resume the run on its next check.
+     * Called from a dying backup or restore worker: free its locks now instead
+     * of when they expire, and ask the watchdog to resume the run on its next
+     * check.
      *
+     * @param string $kind 'backup' or 'restore'.
      * @return void
      */
-    private static function request_restore_resume()
+    private static function request_worker_resume($kind)
     {
-        $process = One_Click_Migration::$process_restore_single;
-        if (is_object($process) && $process instanceof OCM_BackgroundRestore) {
-            $process->unlock_process();
+        if ('restore' === $kind) {
+            $process = One_Click_Migration::$process_restore_single;
+            if (is_object($process) && $process instanceof OCM_BackgroundRestore) {
+                $process->unlock_process();
+            }
+            OCM_BackgroundRestore::release_worker_file_lock();
+            update_option(self::RESTORE_RESUME_OPTION, time(), false);
+        } else {
+            $process = One_Click_Migration::$process_backup_single;
+            if (is_object($process) && $process instanceof OCM_BackgroundBackup) {
+                $process->unlock_process();
+            }
+            update_option(self::BACKUP_RESUME_OPTION, time(), false);
         }
-        OCM_BackgroundRestore::release_worker_file_lock();
-        update_option(self::RESTORE_RESUME_OPTION, time(), false);
-        self::schedule_restore_watchdog(10, true);
+        self::schedule_worker_watchdog(10, true);
     }
 
     /**
-     * Queue a WordPress cron check of the restore worker. Cron runs on any
-     * request to the site, including visitors shown the maintenance page, so
-     * a stalled or crashed restore resumes even with the plugin page closed.
+     * Queue a WordPress cron check of the backup or restore worker. Cron runs
+     * on any request to the site, including visitors shown the maintenance
+     * page, so a stalled or crashed run resumes even with the plugin page
+     * closed.
      *
      * @param int  $delay  Seconds from now.
      * @param bool $sooner Move an already queued check forward to $delay.
      * @return void
      */
-    public static function schedule_restore_watchdog($delay = 60, $sooner = false)
+    public static function schedule_worker_watchdog($delay = 60, $sooner = false)
     {
         if (!function_exists('wp_next_scheduled') || !function_exists('wp_schedule_single_event')) {
             return;
         }
         $at = time() + max(1, (int) $delay);
-        $next = wp_next_scheduled(self::RESTORE_WATCHDOG_HOOK);
+        $next = wp_next_scheduled(self::WORKER_WATCHDOG_HOOK);
         if ($next) {
             if (!$sooner || $next <= $at || !function_exists('wp_unschedule_event')) {
                 return;
             }
-            wp_unschedule_event($next, self::RESTORE_WATCHDOG_HOOK);
+            wp_unschedule_event($next, self::WORKER_WATCHDOG_HOOK);
         }
-        wp_schedule_single_event($at, self::RESTORE_WATCHDOG_HOOK);
+        wp_schedule_single_event($at, self::WORKER_WATCHDOG_HOOK);
     }
 
     /**
-     * Cron callback: while a restore is active, check on its worker once a
-     * minute and resume it if it stalled or crashed. The chain stops once the
-     * run ends.
+     * Cron callback: while a backup or restore is active, check on its worker
+     * once a minute and resume it if it stalled or crashed. The chain stops
+     * once the run ends.
      *
      * @return void
      */
-    public static function run_restore_watchdog()
+    public static function run_worker_watchdog()
     {
-        if (!get_option('ocm_action_start_restore')) {
+        if (!get_option('ocm_action_start_restore') && !get_option('ocm_action_start_backup')) {
             return;
         }
-        self::schedule_restore_watchdog(60);
+        self::schedule_worker_watchdog(60);
         self::maybe_revive_stalled_worker((bool) get_option('ocm_is_stopped'), true);
     }
 
@@ -7415,7 +7786,7 @@ class OCM_Backup
         
         // Verify nonce
         if (!wp_verify_nonce($_POST['_wpnonce'] ?? '', 'ocm_restart_failed_process')) {
-            wp_die(esc_html__('Security check failed. Please try again.', '1-click-migration'));
+            wp_die(esc_html__('This page has expired. Reload the page and try again.', '1-click-migration'));
         }
 
         if(isset($_POST['process'])){
@@ -7444,7 +7815,7 @@ class OCM_Backup
     public static function apply_extra_domains()
     {
         if (!current_user_can('manage_options')) {
-            wp_send_json_error(array('message' => __('Forbidden', '1-click-migration')), 403);
+            wp_send_json_error(array('message' => __('Only a site administrator can do this.', '1-click-migration')), 403);
         }
         check_ajax_referer('ocm_apply_extra_domains');
 
@@ -7601,6 +7972,8 @@ class OCM_Backup
     }
 
     public static function delete_backup_options(){
+      delete_option(self::BACKUP_CRASH_OPTION);
+      delete_option(self::BACKUP_RESUME_OPTION);
       // Clean up transient backup state from previous runs.
       delete_option('ocm_force_deactivated_plugins');
       delete_option('ocm_error_log_dedupe');

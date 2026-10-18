@@ -44,13 +44,13 @@ class OCM_S3
         $body = wp_remote_retrieve_body($response);
 
         if (200 !== (int) $code) {
-            One_Click_Migration::write_to_log("Error: register_backup non-200 response (code=$code): " . substr($body, 0, 500));
+            One_Click_Migration::write_to_log("Error: register_backup non-200 response (code=$code): " . substr(self::plain_body($body), 0, 500));
             return false;
         }
 
         $decoded = json_decode($body);
         if (!is_object($decoded) || empty($decoded->bucket_id) || empty($decoded->aes_key_b64) || empty($decoded->urls) || empty($decoded->restore_code)) {
-            One_Click_Migration::write_to_log('Error: register_backup malformed response: ' . substr($body, 0, 500));
+            One_Click_Migration::write_to_log('Error: register_backup malformed response: ' . substr(self::plain_body($body), 0, 500));
             return false;
         }
 
@@ -94,7 +94,7 @@ class OCM_S3
         $code_http = (int) wp_remote_retrieve_response_code($response);
         $body      = wp_remote_retrieve_body($response);
         if (200 !== $code_http) {
-            One_Click_Migration::write_to_log("Error: send_restore_code_email non-200 response (code=$code_http): " . substr($body, 0, 500));
+            One_Click_Migration::write_to_log("Error: send_restore_code_email non-200 response (code=$code_http): " . substr(self::plain_body($body), 0, 500));
             return false;
         }
 
@@ -180,7 +180,7 @@ class OCM_S3
         $code = (int) wp_remote_retrieve_response_code($response);
         $body = wp_remote_retrieve_body($response);
         if ($code < 200 || $code >= 300) {
-            One_Click_Migration::write_to_log(sprintf('Error: Lambda action "%s" failed (code=%d): %s', $payload['action'] ?? '', $code, substr($body, 0, 500)));
+            One_Click_Migration::write_to_log(sprintf('Error: Lambda action "%s" failed (code=%d): %s', $payload['action'] ?? '', $code, substr(self::plain_body($body), 0, 500)));
             return false;
         }
 
@@ -485,5 +485,18 @@ class OCM_S3
         $pow = min($pow, count($units) - 1);
         $bytes /= (1 << (10 * $pow));
         return round($bytes, 2) . ' ' . $units[$pow];
+    }
+
+    /**
+     * A response body as plain text for the log: the progress card shows log
+     * lines as HTML, so an error page's markup must not reach it.
+     *
+     * @param mixed $body
+     * @return string
+     */
+    private static function plain_body($body)
+    {
+        $body = (string) $body;
+        return function_exists('wp_strip_all_tags') ? wp_strip_all_tags($body) : strip_tags($body);
     }
 }

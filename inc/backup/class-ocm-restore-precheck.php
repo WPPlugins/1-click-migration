@@ -15,7 +15,7 @@ class OCM_Restore_Precheck {
 
     public static function prepare() {
         if (!current_user_can('manage_options')) {
-            wp_send_json_error(array('message' => __('Forbidden', '1-click-migration')), 403);
+            wp_send_json_error(array('message' => __('Only a site administrator can do this.', '1-click-migration')), 403);
         }
         check_ajax_referer('ocm_prepare_restore');
         if (get_option('ocm_action_start_backup') || get_option('ocm_action_start_restore')) {
@@ -33,7 +33,7 @@ class OCM_Restore_Precheck {
         $redeem = OCM_S3::redeem_restore_code($code);
         if (!is_object($redeem) || ($redeem->_status ?? 0) !== 200 || !empty($redeem->error)
             || empty($redeem->bucket_id) || empty($redeem->aes_key_b64) || empty($redeem->urls)) {
-            wp_send_json_error(array('message' => __('The backup could not be opened. Check your restore code and try again.', '1-click-migration')), 400);
+            wp_send_json_error(array('message' => __('No backup was found for this restore code. Check the code in your email. Restore codes work for 48 hours after the backup; if yours is older, make a new backup on the old site.', '1-click-migration')), 400);
         }
         $manifest = null;
         if (!in_array('db', $excluded, true) && !empty($redeem->urls->log_download)) {

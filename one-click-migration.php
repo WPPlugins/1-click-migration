@@ -4,7 +4,7 @@
  * Plugin Name: 1 Click Migration
  * Plugin URI: https://wordpress.org/plugins/1-click-migration/
  * Description: Migrate, copy, or clone your entire site with 1 click. <strong>Any host, no size limitation, no premium versions.</strong>
- * Version: 3.1.31
+ * Version: 3.1.32
  * Requires at least: 5.3
  * Requires PHP: 7.4
  * Author: 1ClickMigration
@@ -159,7 +159,8 @@ class One_Click_Migration
         add_action('wp_ajax_ocm_prepare_restore', array(OCM_Restore_Precheck::class, 'prepare'));
         add_action('wp_ajax_ocm_apply_extra_domains', array(OCM_Backup::class, 'apply_extra_domains'));
         add_action('admin_post_start_restore', array(OCM_Backup::class, 'start_restore'));
-        add_action(OCM_Backup::RESTORE_WATCHDOG_HOOK, array(OCM_Backup::class, 'run_restore_watchdog'));
+        add_action(OCM_Backup::WORKER_WATCHDOG_HOOK, array(OCM_Backup::class, 'run_worker_watchdog'));
+        add_action(OCM_Backup::RESTORE_WATCHDOG_HOOK, array(OCM_Backup::class, 'run_worker_watchdog'));
         add_action('admin_post_cancel_actions', array(OCM_Backup::class, 'cancel_actions'));
         add_action('admin_post_ocm_download_log', array(__CLASS__, 'download_log'));
         add_action('plugins_loaded', array(__CLASS__, 'init_background_jobs'));
@@ -1068,7 +1069,25 @@ PHP;
         if (self::$process_restore_single) {
             self::$process_restore_single->cancel_all_process();
         }
+        // The queues are already gone and run ownership stops any worker still
+        // running, so the "cancelled" flag cancel() just set has nothing left to
+        // do. Left set, the next run's first dispatched worker deletes that run's
+        // queue whenever the cancel's own request hasn't arrived yet.
+        self::clear_background_cancel_status();
+    }
 
+    /**
+     * Clear both workers' "cancelled" flags (see clear_cancel_status()).
+     *
+     * @return void
+     */
+    public static function clear_background_cancel_status()
+    {
+        foreach (array(self::$process_backup_single, self::$process_restore_single) as $process) {
+            if (is_object($process) && method_exists($process, 'clear_cancel_status')) {
+                $process->clear_cancel_status();
+            }
+        }
     }
 
     public static function stop_and_reset()
