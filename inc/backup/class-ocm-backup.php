@@ -352,6 +352,13 @@ class OCM_Backup
     private static $import_oom_guard_active = false;
     /** @var bool Prevents writing the import-stop line more than once from the OOM guard. */
     private static $import_oom_stop_written = false;
+    /** @var bool The restore crash guard's shutdown callback is registered. */
+    private static $restore_crash_guard_registered = false;
+    /**
+     * @var bool This request is inside a restore task. Kept in memory: a fatal's
+     * own "Error:" log line clears ocm_action_start_restore before the guard runs.
+     */
+    private static $restore_crash_guard_armed = false;
     /**
      * Staging table name when URL rewrite hit a dedicated stop (keyless/unpageable
      * or oversized row). Used so discard staging does not insert a log line between
@@ -739,6 +746,20 @@ class OCM_Backup
             wp_send_json_error(array('message' => __('Another operation started. Wait for it to finish or stop it first.', '1-click-migration')), 409);
             return;
         }
+        // A worker that died on a fatal keeps its process lock for up to a
+        // minute, and trigger_processing() used to skip the new run with only a
+        // hidden SYSLOG line: the page sat at "Restore started" and the dead
+        // run's maintenance mode stayed on (#127). A stale lock is cleared; a
+        // lock a live worker may hold stops here, before anything is reset.
+        $restore_process = One_Click_Migration::$process_restore_single;
+        $lock_state = is_object($restore_process) && method_exists($restore_process, 'clear_stale_process_lock')
+            ? $restore_process->clear_stale_process_lock()
+            : 'free';
+        if ('held' === $lock_state) {
+            self::refuse_restore_start();
+            return;
+        }
+        $stale_state = 'cleared' === $lock_state ? array('process lock') : array();
         $restore_code = self::get_restore_code();
         $url_plan = OCM_Restore_Precheck::consume(
             $_POST['precheck_token'] ?? '', $restore_code, $_GET['selected'] ?? '',
@@ -747,6 +768,15 @@ class OCM_Backup
         if (is_wp_error($url_plan)) {
             wp_send_json_error(array('message' => $url_plan->get_error_message()), 400);
             return;
+        }
+
+        // No run is active (both checks above), so maintenance mode still on
+        // was left by a run that died. This run turns it on again once its code
+        // is redeemed; a stop before that must not leave the site serving 503s.
+        if (get_option('ocm_maintenance_mode', false)) {
+            One_Click_Migration::write_to_log('Notice: Maintenance mode was still on from an earlier restore that did not finish. Turning it off before the new restore starts.');
+            One_Click_Migration::disable_maintenance_mode();
+            $stale_state[] = 'maintenance mode';
         }
 
         update_option('ocm_download_auto_try_nb_db', 0, true);
@@ -772,6 +802,12 @@ class OCM_Backup
         delete_option('ocm_log_merged_bucket');
         delete_option(self::OPTION_RESTORE_DB_PART_FAILED);
         One_Click_Migration::delete_log_file();
+        if ($stale_state) {
+            One_Click_Migration::write_to_log(sprintf(
+                ' SYSLOG: Cleared state left by an earlier restore that did not finish: %s',
+                implode(', ', $stale_state)
+            ));
+        }
         $exluded_folders = self::get_excluded_folders();
 
         // A fresh watchdog clock for this run (see reset_worker_watchdog()).
@@ -784,7 +820,24 @@ class OCM_Backup
         // Save the queue and use direct processing for maximum reliability
         One_Click_Migration::$process_restore_single->save();
         One_Click_Migration::write_to_log(' SYSLOG: Using direct restore processing for maximum compatibility');
-        One_Click_Migration::$process_restore_single->trigger_processing();
+        // handle() ends the request with wp_die(), so false means no worker
+        // ran: the run would wait forever with nothing to restart it.
+        if (false === One_Click_Migration::$process_restore_single->trigger_processing()) {
+            update_option('ocm_is_stopped', true, true);
+            self::end_restore_run();
+            self::refuse_restore_start();
+        }
+    }
+
+    /**
+     * The restore worker can't start: say so in the log and to the admin page.
+     *
+     * @return void
+     */
+    private static function refuse_restore_start()
+    {
+        One_Click_Migration::write_to_log('Error: Restore could not start because a previous restore worker still holds its lock or did not shut down cleanly. Click Stop & Reset, then start the restore again.');
+        wp_send_json_error(array('message' => __('A previous restore is still running or did not shut down cleanly. Click Stop & Reset, then start the restore again.', '1-click-migration')), 409);
     }
 
     public static function start_restore_process($restore_code)
@@ -905,6 +958,7 @@ class OCM_Backup
             $all_plugins = is_array($all_plugins) ? $all_plugins : [];
             $other_count = count($all_plugins) - 1;
             One_Click_Migration::write_to_log('Other active plugins: ' . max(0, $other_count));
+            One_Click_Migration::write_to_log(' SYSLOG: ' . self::background_library_diagnostic());
             // Plugin deactivation waits until binary preflight / db-part checks
             // pass (gate_restore_before_file_replace). Stops that say
             // "No changes were made" must not have deactivated anything.
@@ -5627,6 +5681,101 @@ class OCM_Backup
 
         One_Click_Migration::write_to_log(self::LOG_RESTORE_STOPPED_IMPORT);
         self::fail_restore_before_file_swap();
+    }
+
+    /**
+     * Which WP_Background_Process copy this request loaded. Another plugin's
+     * older copy (WooCommerce's, #127) wins if it loads first.
+     *
+     * @return string
+     */
+    public static function background_library_diagnostic()
+    {
+        if (!class_exists('WP_Background_Process', false)) {
+            return 'WP_Background_Process: not loaded';
+        }
+        try {
+            $file = (string) (new \ReflectionClass('WP_Background_Process'))->getFileName();
+            $public = method_exists('WP_Background_Process', 'lock_process')
+                && (new \ReflectionMethod('WP_Background_Process', 'lock_process'))->isPublic();
+        } catch (\Throwable $e) {
+            return 'WP_Background_Process: reflection failed';
+        }
+        $file = str_replace('\\', '/', $file);
+        $content_dir = defined('WP_CONTENT_DIR') ? rtrim(str_replace('\\', '/', WP_CONTENT_DIR), '/') . '/' : '';
+        if ('' !== $content_dir && 0 === strpos($file, $content_dir)) {
+            $file = 'wp-content/' . substr($file, strlen($content_dir));
+        }
+        return sprintf(
+            'WP_Background_Process loaded from %s (lock_process public: %s)',
+            '' !== $file ? $file : 'unknown',
+            $public ? 'yes' : 'no'
+        );
+    }
+
+    /**
+     * Arm a shutdown guard for the restore worker. A PHP fatal anywhere in the
+     * restore must not leave the site serving the maintenance page (#127).
+     * Error_Handler also calls the guard before it die()s on a plugin-file
+     * fatal, since that die() skips every later shutdown callback.
+     *
+     * @return void
+     */
+    public static function register_restore_crash_guard()
+    {
+        self::$restore_crash_guard_armed = true;
+        if (self::$restore_crash_guard_registered) {
+            return;
+        }
+        self::$restore_crash_guard_registered = true;
+        register_shutdown_function(array(__CLASS__, 'handle_restore_crash_shutdown'));
+    }
+
+    /**
+     * The restore task returned normally: a later fatal in this request is
+     * not a restore crash.
+     *
+     * @return void
+     */
+    public static function disarm_restore_crash_guard()
+    {
+        self::$restore_crash_guard_armed = false;
+    }
+
+    /**
+     * Shutdown callback: after a fatal inside a restore task, turn
+     * maintenance mode off and log why. Nothing else is touched. Runs at most
+     * once per request.
+     *
+     * @param array|null $error Optional error array (tests); defaults to error_get_last().
+     * @return void
+     */
+    public static function handle_restore_crash_shutdown($error = null)
+    {
+        if (!self::$restore_crash_guard_armed) {
+            return;
+        }
+        if ($error === null) {
+            $error = error_get_last();
+        }
+        if (!is_array($error) || empty($error['type'])) {
+            return;
+        }
+        $fatal_types = array(E_ERROR, E_PARSE, E_CORE_ERROR, E_COMPILE_ERROR, E_USER_ERROR);
+        if (!in_array((int) $error['type'], $fatal_types, true)) {
+            return;
+        }
+        self::$restore_crash_guard_armed = false;
+        if (!get_option('ocm_maintenance_mode', false)) {
+            return;
+        }
+
+        $message = isset($error['message']) ? strtok((string) $error['message'], "\n") : '';
+        One_Click_Migration::write_to_log(sprintf(
+            'Restore worker crashed on a PHP fatal (%s). Turning maintenance mode off.',
+            $message
+        ));
+        One_Click_Migration::disable_maintenance_mode();
     }
 
     /**

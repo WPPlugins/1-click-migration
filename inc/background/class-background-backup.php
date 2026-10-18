@@ -385,6 +385,21 @@ class OCM_BackgroundBackup extends WP_Background_Process
     }
 
     /**
+     * Refresh the process lock from outside the worker loop without resetting
+     * the batch clock. Another plugin (e.g. WooCommerce) may load an older
+     * WP_Background_Process first, where lock_process() is protected and takes
+     * no argument, so callers outside this class must use this method (#127).
+     */
+    public function refresh_process_lock()
+    {
+        $start_time = isset($this->start_time) ? $this->start_time : null;
+        $this->lock_process(false);
+        if (null !== $start_time) {
+            $this->start_time = $start_time;
+        }
+    }
+
+    /**
      * Public method to directly trigger background processing
      * Used as fallback when dispatch fails
      */

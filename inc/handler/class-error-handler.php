@@ -82,6 +82,16 @@ class Error_Handler
           One_Click_Migration::write_to_log($errstr);
           // Only die for fatal errors originating from plugin code
           if ($is_plugin_error) {
+              // die() here skips every later shutdown callback, so the restore
+              // crash guard (#127) must run first.
+              if (class_exists(__NAMESPACE__ . '\\OCM_Backup', false)) {
+                  OCM_Backup::handle_restore_crash_shutdown(array(
+                      'type' => $errno, 'message' => $errstr, 'file' => $errfile, 'line' => $errline,
+                  ));
+              }
+              // The shutdown upload of held-back log lines is skipped too, so
+              // the S3 copy would end before the fatal (#127).
+              One_Click_Migration::flush_log_upload();
               die();
           }
           return;

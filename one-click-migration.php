@@ -4,7 +4,7 @@
  * Plugin Name: 1 Click Migration
  * Plugin URI: https://wordpress.org/plugins/1-click-migration/
  * Description: Migrate, copy, or clone your entire site with 1 click. <strong>Any host, no size limitation, no premium versions.</strong>
- * Version: 3.1.29
+ * Version: 3.1.30
  * Requires at least: 5.3
  * Requires PHP: 7.4
  * Author: 1ClickMigration
@@ -1274,8 +1274,10 @@ PHP;
         self::$last_transfer_heartbeat = $now;
 
         self::worker_heartbeat();
-        if (is_object($process) && method_exists($process, 'lock_process')) {
-            $process->lock_process(false);
+        // Never call lock_process() from here: in an older library copy loaded
+        // by another plugin it is protected, and calling it is a fatal (#127).
+        if (is_object($process) && is_callable(array($process, 'refresh_process_lock'))) {
+            $process->refresh_process_lock();
         }
     }
 

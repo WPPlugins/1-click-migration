@@ -4,7 +4,7 @@ Tags: backup, migrate, migration, restore, clone
 Requires at least: 5.3
 Tested up to: 7.1
 Requires PHP: 7.4
-Stable tag: 3.1.29
+Stable tag: 3.1.30
 Author URI: https://1clickmigration.com
 License: GPLv3 or later
 License URI: http://www.gnu.org/licenses/gpl-3.0.html
@@ -113,6 +113,10 @@ Any host that runs WordPress on PHP 7.4 or later, including Bluehost, SiteGround
 4. Enter the restore code on the destination site to finish your WordPress migration.
 
 == Changelog ==
+= 3.1.30 =
+* Fix: restores no longer crash when another plugin (such as WooCommerce) bundles an older background-processing library; a crashed restore no longer leaves the site in maintenance mode.
+* Fix: a restore started right after one that crashed no longer waits forever with no progress. It clears what the crashed run left behind and starts, or tells you to click Stop & Reset if an earlier restore may still be running.
+
 = 3.1.29 =
 * **Minimum WordPress 5.3**: The plugin now lists WordPress 5.3 as its minimum. It's the first version that officially supports PHP 7.4, which the plugin already requires. Backup and restore work exactly as in 3.1.28.
 
@@ -164,6 +168,9 @@ Any host that runs WordPress on PHP 7.4 or later, including Bluehost, SiteGround
 Older versions are listed in [changelog.txt](https://plugins.trac.wordpress.org/browser/1-click-migration/trunk/changelog.txt).
 
 == Upgrade Notice ==
+
+= 3.1.30 =
+Fixes restores crashing on sites with WooCommerce active and leaving the site in maintenance mode. Includes all 3.1.29 changes.
 
 = 3.1.29 =
 Requires WordPress 5.3 or later. No changes to backup or restore. Includes all 3.1.28 changes.

@@ -66,9 +66,11 @@ class OCM_BackgroundRestore extends WP_Background_Process
             return self::RETURN_TYPE_STOP_PROCESSS;
         }
         OCM_Backup::set_restore_run_context($run_id);
+        OCM_Backup::register_restore_crash_guard();
 
         One_Click_Migration::write_to_log(' SYSLOG: *** RESTORE TASK STARTED ***');
         $result = OCM_Backup::start_restore_process($restore_code);
+        OCM_Backup::disarm_restore_crash_guard();
         if (self::RETURN_TYPE_STOP_PROCESSS === $result) {
             return $result;
         }
@@ -390,22 +392,64 @@ class OCM_BackgroundRestore extends WP_Background_Process
     }
 
     /**
+     * Refresh the process lock from outside the worker loop without resetting
+     * the batch clock. Another plugin (e.g. WooCommerce) may load an older
+     * WP_Background_Process first, where lock_process() is protected and takes
+     * no argument, so callers outside this class must use this method (#127).
+     */
+    public function refresh_process_lock()
+    {
+        $start_time = isset($this->start_time) ? $this->start_time : null;
+        $this->lock_process(false);
+        if (null !== $start_time) {
+            $this->start_time = $start_time;
+        }
+    }
+
+    /**
+     * Before a new restore starts. A worker that died on a fatal leaves its
+     * process lock for up to a minute, and trigger_processing() skips any run
+     * while it is set (#127). The OS frees a dead process's worker file lock,
+     * so if this request can take that lock, no restore worker is alive and
+     * the process lock is stale. This request keeps the file lock for the
+     * worker it runs next.
+     *
+     * @return string 'free' (no lock), 'cleared' (stale lock removed) or
+     *                'held' (a live worker may hold it; nothing changed).
+     */
+    public function clear_stale_process_lock()
+    {
+        if ( ! get_site_transient( $this->identifier . '_process_lock' ) ) {
+            return 'free';
+        }
+        // A true return without a handle means the file lock is unusable on
+        // this host, so a live worker can't be ruled out.
+        if ( ! self::acquire_worker_file_lock() || ! is_resource( self::$worker_lock_handle ) ) {
+            return 'held';
+        }
+        delete_site_transient( $this->identifier . '_process_lock' );
+        return 'cleared';
+    }
+
+    /**
      * Public method to directly trigger background processing
      * Used as fallback when dispatch fails
+     *
+     * @return false|void False when no worker ran; handle() never returns.
      */
     public function trigger_processing()
     {
         One_Click_Migration::write_to_log(' SYSLOG: *** RESTORE DIRECT PROCESSING TRIGGERED ***');
-        
+
         // Check if process is already running using direct transient check
         if ( get_site_transient( $this->identifier . '_process_lock' ) ) {
             One_Click_Migration::write_to_log(' SYSLOG: Restore background process already running');
-            return;
+            return false;
         }
 
         if ( $this->is_queue_empty() ) {
             One_Click_Migration::write_to_log(' SYSLOG: Restore queue is empty - nothing to process');
-            return;
+            return false;
         }
 
         One_Click_Migration::write_to_log(' SYSLOG: Starting direct restore processing');
