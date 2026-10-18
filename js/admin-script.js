@@ -6,11 +6,6 @@
     var EMAIL_RE = /^([a-zA-Z0-9_.+\-])+@(([a-zA-Z0-9\-])+\.)+([a-zA-Z0-9]{2,})+$/;
     var noticeList = [];
     var stallNotice = null;
-    var timer = null;
-    var timerInitiated = 0;
-    var stopTimer = false;
-    var isRestarted = false;
-    var isRestarting = 0;
 
     function validateEmail(email) {
         return EMAIL_RE.test(email);
@@ -171,8 +166,6 @@
                             enableButtons();
                         } else if ('100%' === response.value) {
                             $('#ocm-pg-fill').removeClass('running');
-                            $('.ocm-timer').hide();
-                            $('.restart-button').hide();
                             enableButtons();
                             if (responseHead.indexOf('Backup completed') !== -1 || responseHead.indexOf('Restore completed') !== -1) {
                                 clearInterval(progressIntervalId);
@@ -182,42 +175,21 @@
                                 }
                             }
                         }
-
-                        if (responseHead.indexOf('Process is Restarting') !== -1) {
-                            if (isRestarting === 0) {
-                                isRestarted = true;
-                                isRestarting = 1;
-                                displayDecreasingTimer();
-                            }
-                        }
                     },
                     error: function (xhr) {
                         if (xhr.status === 403) {
+                            // Logged out (a restore replaces the site's users) or
+                            // the page expired. Say so before reloading, which
+                            // leads to the login screen.
                             clearInterval(progressIntervalId);
                             clearTimeout(progressTimeoutId);
-                            setTimeout(function () { window.location.reload(); }, 5000);
+                            $('.ocm-info.notice').append($('<span></span>').text(t('loggedOut'))).append('<br>').addClass('show').show();
+                            setTimeout(function () { window.location.reload(); }, 8000);
                         }
                     }
                 });
             }, 1000);
         }, 2000);
-    }
-
-    function displayDecreasingTimer() {
-        var timeOut = siteData.timeout;
-        if (timerInitiated === 0 || isRestarted === true) {
-            timer = setInterval(function () {
-                if (isRestarted) { clearInterval(timer); }
-                timeOut = timeOut - 1;
-                if (timeOut === 0) {
-                    stopTimer = true;
-                    isRestarting = 0;
-                    clearInterval(timer);
-                }
-            }, 1000);
-            timerInitiated = 1;
-            isRestarted = false;
-        }
     }
 
     // -------- submit handlers --------
@@ -249,8 +221,15 @@
             + '&_wpnonce=' + siteData.backupNonce;
         setProgress('1%', escHtml(t('backupStarted')));
         displayProgressBar();
-        displayDecreasingTimer();
-        $.get(url).fail(function () { enableButtons(); });
+        $.get(url).fail(function (xhr) {
+            enableButtons();
+            // The server refuses a start while another backup or restore runs.
+            var message = xhr && xhr.responseJSON && xhr.responseJSON.data && xhr.responseJSON.data.message;
+            if (message) {
+                stopProgressPolling();
+                setProgress('0%', escHtml(message));
+            }
+        });
     }
 
     var restorePreparation = null;
@@ -284,17 +263,12 @@
             }
         });
         $('#ocm-restore-precheck').prop('hidden', true);
-        stopTimer = false;
         setProgress('1%', escHtml(t(preparation.legacy ? 'restoreStartedLegacy' : 'restoreStarted')));
         displayProgressBar();
-        displayDecreasingTimer();
     }
 
     function restoreStartFailed(message) {
         stopProgressPolling();
-        clearInterval(timer);
-        timerInitiated = 0;
-        stopTimer = true;
         clearRestorePreparation();
         $('#ocm_restore_code, input[data-ocm-exclude]').prop('disabled', false);
         $('#ocm-restore-precheck').prop('hidden', false)

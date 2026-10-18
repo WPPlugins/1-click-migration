@@ -4,7 +4,7 @@
  * Plugin Name: 1 Click Migration
  * Plugin URI: https://wordpress.org/plugins/1-click-migration/
  * Description: Migrate, copy, or clone your entire site with 1 click. <strong>Any host, no size limitation, no premium versions.</strong>
- * Version: 3.1.32
+ * Version: 3.1.33
  * Requires at least: 5.3
  * Requires PHP: 7.4
  * Author: 1ClickMigration
@@ -155,7 +155,6 @@ class One_Click_Migration
         add_action('admin_post_start_backup', array(OCM_Backup::class, 'start_backup'));
         add_action('wp_ajax_ocm_loopback_check', array(__CLASS__, 'loopback_check'));
         add_action('wp_ajax_nopriv_ocm_loopback_check', array(__CLASS__, 'loopback_check'));
-        add_action('wp_ajax_ocm_restart_failed_process', array(OCM_Backup::class, 'restart_failed_process'));
         add_action('wp_ajax_ocm_prepare_restore', array(OCM_Restore_Precheck::class, 'prepare'));
         add_action('wp_ajax_ocm_apply_extra_domains', array(OCM_Backup::class, 'apply_extra_domains'));
         add_action('admin_post_start_restore', array(OCM_Backup::class, 'start_restore'));
@@ -278,9 +277,7 @@ class One_Click_Migration
             'progressUrl' => add_query_arg('_locale', 'user', get_rest_url(null, 'ocm/v1/progress')),
             'userEmail' => $user_email,
             'domain' => $domain,
-            'timeout' => $timeout,
             'ajaxurl' => admin_url('admin-ajax.php'),
-            'restartNonce' => wp_create_nonce('ocm_restart_failed_process'),
             'restNonce' => wp_create_nonce('wp_rest'),
             'backupNonce' => wp_create_nonce('one_click_migration_start_backup'),
             'restoreNonce' => wp_create_nonce('one_click_migration_start_restore'),
@@ -850,6 +847,16 @@ class One_Click_Migration
         header('Content-Type: text/plain; charset=UTF-8');
         header('Content-Disposition: attachment; filename="' . OCM_DEBUG_LOG_FILENAME . '"');
         header('X-Content-Type-Options: nosniff');
+        // A few plain lines for the person who downloads it. The log has no
+        // restore code, keys or signed links, but it has the email address and
+        // server details, so it's not for posting whole in public.
+        echo '# ' . __('1-Click Migration log: the technical details of the last backup or restore on this site.', '1-click-migration') . "\n";
+        echo '# ' . sprintf(
+            /* translators: %s: support forum URL */
+            __('Need help? Ask in the support forum: %s', '1-click-migration'),
+            OCM_Backup::SUPPORT_FORUM_URL
+        ) . "\n";
+        echo '# ' . __('This log includes your email address and server details, so share only the lines we ask for. It never includes your restore code.', '1-click-migration') . "\n#\n";
         readfile(OCM_DEBUG_LOG_FILE);
         exit;
     }

@@ -465,8 +465,7 @@ class OCM_Backup
             || get_option('ocm_action_start_restore')
             || get_site_transient('wp_ocm_background_backup_process_lock')
         ) {
-            wp_safe_redirect(admin_url('tools.php?page=one-click-migration&message=backup_in_progress'));
-            exit;
+            self::refuse_backup_start();
         }
 
         $run_id = self::claim_backup_run();
@@ -479,8 +478,7 @@ class OCM_Backup
             $run_id = self::claim_backup_run();
         }
         if (false === $run_id) {
-            wp_safe_redirect(admin_url('tools.php?page=one-click-migration&message=backup_in_progress'));
-            exit;
+            self::refuse_backup_start();
         }
 
         @set_time_limit(One_Click_Migration::get_timeout());
@@ -663,6 +661,23 @@ class OCM_Backup
         self::dispatch_backup_worker_with_diagnostics();
 
         wp_die('Backup started');
+    }
+
+    /**
+     * Another backup or restore is running. The admin page starts a backup
+     * with an XHR, which follows a redirect silently, so it gets the reason
+     * as JSON; a plain page load still gets the banner.
+     *
+     * @return void Never returns.
+     */
+    private static function refuse_backup_start()
+    {
+        $requested_with = isset($_SERVER['HTTP_X_REQUESTED_WITH']) ? strtolower((string) $_SERVER['HTTP_X_REQUESTED_WITH']) : '';
+        if ('xmlhttprequest' === $requested_with) {
+            wp_send_json_error(array('message' => __('A backup or restore is already running on this site. Wait for it to finish, or click Stop & Reset to cancel it, then start again.', '1-click-migration')), 409);
+        }
+        wp_safe_redirect(admin_url('tools.php?page=one-click-migration&message=backup_in_progress'));
+        exit;
     }
 
     private static function dispatch_backup_worker_with_diagnostics()
@@ -3613,8 +3628,8 @@ class OCM_Backup
                 if ($lastLog === 'Downloading restore files. Please wait.') {
                     $progress_item_text['text'] .= '</br></br>' . esc_html__('This step could take a while depending on your backup size', '1-click-migration');
 
-                } elseif ($lastLog === 'Plugins have been restored') {
-                    $progress_item_text['text'] .= '</br></br>' . esc_html__('You may be logged out around now. If so, log back in with the username and password of the site you backed up, then refresh this page.', '1-click-migration');
+                } elseif (self::is_logout_window_line($lastLog)) {
+                    $progress_item_text['text'] .= '</br></br>' . esc_html__('You may be logged out around now, because the site\'s users are being replaced with the ones from your backup. If so, log back in with the username and password of the site you backed up, then refresh this page.', '1-click-migration');
                 } elseif ($restore_terminal) {
                     if (strpos($lastLog, self::LOG_RESTORE_COMPLETED_WARNINGS_PREFIX) === 0) {
                         $progress_item_text['text'] .= '</br></br>' . esc_html__('Restore finished, but some parts were skipped or missing. Check the migration log, then verify themes, plugins, and media on your site.', '1-click-migration')
@@ -3764,6 +3779,14 @@ class OCM_Backup
 
         if (strpos($log, 'disk quota') !== false || strpos($log, 'Not enough disk space') !== false || strpos($log, 'Restore workspace is not writable') !== false) {
             return __('The hosting account is out of disk space. Delete files you no longer need or ask your host for more space, then try again. If your hosting panel shows plenty of free space, ask your host to check the account\'s disk and file limits.', '1-click-migration');
+        }
+
+        if (strpos($log, 'files could not be moved into place') !== false) {
+            return sprintf(
+                /* translators: %s: comma-separated list of folders */
+                __('The database is already restored, so your site stays in maintenance mode on purpose: visitors see a short "be right back" page instead of a half-finished site. Ask your host to let WordPress write to %s, then start the restore again. To take the site out of maintenance mode now, click Stop & Reset.', '1-click-migration'),
+                self::hint_folder_list(array('wp-content', 'wp-content/plugins', 'wp-content/themes', 'wp-content/uploads'))
+            );
         }
 
         if (strpos($log, 'write permissions') !== false || strpos($log, 'could not be moved or copied') !== false || strpos($log, 'could not be moved into place') !== false || strpos($log, 'could not be extracted') !== false) {
@@ -5456,6 +5479,26 @@ class OCM_Backup
     private static function is_terminal_progress_line($line)
     {
         return self::is_run_end_line($line) || strpos($line, 'Error:') !== false;
+    }
+
+    /**
+     * Restore steps from the URL update (just before the database swap that
+     * replaces the site's users and logs the admin out) until the files are in
+     * place.
+     *
+     * @param string $line
+     * @return bool
+     */
+    private static function is_logout_window_line($line)
+    {
+        foreach (array('Starting to update URLs in database', 'SYSLOG: Number of updates made from replace',
+            'SYSLOG: Finished updating URLs in the database', 'Database has been restored', 'Themes have been restored',
+            'Uploads have been restored', 'Plugins have been restored') as $needle) {
+            if (false !== strpos($line, $needle)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
@@ -7776,36 +7819,6 @@ class OCM_Backup
       });
 
       return !empty($filtered);
-    }
-
-    public static function restart_failed_process(){
-        // Check user capabilities
-        if (!current_user_can('manage_options')) {
-            wp_die(esc_html__('You do not have sufficient permissions to perform this action.', '1-click-migration'));
-        }
-        
-        // Verify nonce
-        if (!wp_verify_nonce($_POST['_wpnonce'] ?? '', 'ocm_restart_failed_process')) {
-            wp_die(esc_html__('This page has expired. Reload the page and try again.', '1-click-migration'));
-        }
-
-        if(isset($_POST['process'])){
-            $process = sanitize_text_field($_POST['process']);
-
-            One_Click_Migration::write_to_log("Process is Restarting");
-            if($process == 'backup'){
-                if (One_Click_Migration::get_backup_plugin_isolation_token() === '') {
-                    One_Click_Migration::start_backup_plugin_isolation();
-                }
-                One_Click_Migration::$process_backup_single->restart_task();
-            }
-
-            if($process == 'restore'){
-                One_Click_Migration::$process_restore_single->restart_task();
-            }
-        }
-        wp_send_json_success("success");
-
     }
 
     /**

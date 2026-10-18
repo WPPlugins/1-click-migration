@@ -4,7 +4,7 @@ Tags: backup, migrate, migration, restore, clone
 Requires at least: 5.3
 Tested up to: 7.1
 Requires PHP: 7.4
-Stable tag: 3.1.32
+Stable tag: 3.1.33
 Author URI: https://1clickmigration.com
 License: GPLv3 or later
 License URI: http://www.gnu.org/licenses/gpl-3.0.html
@@ -113,6 +113,9 @@ Any host that runs WordPress on PHP 7.4 or later, including Bluehost, SiteGround
 4. Enter the restore code on the destination site to finish your WordPress migration.
 
 == Changelog ==
+= 3.1.33 =
+* **Clearer guidance**: Starting a backup while another one runs now says so instead of waiting silently. If you get logged out during a restore, the page tells you before it reloads, and the logout tip now appears at the step where it happens. The restore-code reminder stays on the page after you reload it. If restored files can't be put in place, the page explains that the site stays in maintenance mode on purpose and how to leave it. The downloaded log starts with a short note on sharing it safely.
+
 = 3.1.32 =
 * **Backups recover on their own too**: If an unexpected error stops a backup partway, it now picks up again from where it stopped, up to two times, even with the plugin page closed. A backup that crashed no longer blocks Start backup until you click Stop & Reset.
 * **Clearer messages**: The progress card explains problems in plain language instead of showing server errors, and a failed backup or restore still shows what happened and how to fix it after you reload the page. Hosts that need the page kept open now say so.
@@ -176,6 +179,9 @@ Any host that runs WordPress on PHP 7.4 or later, including Bluehost, SiteGround
 Older versions are listed in [changelog.txt](https://plugins.trac.wordpress.org/browser/1-click-migration/trunk/changelog.txt).
 
 == Upgrade Notice ==
+
+= 3.1.33 =
+Clearer messages when a backup can't start, when you're logged out during a restore, and after a folder permission problem. Includes all 3.1.32 changes.
 
 = 3.1.32 =
 Backups now resume on their own after an unexpected error, messages are in plain language, and a stall after a background hand-off is fixed. Includes all 3.1.31 changes.

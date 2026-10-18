@@ -135,7 +135,8 @@ class OCM_Admin_Page
             'restoreWarnedTitle'    => __('Restore completed with warnings', '1-click-migration'),
             'restoreDoneTitle'      => __('Restore complete', '1-click-migration'),
             'restorePartialBody'    => __('Your site was restored, but some address updates did not apply. Review remaining links on your site.', '1-click-migration'),
-            'restoreWarnedBody'     => __('Your site was restored, but some parts were skipped or incomplete. Check the migration log for details.', '1-click-migration'),
+            'restoreWarnedBody'     => __('Your site was restored, but some parts were skipped or incomplete. Check your site, and if something is missing, download the log and ask in the support forum.', '1-click-migration'),
+            'loggedOut'             => __('You were logged out, which is normal during a restore. Log back in with the username and password of the site you backed up; the restore keeps going.', '1-click-migration'),
             'restoreReviewBody'     => __('Your site was restored successfully. If this plugin helped, leave a quick review on WordPress.org.', '1-click-migration'),
             'restoreDoneBody'       => __('Your site was restored successfully.', '1-click-migration'),
             'needHelp'              => __('Need help?', '1-click-migration'),
@@ -175,16 +176,14 @@ class OCM_Admin_Page
         $other_plugins            = self::other_active_plugins_count();
 
         $messages = [
-            'endpoint_failure'      => __('We could not reach the backup/restore endpoints. Make sure you have the latest version of the plugin and try again.', '1-click-migration'),
+            'endpoint_failure'      => __('The plugin could not reach the 1-Click Migration service. Make sure the plugin is up to date, then try again.', '1-click-migration'),
             'no_bucket'             => __('We could not find a backup for this restore code. If your backup was created more than 48 hours ago, you need to re-create it as it has been deleted.', '1-click-migration'),
-            'missing_username'      => __('Email parameter is missing. Please try again.', '1-click-migration'),
+            'missing_username'      => __('Enter the email address the restore code should go to, then try again.', '1-click-migration'),
             'missing_restore_code'  => __('Restore code is missing. Paste the 8-character code we emailed you after the backup.', '1-click-migration'),
             'invalid_restore_code'  => __('Restore code is invalid or expired. Check the email we sent after your backup, or run a new backup.', '1-click-migration'),
-            'backup_in_progress'    => __('A backup is already in progress. Please wait for it to complete before starting a new one.', '1-click-migration'),
-            'insufficient_disk_space' => __('Not enough writable space to complete this operation. Free space or increase the hosting account disk quota, then try again. If your hosting panel shows enough space, ask the host to check account quota or inode limits.', '1-click-migration'),
-            'restore_write_failed'  => __('The restore workspace is not writable. Check permissions for wp-content and make sure the hosting account has available disk quota.', '1-click-migration'),
-            'restore_extract_failed' => __('A restore archive could not be extracted. Free disk quota, check wp-content permissions, then run the restore again.', '1-click-migration'),
-            'restore_db_failed'      => __('The database import failed. Ask the host to enable proc_open/MySQL CLI support, or create a fresh backup after cleaning invalid option data from third-party plugins.', '1-click-migration'),
+            'backup_in_progress'    => __('A backup or restore is already running on this site. Wait for it to finish, or click Stop & Reset to cancel it, then start again.', '1-click-migration'),
+            'insufficient_disk_space' => __('The hosting account is out of disk space. Delete files you no longer need or ask your host for more space, then try again.', '1-click-migration'),
+            'write_permission'      => __('WordPress isn\'t allowed to write to its wp-content folder. Ask your host to fix the folder permissions, then try again.', '1-click-migration'),
         ];
         $message_key  = isset($_GET['message']) ? sanitize_text_field($_GET['message']) : '';
         $top_message  = $message_key && isset($messages[$message_key]) ? $messages[$message_key] : '';
@@ -201,13 +200,13 @@ class OCM_Admin_Page
                     <img class="ocm-brand-logo" src="<?php echo esc_url($logo_url); ?>" alt="OneClick Migration"/>
                 </div>
                 <div class="ocm-topbar-right">
-                    <span class="ocm-badge"><span class="ocm-dot"></span> <?php esc_html_e('Service ready', '1-click-migration'); ?></span>
                     <span>v<?php echo esc_html($version); ?></span>
                 </div>
             </header>
 
             <main class="ocm-main">
-                <div class="ocm-banner ocm-banner-warning" id="ocm-top-banner" style="display:none;"></div>
+                <?php // The restore-code banner after "Backup completed." stays after a reload. ?>
+                <div class="ocm-banner ocm-banner-warning" id="ocm-top-banner"<?php echo empty($progress['topBanner']) ? ' style="display:none;"' : ''; ?>><?php if (!empty($progress['topBanner'])) { echo wp_kses_post($progress['topBanner']); } ?></div>
 
                 <h1 class="ocm-h1"><?php esc_html_e('Backup & Restore', '1-click-migration'); ?></h1>
                 <p class="ocm-lede"><?php esc_html_e('Create a backup of your site or restore from a previous backup using a restore code.', '1-click-migration'); ?></p>
@@ -423,7 +422,6 @@ class OCM_Admin_Page
             <input type="hidden" id="ocmStartAction" value="<?php echo esc_attr($start_action_value); ?>"/>
             <a href="<?php echo esc_url(admin_url('admin-post.php?action=start_backup')); ?>" id="ocm-backup-href" hidden></a>
             <a href="<?php echo esc_url(admin_url('admin-post.php?action=start_restore')); ?>" id="ocm-restore-href" hidden></a>
-            <a href="<?php echo esc_url(admin_url('admin-post.php?action=restart')); ?>" id="ocm-restart-href" class="restart-button" hidden></a>
         </div>
         <?php
     }
