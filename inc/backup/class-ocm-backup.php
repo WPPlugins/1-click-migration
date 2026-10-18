@@ -34,6 +34,16 @@ class OCM_Backup
     const BACKUP_RUN_OPTION = 'ocm_active_backup_run';
     const RESTORE_RUN_OPTION = 'ocm_active_restore_run';
     const BACKUP_UPLOADED_PARTS_OPTION = 'ocm_backup_uploaded_parts';
+    /** Automatic resumes a restore run gets after its worker dies on a PHP fatal. */
+    const RESTORE_CRASH_RESUMES = 2;
+    /** array('run' => run id, 'count' => automatic resumes used). */
+    const RESTORE_CRASH_OPTION = 'ocm_restore_crash_resumes';
+    /** Set by a dying restore worker: the watchdog resumes the run without waiting for a stale heartbeat. */
+    const RESTORE_RESUME_OPTION = 'ocm_restore_resume_requested';
+    /** WordPress cron hook that checks on the restore worker while a restore is active. */
+    const RESTORE_WATCHDOG_HOOK = 'ocm_restore_watchdog';
+    /** Start of the visible line a crashed restore writes when it resumes on its own. No "Error:" in it. */
+    const LOG_RESTORE_RESUMING = 'Notice: The restore was interrupted by an unexpected problem and is picking up again on its own from where it stopped';
 
     /** Restore workspace under wp-content when the private work dir can't be used. */
     const RESTORE_WORKSPACE_FALLBACK_PREFIX = 'ocm_restore-';
@@ -819,6 +829,9 @@ class OCM_Backup
 
         // Save the queue and use direct processing for maximum reliability
         One_Click_Migration::$process_restore_single->save();
+        // Checks on the worker once a minute until the run ends, so a stalled or
+        // crashed restore resumes even if the plugin page is closed.
+        self::schedule_restore_watchdog(60);
         One_Click_Migration::write_to_log(' SYSLOG: Using direct restore processing for maximum compatibility');
         // handle() ends the request with wp_die(), so false means no worker
         // ran: the run would wait forever with nothing to restart it.
@@ -3284,17 +3297,23 @@ class OCM_Backup
      * the only request guaranteed to keep running during a migration on hosts
      * that block loopback requests, so it doubles as the watchdog: when a run is
      * in flight but the worker heartbeat has gone stale, resume it inline.
+     * WordPress cron runs the same check for a restore (run_restore_watchdog()),
+     * so a restore also resumes with the plugin page closed.
      *
-     * Only runs in REST/ajax context — trigger_processing() ends its request with
-     * wp_die(), which is fine for a poll but would blank an admin page render.
+     * Only runs in REST/ajax or cron context — trigger_processing() ends its
+     * request with wp_die(), which is fine for a poll or a cron run but would
+     * blank an admin page render.
+     *
+     * @param bool $is_stopped
+     * @param bool $from_cron  Called from the restore watchdog cron event.
      */
-    private static function maybe_revive_stalled_worker($is_stopped)
+    private static function maybe_revive_stalled_worker($is_stopped, $from_cron = false)
     {
         if ($is_stopped) {
             return;
         }
 
-        if (!(defined('REST_REQUEST') && REST_REQUEST) && !wp_doing_ajax()) {
+        if (!$from_cron && !(defined('REST_REQUEST') && REST_REQUEST) && !wp_doing_ajax()) {
             return;
         }
 
@@ -3312,18 +3331,23 @@ class OCM_Backup
         }
 
         $now = time();
+        // A restore worker that died on a PHP fatal asked for this: no need to
+        // wait for its heartbeat to go stale.
+        $resume_requested = $restore_active && (int) get_option(self::RESTORE_RESUME_OPTION, 0) > 0;
         // On hosts where the loopback gate already failed there is no healthy
         // dispatch chain to wait for, so stale means stalled much sooner.
         $threshold = get_option('ocm_dispatch_blocked') ? 25 : 45;
 
         $heartbeat = (int) get_option('ocm_worker_heartbeat', 0);
-        if (0 === $heartbeat) {
-            // First sighting of this run: start the clock instead of assuming a stall.
-            One_Click_Migration::worker_heartbeat();
-            return;
-        }
-        if (($now - $heartbeat) <= $threshold) {
-            return;
+        if (!$resume_requested) {
+            if (0 === $heartbeat) {
+                // First sighting of this run: start the clock instead of assuming a stall.
+                One_Click_Migration::worker_heartbeat();
+                return;
+            }
+            if (($now - $heartbeat) <= $threshold) {
+                return;
+            }
         }
 
         // A restore worker in a long step without heartbeats (e.g. extracting a
@@ -3340,13 +3364,28 @@ class OCM_Backup
         }
         update_option('ocm_worker_watchdog_last', $now, false);
 
+        if ($resume_requested) {
+            delete_option(self::RESTORE_RESUME_OPTION);
+            One_Click_Migration::write_to_log(sprintf(
+                ' SYSLOG: Resuming the restore after its worker stopped on a PHP fatal (%s)',
+                $from_cron ? 'cron' : 'progress poll'
+            ));
+            // trigger_processing() never returns once a worker runs; false means
+            // it couldn't start one yet, so ask again on the next check.
+            if (false === $process->trigger_processing()) {
+                update_option(self::RESTORE_RESUME_OPTION, $now, false);
+            }
+            return;
+        }
+
         $revivals = (int) get_option('ocm_worker_revival_count', 0) + 1;
         update_option('ocm_worker_revival_count', $revivals, false);
 
         One_Click_Migration::write_to_log(sprintf(
-            ' SYSLOG: Worker heartbeat is %d seconds old; resuming via direct processing (revival #%d)',
+            ' SYSLOG: Worker heartbeat is %d seconds old; resuming via direct processing (revival #%d%s)',
             $now - $heartbeat,
-            $revivals
+            $revivals,
+            $from_cron ? ', cron' : ''
         ));
 
         if (3 === $revivals) {
@@ -3384,6 +3423,17 @@ class OCM_Backup
         // logged right after it is what the card shows as the error.
         // Show the newest step the map knows instead.
         $last_message = is_string($lastLog) ? trim($lastLog) : '';
+        // A crashed restore resuming on its own: show its notice at the
+        // percentage of the step it was on, not the crash's 0%.
+        if (0 === strpos($last_message, self::LOG_RESTORE_RESUMING)) {
+            $step = self::get_last_progress_step();
+            $percent = null !== $step ? self::get_percent_by_log_message($step) : false;
+            return array(
+                'text' => self::progress_status_text($last_message),
+                'value' => false !== $percent ? $percent : '1%',
+                'maintenanceMode' => (bool) get_option('ocm_maintenance_mode', false),
+            );
+        }
         if ($last_message !== ''
             && strpos($last_message, 'was skipped due to timeout') === false
             && (self::is_handover_line($last_message)
@@ -4066,6 +4116,8 @@ class OCM_Backup
             : wp_generate_password(32, false, false);
         $run_id = strtolower(preg_replace('/[^a-zA-Z0-9_-]/', '', (string) $run_id));
         update_option(self::RESTORE_RUN_OPTION, $run_id, false);
+        delete_option(self::RESTORE_CRASH_OPTION);
+        delete_option(self::RESTORE_RESUME_OPTION);
         self::set_restore_run_context($run_id);
         return $run_id;
     }
@@ -4142,6 +4194,8 @@ class OCM_Backup
         }
         self::clear_restore_batch_option_rows();
         delete_option(self::RESTORE_RUN_OPTION);
+        delete_option(self::RESTORE_CRASH_OPTION);
+        delete_option(self::RESTORE_RESUME_OPTION);
         if (function_exists('wp_cache_delete')) {
             wp_cache_delete(self::RESTORE_RUN_OPTION, 'options');
         }
@@ -4668,6 +4722,14 @@ class OCM_Backup
         if ($offset > 0) {
             curl_setopt($ch, CURLOPT_RANGE, $offset . '-');
         }
+        // A 416 answer to the range request names the file's real size.
+        $content_range = '';
+        curl_setopt($ch, CURLOPT_HEADERFUNCTION, static function ($curl, $header) use (&$content_range) {
+            if (0 === stripos($header, 'Content-Range:')) {
+                $content_range = trim(substr($header, strlen('Content-Range:')));
+            }
+            return strlen($header);
+        });
         // A single curl_exec() can run for minutes; keep the heartbeat and
         // process lock fresh so the watchdog doesn't start a second worker
         // on the same .part file (#79).
@@ -4685,11 +4747,42 @@ class OCM_Backup
         // Release the handle (and its hold on the .part file) before fclose();
         // curl_close() is a no-op since 8.0 and deprecated in 8.5.
         unset($ch);
+        if ($http_code >= 300) {
+            // CURLOPT_FILE also wrote the error response's body (S3's XML):
+            // keep it out of the saved part, or the next resume continues
+            // from a corrupted offset.
+            fflush($handle);
+            ftruncate($handle, $before);
+        }
         fclose($handle);
         clearstatcache(true, $partial_path);
 
         if ($http_code === 404) {
             return new WP_Error('http_404', 'Not Found');
+        }
+
+        // Range starts at or past the end: an earlier worker saved the whole
+        // file and stopped before finalizing it (the HEAD size check can't see
+        // presigned GET URLs, so $expected_size is often 0).
+        if ($http_code === 416 && $offset > 0) {
+            if (preg_match('#^bytes \*/(\d+)$#i', $content_range, $range) && (int) $range[1] === $offset) {
+                if (@rename($partial_path, $target_path)) {
+                    return $target_path;
+                }
+                clearstatcache(true, $target_path);
+                if (file_exists($target_path) && filesize($target_path) === $offset) {
+                    return $target_path;
+                }
+                return new WP_Error('ocm_download_move_failed', sprintf(
+                    'Downloaded file for "%s" could not be finalized.',
+                    $key
+                ));
+            }
+            @unlink($partial_path);
+            return new WP_Error('ocm_partial_download', sprintf(
+                'Saved part of "%s.zip.crypt" did not match the backup file; restarting cleanly.',
+                $key
+            ));
         }
 
         if ($errno === 23) {
@@ -5259,12 +5352,23 @@ class OCM_Backup
      */
     private static function is_terminal_progress_line($line)
     {
+        return self::is_run_end_line($line) || strpos($line, 'Error:') !== false;
+    }
+
+    /**
+     * A line that ends a backup or restore run.
+     *
+     * @param string $line
+     * @return bool
+     */
+    private static function is_run_end_line($line)
+    {
         foreach (array('Backup completed', 'Backup failed:', 'Restore completed', 'Restore failed:', 'Restore stopped', 'Stop & Reset Finished') as $prefix) {
             if (strpos($line, $prefix) === 0) {
                 return true;
             }
         }
-        return strpos($line, 'Error:') !== false;
+        return false;
     }
 
     /**
@@ -5281,12 +5385,24 @@ class OCM_Backup
         if (!file_exists($file)) {
             return null;
         }
+        // Lines before an automatic-resume notice belong to the crash it
+        // recovered from: skip its error lines and find the step it was on.
+        $crash_block = false;
         foreach (array_reverse(explode(PHP_EOL, (string) file_get_contents($file))) as $raw) {
             $line = trim(self::log_line_message($raw));
             if ($line === '' || self::is_handover_line($line) || self::is_php_fatal_syslog_line($line)) {
                 continue;
             }
+            if (0 === strpos($line, self::LOG_RESTORE_RESUMING)) {
+                $crash_block = true;
+                continue;
+            }
             if (strpos($line, 'SYSLOG') !== false && !self::is_syslog_allowed_for_progress($line)) {
+                continue;
+            }
+            if ($crash_block && !self::is_run_end_line($line)
+                && (strpos($line, 'Error:') !== false || '0%' === self::get_percent_by_log_message($line))
+            ) {
                 continue;
             }
             if (self::is_terminal_progress_line($line)) {
@@ -5743,9 +5859,18 @@ class OCM_Backup
     }
 
     /**
-     * Shutdown callback: after a fatal inside a restore task, turn
-     * maintenance mode off and log why. Nothing else is touched. Runs at most
+     * Shutdown callback after a PHP fatal inside a restore task. Runs at most
      * once per request.
+     *
+     * - The run is still active (a time-limit or memory fatal logs no
+     *   "Error:" line): it resumes from its last completed step, so the site
+     *   stays in maintenance mode.
+     * - The fatal's own "Error:" line ended the run: it gets up to
+     *   RESTORE_CRASH_RESUMES automatic resumes, still in maintenance mode.
+     *   After that it fails for good and maintenance mode goes off (#127).
+     * Either way the dying worker's locks are released and the watchdog is
+     * asked to resume at once: from the progress poll while the plugin page
+     * is open, otherwise from WordPress cron.
      *
      * @param array|null $error Optional error array (tests); defaults to error_get_last().
      * @return void
@@ -5766,16 +5891,143 @@ class OCM_Backup
             return;
         }
         self::$restore_crash_guard_armed = false;
-        if (!get_option('ocm_maintenance_mode', false)) {
+        $message = isset($error['message']) ? strtok((string) $error['message'], "\n") : '';
+
+        if (get_option('ocm_action_start_restore')) {
+            One_Click_Migration::write_to_log(sprintf(
+                ' SYSLOG: Restore worker stopped on a PHP fatal (%s); the run is still active and resumes from its last completed step.',
+                $message
+            ));
+            self::request_restore_resume();
+            One_Click_Migration::flush_log_upload();
             return;
         }
 
-        $message = isset($error['message']) ? strtok((string) $error['message'], "\n") : '';
+        $run_id = self::$restore_run_id;
+        if ('' !== $run_id && self::is_current_restore_run($run_id)) {
+            $used = self::restore_crash_resumes_used($run_id);
+            if ($used < self::RESTORE_CRASH_RESUMES) {
+                update_option(self::RESTORE_CRASH_OPTION, array('run' => $run_id, 'count' => $used + 1), false);
+                One_Click_Migration::write_to_log(sprintf(
+                    ' SYSLOG: Restore worker crashed on a PHP fatal (%s); resuming from the last completed step (automatic resume %d of %d).',
+                    $message,
+                    $used + 1,
+                    self::RESTORE_CRASH_RESUMES
+                ));
+                One_Click_Migration::write_to_log(sprintf(
+                    '%s (attempt %d of %d). You don\'t need to do anything.',
+                    self::LOG_RESTORE_RESUMING,
+                    $used + 1,
+                    self::RESTORE_CRASH_RESUMES
+                ));
+                // After the log lines: the fatal's text quoted above can hold
+                // "Error:", and write_to_log() ends the run on any such line.
+                update_option('ocm_action_start_restore', true, true);
+                self::request_restore_resume();
+                One_Click_Migration::flush_log_upload();
+                return;
+            }
+            One_Click_Migration::write_to_log(sprintf(
+                ' SYSLOG: Restore worker crashed on a PHP fatal (%s); no automatic resumes left.',
+                $message
+            ));
+            One_Click_Migration::write_to_log(sprintf(
+                'Restore failed: it stopped after %d unexpected problems. Start the restore again. If it stops again, ask for help in the support forum.',
+                $used + 1
+            ));
+            update_option('ocm_is_stopped', true, true);
+            self::end_restore_run();
+            if (get_option('ocm_maintenance_mode', false)) {
+                One_Click_Migration::disable_maintenance_mode();
+            }
+            One_Click_Migration::flush_log_upload();
+            return;
+        }
+
+        // A worker from an ended or replaced run: nothing to resume.
+        if (!get_option('ocm_maintenance_mode', false)) {
+            return;
+        }
         One_Click_Migration::write_to_log(sprintf(
             'Restore worker crashed on a PHP fatal (%s). Turning maintenance mode off.',
             $message
         ));
         One_Click_Migration::disable_maintenance_mode();
+    }
+
+    /**
+     * Automatic resumes the current run has used after worker crashes.
+     *
+     * @param string $run_id
+     * @return int
+     */
+    private static function restore_crash_resumes_used($run_id)
+    {
+        $state = get_option(self::RESTORE_CRASH_OPTION, array());
+        if (!is_array($state) || !isset($state['run'], $state['count']) || !is_string($state['run'])
+            || !hash_equals($state['run'], (string) $run_id)
+        ) {
+            return 0;
+        }
+        return max(0, (int) $state['count']);
+    }
+
+    /**
+     * Called from a dying restore worker: free its locks now instead of when
+     * they expire, and ask the watchdog to resume the run on its next check.
+     *
+     * @return void
+     */
+    private static function request_restore_resume()
+    {
+        $process = One_Click_Migration::$process_restore_single;
+        if (is_object($process) && $process instanceof OCM_BackgroundRestore) {
+            $process->unlock_process();
+        }
+        OCM_BackgroundRestore::release_worker_file_lock();
+        update_option(self::RESTORE_RESUME_OPTION, time(), false);
+        self::schedule_restore_watchdog(10, true);
+    }
+
+    /**
+     * Queue a WordPress cron check of the restore worker. Cron runs on any
+     * request to the site, including visitors shown the maintenance page, so
+     * a stalled or crashed restore resumes even with the plugin page closed.
+     *
+     * @param int  $delay  Seconds from now.
+     * @param bool $sooner Move an already queued check forward to $delay.
+     * @return void
+     */
+    public static function schedule_restore_watchdog($delay = 60, $sooner = false)
+    {
+        if (!function_exists('wp_next_scheduled') || !function_exists('wp_schedule_single_event')) {
+            return;
+        }
+        $at = time() + max(1, (int) $delay);
+        $next = wp_next_scheduled(self::RESTORE_WATCHDOG_HOOK);
+        if ($next) {
+            if (!$sooner || $next <= $at || !function_exists('wp_unschedule_event')) {
+                return;
+            }
+            wp_unschedule_event($next, self::RESTORE_WATCHDOG_HOOK);
+        }
+        wp_schedule_single_event($at, self::RESTORE_WATCHDOG_HOOK);
+    }
+
+    /**
+     * Cron callback: while a restore is active, check on its worker once a
+     * minute and resume it if it stalled or crashed. The chain stops once the
+     * run ends.
+     *
+     * @return void
+     */
+    public static function run_restore_watchdog()
+    {
+        if (!get_option('ocm_action_start_restore')) {
+            return;
+        }
+        self::schedule_restore_watchdog(60);
+        self::maybe_revive_stalled_worker((bool) get_option('ocm_is_stopped'), true);
     }
 
     /**
@@ -7299,6 +7551,8 @@ class OCM_Backup
 
     public static function delete_restore_options(){
       delete_option('ocm_force_deactivated_plugins');
+      delete_option(self::RESTORE_CRASH_OPTION);
+      delete_option(self::RESTORE_RESUME_OPTION);
 
       delete_option('ocm_restore_download_retry_db');
       delete_option('ocm_restore_download_retry_themes');
