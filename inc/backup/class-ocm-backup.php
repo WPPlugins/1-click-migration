@@ -18,6 +18,8 @@ class OCM_Backup
 {
     /** @var bool A selected archive backend ran and failed; do not retry via another huge-tree backend. */
     private static $archive_backend_failed = false;
+    /** @var bool The host stopped an earlier worker while it packed this archive. */
+    private static $archive_interrupted = false;
 
     /** @var string Run owner captured by this PHP request. */
     private static $backup_run_id = '';
@@ -580,6 +582,15 @@ class OCM_Backup
             }
             One_Click_Migration::write_to_log(
                 ' SYSLOG: BACKUP_UNCOMPRESSED_SIZES bucket=' . $bucket_id . ' ' . implode(' ', $size_pairs)
+            );
+        }
+
+        // The DB part holds every table in the database, other installs' too.
+        // The restore uses this to tell this site's tables from theirs.
+        global $wpdb;
+        if (isset($wpdb->base_prefix) && preg_match('/^[A-Za-z0-9_]+$/', (string) $wpdb->base_prefix)) {
+            One_Click_Migration::write_to_log(
+                ' SYSLOG: BACKUP_TABLE_PREFIX bucket=' . $bucket_id . ' prefix=' . $wpdb->base_prefix
             );
         }
 
@@ -1489,6 +1500,7 @@ class OCM_Backup
     public static function fail_backup($message)
     {
         One_Click_Migration::write_to_log('Backup failed: ' . self::short_failure_reason($message));
+        self::stop_zip_failover_job();
         One_Click_Migration::reset_actions_start_mark();
         update_option('ocm_is_stopped', true, true);
         $run_id = self::get_stored_backup_run_id();
@@ -2230,6 +2242,14 @@ class OCM_Backup
                 if (!self::create_native_zip_from_directory($folder_path, $filename)) {
                     if (self::$archive_backend_failed) {
                         error_reporting($old_error_reporting);
+                        if (self::$archive_interrupted) {
+                            One_Click_Migration::write_to_log(sprintf(
+                                'Notice: Your hosting kept stopping the backup while it packed the %1$s folder (%2$s), so the folder could not be packed. Remove files you don\'t need from wp-content/%1$s (for example old backups or large videos), or tick "Exclude %3$s" under Advanced options and move that folder another way, then start the backup again.',
+                                $folder_name,
+                                $folder_size,
+                                ucfirst($folder_name)
+                            ));
+                        }
                         self::fail_backup(sprintf('archive creation failed for "%s" (see previous error line)', $folder_name));
                         return OCM_BackgroundBackup::RETURN_TYPE_END_PROCESSS;
                     }
@@ -2698,6 +2718,7 @@ class OCM_Backup
     private static function create_native_zip_from_directory($folder_path, $filename)
     {
         self::$archive_backend_failed = false;
+        self::$archive_interrupted = false;
         $close_marker = 'ocm_zip_close_in_progress_' . md5($filename);
 
         // Empty uploads/themes/plugins must not fail the backup. ZipArchive::close()
@@ -2734,6 +2755,7 @@ class OCM_Backup
                 return true;
             }
 
+            self::$archive_interrupted = true;
             One_Click_Migration::write_to_log(sprintf(
                 'Notice: Previous ZipArchive::close() did not finish for "%s"; switching to slower monitored zip failover.',
                 basename($filename)
@@ -2822,7 +2844,7 @@ class OCM_Backup
             @set_time_limit(One_Click_Migration::get_timeout());
         }
         One_Click_Migration::write_to_log(sprintf(
-            ' SYSLOG: Zip close starting for "%s": %d files, %d bytes queued. No further log output is expected until close finishes.',
+            ' SYSLOG: Zip close starting for "%s": %d files, %d bytes queued.',
             basename($filename),
             $queued_files,
             $queued_bytes
@@ -2831,6 +2853,24 @@ class OCM_Backup
         update_option($close_marker, time(), false);
         if (function_exists('error_clear_last')) {
             error_clear_last();
+        }
+        // libzip reports progress during close() (PHP 8.0+). Keep the worker's
+        // heartbeat and lock fresh so the watchdog doesn't take it for a dead
+        // one, and log how far it got in case the host stops it.
+        if (method_exists($zip, 'registerProgressCallback')) {
+            $worker = isset(One_Click_Migration::$process_backup_single) ? One_Click_Migration::$process_backup_single : null;
+            $last_report = time();
+            $zip->registerProgressCallback(0.001, function ($rate) use ($worker, $filename, &$last_report) {
+                self::zip_heartbeat($worker);
+                if (time() - $last_report >= 60) {
+                    $last_report = time();
+                    One_Click_Migration::write_to_log(sprintf(
+                        ' SYSLOG: Zip close progress for "%s": %d%%',
+                        basename($filename),
+                        (int) floor($rate * 100)
+                    ));
+                }
+            });
         }
         $closed = @$zip->close();
         if ($closed || self::is_valid_zip_archive($filename)) {
@@ -2876,8 +2916,12 @@ class OCM_Backup
      */
     private static function run_zip_close_failover($folder_path, $filename, $close_marker)
     {
-        // Never let a half-written primary archive be mistaken for a result.
-        @unlink($filename);
+        // Never let a half-written primary archive be mistaken for a result,
+        // unless it is the finished output of an earlier worker's system zip.
+        $job = get_option(self::ZIP_FAILOVER_JOB_OPTION, null);
+        if (!is_array($job) || !isset($job['filename']) || $job['filename'] !== $filename) {
+            @unlink($filename);
+        }
         $failover_result = self::create_cli_zip_from_directory($folder_path, $filename);
         if ($failover_result === true) {
             delete_option($close_marker);
@@ -2952,16 +2996,55 @@ class OCM_Backup
             return null;
         }
 
+        // A zip started by an earlier worker outlives that worker when the host
+        // kills only the PHP process. Wait for it (or take its result) instead
+        // of starting another one beside it: on a folder too big to pack in one
+        // request, starting over never finishes and the copies fill the disk.
+        $job = get_option(self::ZIP_FAILOVER_JOB_OPTION, null);
+        if (is_array($job) && isset($job['filename']) && $job['filename'] === $filename) {
+            if (self::zip_failover_job_running($job)) {
+                One_Click_Migration::write_to_log(sprintf(
+                    ' SYSLOG: Monitored system zip for "%s" from an earlier worker is still running (pid %d, %d s); waiting for it.',
+                    basename($filename),
+                    (int) $job['pid'],
+                    time() - (int) $job['started']
+                ));
+                return self::wait_for_zip_failover_job($job, null);
+            }
+            if (is_file((string) $job['exit_file'])) {
+                // It finished while no worker was watching.
+                return self::finish_zip_failover_job($job, null);
+            }
+            self::stop_zip_failover_job();
+        }
+
         if (self::is_valid_zip_archive($filename)) {
             return true;
         }
 
         @unlink($filename);
+        self::remove_stale_zip_temp_files($filename);
+        $job = array(
+            'filename'  => $filename,
+            'exit_file' => $filename . '.exit',
+            'err_file'  => $filename . '.err',
+            'pid'       => 0,
+            'started'   => time(),
+            'bytes'     => 0,
+        );
+        @unlink($job['exit_file']);
+        @unlink($job['err_file']);
+        // The shell records zip's exit code even after this worker is gone, and
+        // a TERM to it (stop_zip_failover_job) stops zip as well.
+        $script = "trap 'kill \$z 2>/dev/null; exit 143' TERM INT; "
+            . '/usr/bin/env zip -0 -q -r ' . escapeshellarg($filename) . ' . 2>' . escapeshellarg($job['err_file'])
+            . ' & z=$!; wait $z; echo $? > ' . escapeshellarg($job['exit_file']);
         $process = @proc_open(
-            '/usr/bin/env zip -0 -q -r ' . escapeshellarg($filename) . ' .',
+            'exec /bin/sh -c ' . escapeshellarg($script),
             array(
+                0 => array('file', '/dev/null', 'r'),
                 1 => array('file', '/dev/null', 'w'),
-                2 => array('pipe', 'w'),
+                2 => array('file', '/dev/null', 'w'),
             ),
             $pipes,
             $folder_path
@@ -2969,28 +3052,96 @@ class OCM_Backup
         if (!is_resource($process)) {
             return null;
         }
+        $status = proc_get_status($process);
+        $job['pid'] = isset($status['pid']) ? (int) $status['pid'] : 0;
+        update_option(self::ZIP_FAILOVER_JOB_OPTION, $job, false);
 
-        stream_set_blocking($pipes[2], false);
-        $error = '';
-        do {
-            $status = proc_get_status($process);
-            $error .= (string) stream_get_contents($pipes[2]);
-            if (strlen($error) > 2000) {
-                $error = substr($error, -2000);
-            }
+        return self::wait_for_zip_failover_job($job, $process);
+    }
+
+    /** Heartbeat plus process-lock refresh (throttled) from inside a long zip step. */
+    private static function zip_heartbeat($worker)
+    {
+        if (method_exists(One_Click_Migration::class, 'transfer_heartbeat')) {
+            One_Click_Migration::transfer_heartbeat($worker);
+        } else {
             One_Click_Migration::worker_heartbeat();
-            @set_time_limit(One_Click_Migration::get_timeout());
-            if (!empty($status['running'])) {
-                sleep(1);
-            }
-        } while (!empty($status['running']));
-
-        $error .= (string) stream_get_contents($pipes[2]);
-        fclose($pipes[2]);
-        $exit_code = proc_close($process);
-        if ($exit_code === -1 && isset($status['exitcode'])) {
-            $exit_code = (int) $status['exitcode'];
         }
+    }
+
+    /** Monitored system zip that may outlive the worker that started it. */
+    const ZIP_FAILOVER_JOB_OPTION = 'ocm_zip_failover_job';
+    /** Never wait on (or signal) a recorded zip older than this. */
+    const ZIP_FAILOVER_MAX_AGE = 21600;
+
+    /**
+     * Wait for the monitored zip, keeping the worker's heartbeat and lock
+     * fresh. $process is this worker's own child; null for one adopted from
+     * an earlier worker, which is watched through its pid instead.
+     *
+     * @param array         $job
+     * @param resource|null $process
+     * @return bool
+     */
+    private static function wait_for_zip_failover_job(array $job, $process)
+    {
+        $worker = isset(One_Click_Migration::$process_backup_single) ? One_Click_Migration::$process_backup_single : null;
+        $last_progress = 0;
+        while (true) {
+            if (is_resource($process)) {
+                $status = proc_get_status($process);
+                $running = !empty($status['running']);
+            } else {
+                $running = self::zip_failover_job_running($job);
+            }
+            if (!$running) {
+                break;
+            }
+            self::zip_heartbeat($worker);
+            @set_time_limit(One_Click_Migration::get_timeout());
+            // Packing that moves on is not a failed attempt: a big folder can
+            // take several workers, each counted as a compress retry.
+            if (time() - $last_progress >= 30) {
+                $last_progress = time();
+                $bytes = self::zip_failover_output_bytes($job);
+                if ($bytes > (int) $job['bytes']) {
+                    $job['bytes'] = $bytes;
+                    update_option(self::ZIP_FAILOVER_JOB_OPTION, $job, false);
+                    $folder_name = basename((string) $job['filename'], '.zip');
+                    if (in_array($folder_name, array('themes', 'plugins', 'uploads'), true)) {
+                        update_option('ocm_backup_compress_retry_' . $folder_name, 1, true);
+                    }
+                }
+            }
+            sleep(is_resource($process) ? 1 : 2);
+        }
+
+        return self::finish_zip_failover_job($job, $process);
+    }
+
+    /**
+     * @param array         $job
+     * @param resource|null $process
+     * @return bool
+     */
+    private static function finish_zip_failover_job(array $job, $process)
+    {
+        $exit_code = -1;
+        if (is_resource($process)) {
+            $exit_code = proc_close($process);
+        }
+        $recorded = @file_get_contents((string) $job['exit_file']);
+        if (is_string($recorded) && preg_match('/^\s*(\d+)\s*$/', $recorded, $m)) {
+            $exit_code = (int) $m[1];
+        } elseif ($exit_code === 0) {
+            // The shell ended without recording zip's result.
+            $exit_code = -1;
+        }
+        $error = (string) @file_get_contents((string) $job['err_file']);
+        $filename = (string) $job['filename'];
+        @unlink((string) $job['exit_file']);
+        @unlink((string) $job['err_file']);
+        delete_option(self::ZIP_FAILOVER_JOB_OPTION);
 
         if ($exit_code !== 0 || !is_file($filename) || filesize($filename) === 0) {
             @unlink($filename);
@@ -3008,6 +3159,108 @@ class OCM_Backup
             basename($filename)
         ));
         return true;
+    }
+
+    /**
+     * Whether the recorded zip job is still running. Only a live process whose
+     * command line names this job's exit file counts, so a recycled pid is
+     * never taken for it.
+     *
+     * @param array $job
+     * @return bool
+     */
+    private static function zip_failover_job_running(array $job)
+    {
+        $pid = isset($job['pid']) ? (int) $job['pid'] : 0;
+        if ($pid <= 1 || empty($job['exit_file']) || is_file($job['exit_file'])) {
+            return false;
+        }
+        if (time() - (int) ($job['started'] ?? 0) > self::ZIP_FAILOVER_MAX_AGE) {
+            return false;
+        }
+        $cmdline = @file_get_contents('/proc/' . $pid . '/cmdline');
+        if (!is_string($cmdline) || $cmdline === '') {
+            $cmdline = self::process_command_line($pid);
+        }
+        return is_string($cmdline) && strpos($cmdline, (string) $job['exit_file']) !== false;
+    }
+
+    /** Command line of a process from ps (no /proc, e.g. BSD). */
+    private static function process_command_line($pid)
+    {
+        if (!function_exists('proc_open')) {
+            return null;
+        }
+        $ps = @proc_open(
+            'ps -o args= -p ' . (int) $pid,
+            array(1 => array('pipe', 'w'), 2 => array('file', '/dev/null', 'w')),
+            $pipes
+        );
+        if (!is_resource($ps)) {
+            return null;
+        }
+        $out = (string) stream_get_contents($pipes[1]);
+        fclose($pipes[1]);
+        proc_close($ps);
+        return trim($out);
+    }
+
+    /** Bytes zip has written so far: its temp files plus the finished archive. */
+    private static function zip_failover_output_bytes(array $job)
+    {
+        $dir = dirname((string) $job['filename']);
+        $bytes = 0;
+        foreach (@scandir($dir) ?: array() as $name) {
+            if (preg_match('/^zi[A-Za-z0-9]{6}$/', $name) || $name === basename((string) $job['filename'])) {
+                $bytes += (int) @filesize($dir . '/' . $name);
+            }
+        }
+        return $bytes;
+    }
+
+    /**
+     * Temp files a killed zip left beside the archive: info-zip's "ziXXXXXX"
+     * and libzip's "<archive>.XXXXXX". Each can be as big as the folder.
+     * Only called when no zip job for this archive is running.
+     *
+     * @param string $filename
+     * @return void
+     */
+    private static function remove_stale_zip_temp_files($filename)
+    {
+        $dir = dirname($filename);
+        $libzip = '/^' . preg_quote(basename($filename), '/') . '\.[A-Za-z0-9]{6}$/';
+        foreach (@scandir($dir) ?: array() as $name) {
+            if (preg_match('/^zi[A-Za-z0-9]{6}$/', $name) || preg_match($libzip, $name)) {
+                @unlink($dir . '/' . $name);
+            }
+        }
+    }
+
+    /**
+     * Stop the recorded zip job, if it is still running, and forget it. Used
+     * when a backup fails, starts again or is reset, so an orphaned zip
+     * doesn't keep filling the disk.
+     *
+     * @return void
+     */
+    public static function stop_zip_failover_job()
+    {
+        $job = get_option(self::ZIP_FAILOVER_JOB_OPTION, null);
+        delete_option(self::ZIP_FAILOVER_JOB_OPTION);
+        if (!is_array($job) || !self::zip_failover_job_running($job)) {
+            return;
+        }
+        $pid = (int) $job['pid'];
+        if (function_exists('posix_kill')) {
+            @posix_kill($pid, 15);
+        } elseif (function_exists('proc_open')) {
+            $kill = @proc_open('kill -TERM ' . $pid, array(1 => array('file', '/dev/null', 'w'), 2 => array('file', '/dev/null', 'w')), $pipes);
+            if (is_resource($kill)) {
+                proc_close($kill);
+            }
+        }
+        One_Click_Migration::write_to_log(sprintf(' SYSLOG: Stopped monitored system zip for "%s" (pid %d).', basename((string) $job['filename']), $pid));
     }
 
     private static function directory_contains_files($folder_path)
@@ -6457,6 +6710,7 @@ class OCM_Backup
             self::stop_restore_after_db_part_failure();
         }
         self::stop_if_db_unavailable_for_restore();
+        self::keep_only_source_table_set();
         $preflight = self::ensure_binary_preflight_before_file_replace();
         if ($preflight === 'continue') {
             One_Click_Migration::write_to_log('SYSLOG: Binary preflight scan still running; restarting worker.');
@@ -6469,6 +6723,93 @@ class OCM_Backup
         if ($preflight === false) {
             self::stop_restore_after_binary_preflight_refusal();
         }
+    }
+
+    /**
+     * The DB part holds every table in the source database, so other installs
+     * or staging copies sharing it come along as extra WordPress table sets.
+     * Their dumps would be renamed onto this site's prefix and overwrite its
+     * tables, so keep the backed-up site's set and delete the others'
+     * extracted dumps (usermeta last: while any of a set's dumps remain, the
+     * set is still recognisable to a resumed worker). Stops the restore,
+     * before anything changes, when the backup can't say which set is the
+     * site's.
+     *
+     * @return void
+     */
+    private static function keep_only_source_table_set()
+    {
+        $excluded = get_option('ocm_excluded_folders', array());
+        if (is_array($excluded) && in_array('db', $excluded, true)) {
+            return;
+        }
+        $dbfiles = self::get_restore_work_path() . '/db/';
+        if (!is_dir($dbfiles)) {
+            return;
+        }
+        $prefixes = OCM_SQL_Utils::wordpress_table_set_prefixes($dbfiles);
+        if (count($prefixes) < 2) {
+            return;
+        }
+
+        $bucket_id = (string) get_option('ocm_bucket_id', '');
+        $log = '';
+        if ($bucket_id !== '' && defined('OCM_DEBUG_LOG_FILE') && file_exists(OCM_DEBUG_LOG_FILE)) {
+            $log = (string) @file_get_contents(OCM_DEBUG_LOG_FILE);
+        }
+        $recorded = '';
+        if ($log !== '' && preg_match_all('/BACKUP_TABLE_PREFIX bucket=' . preg_quote($bucket_id, '/') . ' prefix=([A-Za-z0-9_]+)/', $log, $matches)) {
+            $recorded = (string) end($matches[1]);
+        }
+        $manifest = $log !== '' ? OCM_URL_Manifest::from_log($log, $bucket_id) : null;
+        $source_url = is_array($manifest) ? (string) $manifest['source'] : '';
+
+        $resolved = OCM_SQL_Utils::resolve_source_table_set($dbfiles, $prefixes, $recorded, $source_url);
+        if ($resolved === false) {
+            One_Click_Migration::write_to_log(sprintf(
+                'Error: The backup\'s database holds the tables of %d WordPress sites (table prefixes: %s), and this backup doesn\'t say which one is yours. Update 1-Click Migration on the site you backed up, take a new backup there, and restore that one.',
+                count($prefixes),
+                implode(', ', $prefixes)
+            ));
+            self::stop_restore_during_db_import();
+        }
+
+        $source = $resolved['prefix'];
+        $others = array_values(array_diff($prefixes, array($source)));
+        $deleted = 0;
+        $last = array();
+        foreach (OCM_SQL_Utils::list_restore_sql_dump_files($dbfiles) as $filepath) {
+            $table = substr(basename($filepath), 0, -4);
+            $owner = OCM_SQL_Utils::table_set_prefix_for($table, $prefixes);
+            if ($owner === null || $owner === $source) {
+                continue;
+            }
+            if (strcasecmp($table, $owner . 'usermeta') === 0) {
+                $last[] = $filepath;
+                continue;
+            }
+            if (@unlink($filepath)) {
+                $deleted++;
+            }
+        }
+        foreach ($last as $filepath) {
+            if (@unlink($filepath)) {
+                $deleted++;
+            }
+        }
+
+        One_Click_Migration::write_to_log(sprintf(
+            'Notice: The backup\'s database also holds the tables of %d other WordPress site(s) (table prefixes: %s). Only this site\'s tables (prefix "%s") will be restored.',
+            count($others),
+            implode(', ', $others),
+            $source
+        ));
+        One_Click_Migration::write_to_log(sprintf(
+            ' SYSLOG: Source table set "%s" chosen by %s; removed %d dump(s) of other sets.',
+            $source,
+            $resolved['how'],
+            $deleted
+        ));
     }
 
     /**
@@ -6777,7 +7118,9 @@ class OCM_Backup
         // are already rewritten for its staging prefix.
         $state = self::db_import_state();
 
-        // Detect source table prefix from backup SQL filenames (via usermeta.sql).
+        // Detect source table prefix from backup SQL filenames (via usermeta.sql),
+        // once other installs' table sets are gone (normally done at the gate).
+        self::keep_only_source_table_set();
         $source_prefix = is_dir($dbfiles)
             ? OCM_SQL_Utils::get_table_prefix($dbfiles . 'dummy.sql')
             : false;
@@ -7985,6 +8328,9 @@ class OCM_Backup
     }
 
     public static function delete_backup_options(){
+      // A zip left running by the previous backup would keep writing into its
+      // work dir; stop it before this run starts.
+      self::stop_zip_failover_job();
       delete_option(self::BACKUP_CRASH_OPTION);
       delete_option(self::BACKUP_RESUME_OPTION);
       // Clean up transient backup state from previous runs.

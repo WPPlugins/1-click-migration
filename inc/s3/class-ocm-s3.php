@@ -12,6 +12,7 @@ class OCM_S3
     const REDEEM_CODE_ENDPOINT     = 'https://jbcfmgdzm6.execute-api.us-east-1.amazonaws.com/default/generateOCMDownloadLink';
     const MULTIPART_THRESHOLD = 8388608;
     const MULTIPART_CHUNK_SIZE = 8388608;
+    const MULTIPART_MAX_PARTS = 10000;
     const MAX_UPLOAD_RETRIES = 24;
 
     /**
@@ -188,6 +189,21 @@ class OCM_S3
         return is_object($decoded) ? $decoded : false;
     }
 
+    /**
+     * Part size for a multipart upload: 8 MiB, raised in whole MiB for
+     * archives that would otherwise need more than S3's 10,000 parts
+     * (8 MiB parts stop at 80 GiB).
+     *
+     * @param int $file_size
+     * @return int
+     */
+    public static function multipart_chunk_size($file_size)
+    {
+        $mib = 1048576;
+        $needed = (int) ceil(((float) $file_size / self::MULTIPART_MAX_PARTS) / $mib) * $mib;
+        return max(self::MULTIPART_CHUNK_SIZE, $needed);
+    }
+
     private static function upload_zip_multipart($zip_file, $folder_type)
     {
         if (!function_exists('curl_init')) {
@@ -223,15 +239,18 @@ class OCM_S3
             }
 
             $state = [
-                'upload_id' => $init->upload_id,
-                'parts'     => [],
+                'upload_id'  => $init->upload_id,
+                'parts'      => [],
+                'chunk_size' => self::multipart_chunk_size($file_size),
             ];
             update_option($state_option, $state, true);
         }
 
         $upload_id = $state['upload_id'];
         $parts = isset($state['parts']) && is_array($state['parts']) ? $state['parts'] : [];
-        $total_parts = (int) ceil($file_size / self::MULTIPART_CHUNK_SIZE);
+        // An upload begun before chunk_size was stored used the fixed size.
+        $chunk_size = !empty($state['chunk_size']) ? (int) $state['chunk_size'] : self::MULTIPART_CHUNK_SIZE;
+        $total_parts = (int) ceil($file_size / $chunk_size);
 
         $process = One_Click_Migration::$process_backup_single;
         $can_hand_over = is_object($process)
@@ -267,8 +286,8 @@ class OCM_S3
                 return false;
             }
 
-            $offset = ($part_number - 1) * self::MULTIPART_CHUNK_SIZE;
-            $part_size = min(self::MULTIPART_CHUNK_SIZE, $file_size - $offset);
+            $offset = ($part_number - 1) * $chunk_size;
+            $part_size = min($chunk_size, $file_size - $offset);
             $etag = self::upload_multipart_part($zip_file, $presign->url, $offset, $part_size);
             if (!$etag) {
                 $retry_count = get_option('ocm_backup_upload_retry_' . $folder_type, 1);

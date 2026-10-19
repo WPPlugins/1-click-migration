@@ -4,7 +4,7 @@
  * Plugin Name: 1 Click Migration
  * Plugin URI: https://wordpress.org/plugins/1-click-migration/
  * Description: Migrate, copy, or clone your entire site with 1 click. <strong>Any host, no size limitation, no premium versions.</strong>
- * Version: 3.1.33
+ * Version: 3.1.34
  * Requires at least: 5.3
  * Requires PHP: 7.4
  * Author: 1ClickMigration
@@ -412,6 +412,7 @@ class One_Click_Migration
       delete_option('ocm_user_email');
       delete_option('ocm_user_password');
       delete_option('ocm_is_stopped');
+      delete_option('ocm_zip_failover_job');
       delete_option('ocm_action_start_backup');
       delete_option('ocm_action_start_restore');
       delete_option('backup_steps');
@@ -1123,6 +1124,10 @@ PHP;
             self::$process_restore_single->cancel_all_process();
             self::$process_restore_single->cancel_scheduled_event();
         }
+
+        // A backup's system zip can outlive its worker and would keep writing
+        // into the work dir deleted below; stop it while its record exists.
+        OCM_Backup::stop_zip_failover_job();
 
         // Delete all options and batch data
         self::delete_options();

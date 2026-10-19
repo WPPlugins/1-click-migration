@@ -4,7 +4,7 @@ Tags: backup, migrate, migration, restore, clone
 Requires at least: 5.3
 Tested up to: 7.1
 Requires PHP: 7.4
-Stable tag: 3.1.33
+Stable tag: 3.1.34
 Author URI: https://1clickmigration.com
 License: GPLv3 or later
 License URI: http://www.gnu.org/licenses/gpl-3.0.html
@@ -113,6 +113,10 @@ Any host that runs WordPress on PHP 7.4 or later, including Bluehost, SiteGround
 4. Enter the restore code on the destination site to finish your WordPress migration.
 
 == Changelog ==
+= 3.1.34 =
+* **Restores from a shared database**: If the old site's database also holds the tables of another WordPress site, such as a staging copy or a second install, the restore now brings over only your site's tables instead of stopping. If it can't tell which tables are yours, it stops before changing anything and says what to do.
+* **Very large folders**: When the host keeps stopping a backup while it packs a big folder, the backup now waits for the packing already under way instead of starting it over, which could fill the disk. If it still can't finish, it explains how to make the folder smaller. Folders larger than 80 GB can now be uploaded.
+
 = 3.1.33 =
 * **Clearer guidance**: Starting a backup while another one runs now says so instead of waiting silently. If you get logged out during a restore, the page tells you before it reloads, and the logout tip now appears at the step where it happens. The restore-code reminder stays on the page after you reload it. If restored files can't be put in place, the page explains that the site stays in maintenance mode on purpose and how to leave it. The downloaded log starts with a short note on sharing it safely.
 
@@ -179,6 +183,9 @@ Any host that runs WordPress on PHP 7.4 or later, including Bluehost, SiteGround
 Older versions are listed in [changelog.txt](https://plugins.trac.wordpress.org/browser/1-click-migration/trunk/changelog.txt).
 
 == Upgrade Notice ==
+
+= 3.1.34 =
+Restores now handle a database shared with another WordPress site, and backups of very large folders no longer start over each time the host stops them. Includes all 3.1.33 changes.
 
 = 3.1.33 =
 Clearer messages when a backup can't start, when you're logged out during a restore, and after a folder permission problem. Includes all 3.1.32 changes.
