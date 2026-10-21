@@ -4,7 +4,7 @@ Tags: backup, migrate, migration, restore, clone
 Requires at least: 5.3
 Tested up to: 7.1
 Requires PHP: 7.4
-Stable tag: 3.1.35
+Stable tag: 3.2.0
 Author URI: https://1clickmigration.com
 License: GPLv3 or later
 License URI: http://www.gnu.org/licenses/gpl-3.0.html
@@ -113,6 +113,9 @@ Any host that runs WordPress on PHP 7.4 or later, including Bluehost, SiteGround
 4. Enter the restore code on the destination site to finish your WordPress migration.
 
 == Changelog ==
+= 3.2.0 =
+* **PHP 8.4 and 8.5**: The plugin no longer adds "Deprecated" notices to your error log, or to your pages when your site shows PHP errors. Its built-in libraries are updated to current versions, including security fixes in the library that encrypts your backups. Backups made with earlier versions still restore.
+
 = 3.1.35 =
 * **Slow connections**: A restore on a slow connection could sit on one download for up to 20 minutes until the host stopped it, or stop with "Restore failed while downloading" after a short pause in the connection. Downloads now pass the work on in short steps, a pause is simply tried again, and a slow download that keeps moving is no longer given up on after a set number of attempts.
 
@@ -186,6 +189,9 @@ Any host that runs WordPress on PHP 7.4 or later, including Bluehost, SiteGround
 Older versions are listed in [changelog.txt](https://plugins.trac.wordpress.org/browser/1-click-migration/trunk/changelog.txt).
 
 == Upgrade Notice ==
+
+= 3.2.0 =
+No more "Deprecated" notices on PHP 8.4 and 8.5, and security fixes in the library that encrypts your backups. Includes all 3.1.35 changes.
 
 = 3.1.35 =
 Restores on slow connections no longer stall on a single download for up to 20 minutes or stop after a short pause in the connection. Includes all 3.1.34 changes.

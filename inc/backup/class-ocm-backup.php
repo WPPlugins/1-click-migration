@@ -7,9 +7,6 @@ use phpseclib\Crypt\Rijndael;
 use PhpZip\Constants\ZipCompressionMethod;
 use PhpZip\Exception\ZipException;
 use PhpZip\ZipFile;
-use RecursiveDirectoryIterator;
-use RecursiveIteratorIterator;
-use Symfony\Component\Finder\SplFileInfo;
 use WP_Error;
 use wpdb;
 use ZipArchive;
@@ -2262,21 +2259,11 @@ class OCM_Backup
                         self::fail_backup(sprintf('archive creation failed for "%s" (see previous error line)', $folder_name));
                         return OCM_BackgroundBackup::RETURN_TYPE_END_PROCESSS;
                     }
-                    /** @var SplFileInfo[] $files */
-                    $files = new RecursiveIteratorIterator(
-                        new RecursiveDirectoryIterator($folder_path, \FilesystemIterator::SKIP_DOTS),
-                        RecursiveIteratorIterator::LEAVES_ONLY
-                    );
-
-                    foreach ($files as $name => $file) {
-                        if (!$file->isDir()) {
-                            $filePath = $file->getRealPath();
-                            if (!$filePath || !is_readable($filePath)) {
-                                continue;
-                            }
-                            $relativePath = str_replace('\\', '/', substr($filePath, strlen($folder_path) + 1));
-                            $zip->addFile($filePath, $relativePath, ZipCompressionMethod::STORED);
+                    foreach (self::folder_archive_files($folder_path) as $relativePath => $filePath) {
+                        if (!is_readable($filePath)) {
+                            continue;
                         }
+                        $zip->addFile($filePath, $relativePath, ZipCompressionMethod::STORED);
                     }
 
                     $zip->saveAsFile($filename);
@@ -2782,27 +2769,15 @@ class OCM_Backup
             return false;
         }
 
-        $base_length = strlen(rtrim($folder_path, '/\\')) + 1;
-        $files = new RecursiveIteratorIterator(
-            new RecursiveDirectoryIterator($folder_path, \FilesystemIterator::SKIP_DOTS),
-            RecursiveIteratorIterator::LEAVES_ONLY
-        );
-
         $queued_files = 0;
         $queued_bytes = 0;
         $last_tick = time();
 
-        foreach ($files as $file) {
-            if ($file->isDir()) {
+        foreach (self::folder_archive_files($folder_path) as $relative_path => $file_path) {
+            if (!is_readable($file_path)) {
                 continue;
             }
 
-            $file_path = $file->getRealPath();
-            if (!$file_path || !is_readable($file_path)) {
-                continue;
-            }
-
-            $relative_path = str_replace('\\', '/', substr($file_path, $base_length));
             if (!$zip->addFile($file_path, $relative_path)) {
                 $zip->close();
                 @unlink($filename);
@@ -3277,16 +3252,82 @@ class OCM_Backup
         if (!is_dir($folder_path)) {
             return false;
         }
-        $files = new RecursiveIteratorIterator(
-            new RecursiveDirectoryIterator($folder_path, \FilesystemIterator::SKIP_DOTS),
-            RecursiveIteratorIterator::LEAVES_ONLY
-        );
-        foreach ($files as $file) {
-            if ($file->isFile()) {
-                return true;
-            }
+        foreach (self::folder_archive_files($folder_path) as $file_path) {
+            return true;
         }
         return false;
+    }
+
+    /**
+     * The files a folder part packs, as entry name => real path to read.
+     *
+     * Entry names are the paths as walked, relative to $folder_path, never
+     * cut from realpath(): wp-content, or a folder or file in it, may be
+     * reached through a symlink (Bitnami links wp-content to another path,
+     * themes and plugins are often linked in from elsewhere), so a real path
+     * need not start with $folder_path at all.
+     *
+     * Symlinks are followed, as system zip follows them, so the archive holds
+     * the files themselves and the restore extracts plain files. (PhpZip
+     * would store a link it is given as a link, hence the real path.) A
+     * directory link to a directory the walk is already inside, or to one
+     * containing it, is skipped: it would only pack the same files again, or
+     * never end. Dangling links are skipped, and so are subfolders that
+     * cannot be opened, as system zip skips them; the part folder itself
+     * throws UnexpectedValueException instead, so it never looks empty.
+     * Readability of the files themselves is left to the caller.
+     *
+     * @param string   $dir
+     * @param string   $prefix    entry name of $dir plus "/", '' for the part folder
+     * @param string[] $ancestors real paths (with a trailing "/") of the directories being walked
+     * @return \Generator
+     */
+    private static function folder_archive_files($dir, $prefix = '', array $ancestors = array())
+    {
+        try {
+            $entries = new \FilesystemIterator($dir, \FilesystemIterator::SKIP_DOTS);
+        } catch (\UnexpectedValueException $e) {
+            if ('' === $prefix) {
+                throw $e;
+            }
+            return;
+        }
+        $real = realpath($dir);
+        $ancestors[] = rtrim(str_replace('\\', '/', false === $real ? $dir : $real), '/') . '/';
+
+        foreach ($entries as $entry) {
+            $path = $entry->getPathname();
+            $name = $prefix . $entry->getFilename();
+            if ($entry->isDir()) {
+                if ($entry->isLink() && !self::can_follow_directory_link($path, $ancestors)) {
+                    continue;
+                }
+                yield from self::folder_archive_files($path, $name . '/', $ancestors);
+            } elseif ($entry->isFile()) {
+                $real_path = $entry->getRealPath();
+                yield $name => (false === $real_path ? $path : $real_path);
+            }
+        }
+    }
+
+    /**
+     * @param string   $path      a symlink to a directory
+     * @param string[] $ancestors see folder_archive_files()
+     * @return bool
+     */
+    private static function can_follow_directory_link($path, array $ancestors)
+    {
+        $target = realpath($path);
+        if (false === $target) {
+            return false;
+        }
+        $target = rtrim(str_replace('\\', '/', $target), '/') . '/';
+        foreach ($ancestors as $ancestor) {
+            if (0 === strpos($ancestor, $target)) {
+                return false;
+            }
+        }
+        return true;
     }
 
     /**
@@ -4168,11 +4209,19 @@ class OCM_Backup
         return $return;
     }
 
+    /** Bytes a folder part packs (same walk as the archive, so link loops end). */
     private static function folderSize($dir)
     {
         $size = 0;
-        foreach (glob(rtrim($dir, '/') . '/*', GLOB_NOSORT) as $each) {
-            $size += is_file($each) ? filesize($each) : self::folderSize($each);
+        if (!is_dir($dir)) {
+            return $size;
+        }
+        try {
+            foreach (self::folder_archive_files($dir) as $file_path) {
+                $size += (int) @filesize($file_path);
+            }
+        } catch (\UnexpectedValueException $e) {
+            // The folder itself can't be opened; packing it reports that.
         }
         return $size;
     }
