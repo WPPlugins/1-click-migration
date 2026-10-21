@@ -96,6 +96,13 @@ class OCM_Backup
     const LOG_MESSAGE_BG_PROCESS_RESTARTING_LOG = 'Notice: Please wait. This is taking longer than expected but we are still making progress';
     const MAX_STEP_RETRIES = 4;
     const MAX_TRANSFER_RETRIES = 24;
+    /**
+     * curl errors that end a download step without saying anything about the
+     * file: the next worker tries again (one of MAX_TRANSFER_RETRIES) instead
+     * of failing the restore. 6 resolve, 7 connect, 18 partial file,
+     * 28 timeout, 35 TLS handshake, 52 empty reply, 55 send, 56 receive.
+     */
+    const TRANSIENT_TRANSFER_ERRNOS = array(6, 7, 18, 28, 35, 52, 55, 56);
 
     /** Where the UI sends users who need help (the WordPress.org forum is public). */
     const SUPPORT_FORUM_URL = 'https://wordpress.org/support/plugin/1-click-migration/';
@@ -1181,7 +1188,9 @@ class OCM_Backup
                         continue;
                       }
 
-                      if ($downloadTmpPathFile->get_error_code() === 'ocm_partial_download') {
+                      // The next worker continues or retries the download; a
+                      // stalled step counts toward MAX_TRANSFER_RETRIES.
+                      if (in_array($downloadTmpPathFile->get_error_code(), array('ocm_partial_download', 'ocm_transfer_stalled'), true)) {
                         One_Click_Migration::write_to_log($error_message);
                         One_Click_Migration::write_to_log("Process is Restarting");
                         One_Click_Migration::$process_restore_single->restart_task();
@@ -5014,15 +5023,28 @@ class OCM_Backup
     private static function get_restore_transfer_timeout()
     {
         $timeout = max(20, One_Click_Migration::get_timeout());
-        if (is_object(One_Click_Migration::$process_restore_single)
-            && method_exists(One_Click_Migration::$process_restore_single, 'remaining_time')) {
-            $remaining = (int) One_Click_Migration::$process_restore_single->remaining_time();
-            if ($remaining > 10) {
-                $timeout = max(10, min($timeout, $remaining - 5));
-            }
+        $process = One_Click_Migration::$process_restore_single;
+        // Inside a worker, stay within what is left of its budget, however
+        // little: a worker that had spent 12 s redeeming the code fell back to
+        // the full max_execution_time, so one slow download ran for 20 minutes
+        // and, on Windows (wall-clock time limit), PHP killed the worker first.
+        // A partial download is kept and the next worker resumes it.
+        if (is_object($process) && method_exists($process, 'has_batch_clock') && $process->has_batch_clock()) {
+            $timeout = max(10, min($timeout, (int) $process->remaining_time() - 5));
         }
 
         return $timeout;
+    }
+
+    /**
+     * The download moved forward, so the next worker continues it rather than
+     * retrying it: like a stored multipart upload part, the retry limit counts
+     * workers since the last saved bytes, and a slow connection over many short
+     * workers never gets the part skipped.
+     */
+    private static function reset_restore_download_retries($key)
+    {
+        update_option('ocm_restore_download_retry_' . $key, 0, true);
     }
 
     private static function download_restore_file($url, $target_path, $key)
@@ -5191,11 +5213,26 @@ class OCM_Backup
         }
         if (!$ok || $errno !== 0) {
             if ($downloaded > $before) {
+                self::reset_restore_download_retries($key);
                 return new WP_Error('ocm_partial_download', sprintf(
                     'Partial download saved for "%s.zip.crypt" (%s downloaded%s).',
                     $key,
                     self::convertToReadableSize($downloaded),
                     $expected_size > 0 ? ' of ' . self::convertToReadableSize($expected_size) : ''
+                ));
+            }
+            // A step that got no bytes before its short timeout (or lost the
+            // connection) says nothing about the file; failing the whole
+            // restore over it stopped one on a slow connection.
+            if (in_array($errno, self::TRANSIENT_TRANSFER_ERRNOS, true)) {
+                One_Click_Migration::write_to_log(sprintf(
+                    ' SYSLOG: Download of "%s.zip.crypt" got no data this step: %s',
+                    $key,
+                    $error
+                ));
+                return new WP_Error('ocm_transfer_stalled', sprintf(
+                    'No data arrived for "%s.zip.crypt" in this step; trying again.',
+                    $key
                 ));
             }
 
@@ -5207,6 +5244,9 @@ class OCM_Backup
         }
 
         if ($expected_size > 0 && $downloaded < $expected_size) {
+            if ($downloaded > $before) {
+                self::reset_restore_download_retries($key);
+            }
             return new WP_Error('ocm_partial_download', sprintf(
                 'Partial download saved for "%s.zip.crypt" (%s downloaded of %s).',
                 $key,

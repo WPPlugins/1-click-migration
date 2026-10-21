@@ -4,7 +4,7 @@ Tags: backup, migrate, migration, restore, clone
 Requires at least: 5.3
 Tested up to: 7.1
 Requires PHP: 7.4
-Stable tag: 3.1.34
+Stable tag: 3.1.35
 Author URI: https://1clickmigration.com
 License: GPLv3 or later
 License URI: http://www.gnu.org/licenses/gpl-3.0.html
@@ -113,6 +113,9 @@ Any host that runs WordPress on PHP 7.4 or later, including Bluehost, SiteGround
 4. Enter the restore code on the destination site to finish your WordPress migration.
 
 == Changelog ==
+= 3.1.35 =
+* **Slow connections**: A restore on a slow connection could sit on one download for up to 20 minutes until the host stopped it, or stop with "Restore failed while downloading" after a short pause in the connection. Downloads now pass the work on in short steps, a pause is simply tried again, and a slow download that keeps moving is no longer given up on after a set number of attempts.
+
 = 3.1.34 =
 * **Restores from a shared database**: If the old site's database also holds the tables of another WordPress site, such as a staging copy or a second install, the restore now brings over only your site's tables instead of stopping. If it can't tell which tables are yours, it stops before changing anything and says what to do.
 * **Very large folders**: When the host keeps stopping a backup while it packs a big folder, the backup now waits for the packing already under way instead of starting it over, which could fill the disk. If it still can't finish, it explains how to make the folder smaller. Folders larger than 80 GB can now be uploaded.
@@ -183,6 +186,9 @@ Any host that runs WordPress on PHP 7.4 or later, including Bluehost, SiteGround
 Older versions are listed in [changelog.txt](https://plugins.trac.wordpress.org/browser/1-click-migration/trunk/changelog.txt).
 
 == Upgrade Notice ==
+
+= 3.1.35 =
+Restores on slow connections no longer stall on a single download for up to 20 minutes or stop after a short pause in the connection. Includes all 3.1.34 changes.
 
 = 3.1.34 =
 Restores now handle a database shared with another WordPress site, and backups of very large folders no longer start over each time the host stops them. Includes all 3.1.33 changes.

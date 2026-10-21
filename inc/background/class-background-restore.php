@@ -496,6 +496,18 @@ class OCM_BackgroundRestore extends WP_Background_Process
         return $finish - time();
     }
 
+    /**
+     * Whether this request is running a worker: handle() starts the batch
+     * clock (lock_process()), so start_time stays 0 everywhere else and
+     * remaining_time() means nothing there.
+     *
+     * @return bool
+     */
+    public function has_batch_clock()
+    {
+        return (int) $this->start_time > 0;
+    }
+
     public function restart_task()
     {
         $this->unlock_process();
