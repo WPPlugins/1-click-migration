@@ -4,7 +4,7 @@ Tags: backup, migrate, migration, restore, clone
 Requires at least: 5.3
 Tested up to: 7.1
 Requires PHP: 7.4
-Stable tag: 3.2.0
+Stable tag: 3.2.2
 Author URI: https://1clickmigration.com
 License: GPLv3 or later
 License URI: http://www.gnu.org/licenses/gpl-3.0.html
@@ -113,6 +113,14 @@ Any host that runs WordPress on PHP 7.4 or later, including Bluehost, SiteGround
 4. Enter the restore code on the destination site to finish your WordPress migration.
 
 == Changelog ==
+= 3.2.2 =
+* **Interrupted restores**: When a restore picks up again after being interrupted just as a part of your backup finished downloading, it now keeps that download instead of fetching the same part again, so the restore finishes sooner.
+
+= 3.2.1 =
+* **Short service hiccups**: Starting a backup, uploading it, emailing the restore code and checking a restore code now try again on their own when the 1-Click Migration service is briefly busy or a connection drops, instead of stopping.
+* **Large uploads**: If uploading a large backup in parts runs into a problem, the backup now picks up the upload where it left off instead of trying to send the whole file again in one go, which could never work for files over 5 GB.
+* **Clearer restore message**: When the restore-code service is busy or can't be reached, the Restore tab now says so and that your backup is safe, instead of saying no backup was found for your code.
+
 = 3.2.0 =
 * **PHP 8.4 and 8.5**: The plugin no longer adds "Deprecated" notices to your error log, or to your pages when your site shows PHP errors. Its built-in libraries are updated to current versions, including security fixes in the library that encrypts your backups. Backups made with earlier versions still restore.
 
@@ -189,6 +197,12 @@ Any host that runs WordPress on PHP 7.4 or later, including Bluehost, SiteGround
 Older versions are listed in [changelog.txt](https://plugins.trac.wordpress.org/browser/1-click-migration/trunk/changelog.txt).
 
 == Upgrade Notice ==
+
+= 3.2.2 =
+An interrupted restore keeps a part that had already finished downloading instead of downloading it again. Includes all 3.2.1 changes.
+
+= 3.2.1 =
+Backups and restores ride out short service hiccups, large uploads resume in parts, and a busy service is no longer reported as a wrong restore code. Includes all 3.2.0 changes.
 
 = 3.2.0 =
 No more "Deprecated" notices on PHP 8.4 and 8.5, and security fixes in the library that encrypts your backups. Includes all 3.1.35 changes.

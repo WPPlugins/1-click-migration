@@ -545,22 +545,16 @@ class OCM_Backup
 
         // Register backup with Lambda → MySQL gateway. Lambda generates bucket_id,
         // restore code, and AES key. The restore code is emailed only after all
-        // selected backup parts have finished uploading.
+        // selected backup parts have finished uploading. register_backup()
+        // retries the failures that pass by themselves (no answer, 5xx, 429).
         $site_url = get_site_url();
-        $registration = OCM_S3::register_backup($username, $site_url);
-
-        $retry_count = 0;
-        $max_retries = 3;
-        while (!$registration && $retry_count < $max_retries) {
-            $retry_count++;
-            One_Click_Migration::write_to_log("Retrying backup registration (attempt $retry_count/$max_retries)...");
-            sleep(2);
-            $registration = OCM_S3::register_backup($username, $site_url);
-        }
+        $register_attempts = 0;
+        $registration = OCM_S3::register_backup($username, $site_url, $register_attempts);
 
         if (!$registration) {
-            One_Click_Migration::write_to_log('Error: Could not register backup after ' . ($retry_count + 1) . ' attempts');
-            self::fail_backup('could not register backup after ' . ($retry_count + 1) . ' attempts');
+            $attempts_text = $register_attempts . (1 === $register_attempts ? ' attempt' : ' attempts');
+            One_Click_Migration::write_to_log('Error: Could not register backup after ' . $attempts_text);
+            self::fail_backup('could not register backup after ' . $attempts_text);
             wp_safe_redirect(admin_url('tools.php?page=one-click-migration&message=endpoint_failure'));
             exit;
         }
@@ -961,7 +955,9 @@ class OCM_Backup
                 One_Click_Migration::reset_actions_start_mark();
                 update_option('ocm_is_stopped', true, true);
                 self::end_restore_run();
-                wp_safe_redirect(admin_url('tools.php?page=one-click-migration&message=invalid_restore_code'));
+                $message = OCM_Restore_Precheck::lookup_unavailable($status, $has_error ? $redeem->error : '')
+                    ? 'service_busy' : 'invalid_restore_code';
+                wp_safe_redirect(admin_url('tools.php?page=one-click-migration&message=' . $message));
                 exit;
             }
 
@@ -5069,6 +5065,46 @@ class OCM_Backup
         return ($length !== '' && is_numeric($length)) ? (int) $length : 0;
     }
 
+    /**
+     * The real size of a file whose range request got 416, or 0 if unknown.
+     * S3 sends no Content-Range with a 416 and puts the size in its XML
+     * error body instead (<ActualObjectSize>). Failing both, a one-byte
+     * range GET asks for it: presigned GET URLs refuse HEAD.
+     *
+     * @param string $url
+     * @param string $content_range The 416's Content-Range header, if any.
+     * @param string $error_body    The start of the 416's body.
+     * @return int
+     */
+    private static function range_not_satisfiable_size($url, $content_range, $error_body)
+    {
+        if (preg_match('#^bytes \*/(\d+)$#i', $content_range, $m)) {
+            return (int) $m[1];
+        }
+        if (preg_match('#<ActualObjectSize>(\d+)</ActualObjectSize>#', $error_body, $m)) {
+            return (int) $m[1];
+        }
+
+        $content_range = '';
+        $ch = curl_init($url);
+        curl_setopt($ch, CURLOPT_RANGE, '0-0');
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+        curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true);
+        curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 10);
+        curl_setopt($ch, CURLOPT_TIMEOUT, 15);
+        curl_setopt($ch, CURLOPT_HEADERFUNCTION, static function ($curl, $header) use (&$content_range) {
+            if (0 === stripos($header, 'Content-Range:')) {
+                $content_range = trim(substr($header, strlen('Content-Range:')));
+            }
+            return strlen($header);
+        });
+        curl_exec($ch);
+        $http_code = (int) curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
+        unset($ch);
+
+        return ($http_code === 206 && preg_match('#^bytes 0-0/(\d+)$#i', $content_range, $m)) ? (int) $m[1] : 0;
+    }
+
     private static function get_restore_transfer_timeout()
     {
         $timeout = max(20, One_Click_Migration::get_timeout());
@@ -5172,7 +5208,7 @@ class OCM_Backup
         if ($offset > 0) {
             curl_setopt($ch, CURLOPT_RANGE, $offset . '-');
         }
-        // A 416 answer to the range request names the file's real size.
+        // Most servers name the file's real size in a 416's Content-Range.
         $content_range = '';
         curl_setopt($ch, CURLOPT_HEADERFUNCTION, static function ($curl, $header) use (&$content_range) {
             if (0 === stripos($header, 'Content-Range:')) {
@@ -5197,6 +5233,13 @@ class OCM_Backup
         // Release the handle (and its hold on the .part file) before fclose();
         // curl_close() is a no-op since 8.0 and deprecated in 8.5.
         unset($ch);
+        $error_body = '';
+        if ($http_code === 416) {
+            // S3 names the real size only in this body (#134); read it before
+            // the truncate below drops it.
+            fflush($handle);
+            $error_body = (string) @file_get_contents($partial_path, false, null, $before, 4096);
+        }
         if ($http_code >= 300) {
             // CURLOPT_FILE also wrote the error response's body (S3's XML):
             // keep it out of the saved part, or the next resume continues
@@ -5215,7 +5258,7 @@ class OCM_Backup
         // file and stopped before finalizing it (the HEAD size check can't see
         // presigned GET URLs, so $expected_size is often 0).
         if ($http_code === 416 && $offset > 0) {
-            if (preg_match('#^bytes \*/(\d+)$#i', $content_range, $range) && (int) $range[1] === $offset) {
+            if (self::range_not_satisfiable_size($url, $content_range, $error_body) === $offset) {
                 if (@rename($partial_path, $target_path)) {
                     return $target_path;
                 }
@@ -5385,16 +5428,11 @@ class OCM_Backup
         // read the URL inventory and BACKUP_PARTS lines from the S3 log.
         One_Click_Migration::flush_log_upload();
 
-        for ($attempt = 1; $attempt <= 3; $attempt++) {
-            if (OCM_S3::send_restore_code_email($email, $bucket_id, $restore_code, get_site_url(), $missing_parts)) {
-                delete_option('ocm_restore_code_plain');
-                return true;
-            }
-
-            if ($attempt < 3) {
-                One_Click_Migration::write_to_log("Retrying restore-code email (attempt $attempt/3)...");
-                sleep(2);
-            }
+        // OCM_S3 retries no answer, a 5xx or a 429 itself. It never repeats
+        // a request that got a 200, which could email the code twice.
+        if (OCM_S3::send_restore_code_email($email, $bucket_id, $restore_code, get_site_url(), $missing_parts)) {
+            delete_option('ocm_restore_code_plain');
+            return true;
         }
 
         One_Click_Migration::write_to_log('Error: Backup finished but the restore-code email could not be sent. Please run the backup again.');
@@ -6037,6 +6075,14 @@ class OCM_Backup
                 __('Notice: %s took longer than the server allows and was skipped.', '1-click-migration'),
                 self::part_label($m[1])
             ));
+        }
+        // Not "status=429 error=malformed_response": a busy service must not
+        // read as a lost backup. "Error: " stays English so admin-script.js
+        // still shows it as an error.
+        if (preg_match('/Error: Restore code lookup failed \(status=(\d+) error=(\S*)/', $line, $m)) {
+            return 'Error: ' . esc_html(OCM_Restore_Precheck::lookup_unavailable((int) $m[1], $m[2])
+                ? OCM_Restore_Precheck::service_busy_message()
+                : OCM_Restore_Precheck::code_not_found_message());
         }
         if (0 === strpos($line, 'Error: Restore could not start because a previous restore worker still holds its lock')) {
             return esc_html__('A restore is already running on this site. Wait for it to finish, or click Stop & Reset to cancel it, then start again.', '1-click-migration');

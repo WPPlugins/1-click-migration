@@ -14,27 +14,43 @@ class OCM_S3
     const MULTIPART_CHUNK_SIZE = 8388608;
     const MULTIPART_MAX_PARTS = 10000;
     const MAX_UPLOAD_RETRIES = 24;
+    const REGISTER_MAX_ATTEMPTS = 4;
+    /** Longest wait a 429's Retry-After can ask for: the call runs inside a worker or a page load. */
+    const RETRY_AFTER_MAX_SECONDS = 10;
 
     /**
      * Register a new backup with the Lambda. Server generates bucket_id, restore code,
      * and AES key; returns presigned PUT URLs + AES key to the plugin (which uses the
      * key to encrypt the zips locally). The code is emailed after uploads complete.
      *
+     * A retried registration can leave an unused bucket behind; the nightly
+     * cleanup deletes it with the other expired ones.
+     *
+     * @param int $attempts Set to the number of requests made.
      * @return object|false Decoded JSON response with ->bucket_id, ->aes_key_b64, ->urls, or false.
      */
-    public static function register_backup($email, $site_url)
+    public static function register_backup($email, $site_url, &$attempts = 0)
     {
         $payload = ['email' => $email, 'site_url' => $site_url];
 
         One_Click_Migration::write_to_log('Registering backup');
 
-        $response = wp_remote_post(self::REGISTER_BACKUP_ENDPOINT, [
+        $response = self::post_with_retry(self::REGISTER_BACKUP_ENDPOINT, [
             'headers'     => ['Content-Type' => 'application/json; charset=utf-8'],
             'body'        => wp_json_encode($payload),
             'method'      => 'POST',
             'data_format' => 'body',
             'timeout'     => 30,
-        ]);
+        ], self::REGISTER_MAX_ATTEMPTS, 2, function ($next_attempt, $max_attempts, $reason) {
+            // "attempt N/M" counts retries: the progress card's plain-language
+            // wording (OCM_Backup::plain_language_status()) adds one to each.
+            One_Click_Migration::write_to_log(sprintf(
+                'Retrying backup registration (attempt %d/%d): %s',
+                $next_attempt - 1,
+                $max_attempts - 1,
+                $reason
+            ));
+        }, $attempts);
 
         if (is_wp_error($response)) {
             One_Click_Migration::write_to_log('Error: register_backup WP_Error: ' . $response->get_error_message());
@@ -63,6 +79,10 @@ class OCM_S3
      * the gateway row ready before sending so restore lookup cannot start from a
      * partial backup.
      *
+     * Marking ready is idempotent, so a request that got no answer, a 5xx or
+     * a 429 is sent again. Any other answer is final: once a 200 came back,
+     * another request could only send the email twice.
+     *
      * @return bool
      */
     public static function send_restore_code_email($email, $bucket_id, $code, $site_url, $missing_parts = array())
@@ -79,13 +99,20 @@ class OCM_S3
             $payload['missing_parts'] = array_values($missing_parts);
         }
 
-        $response = wp_remote_post(self::REGISTER_BACKUP_ENDPOINT, [
+        $response = self::post_with_retry(self::REGISTER_BACKUP_ENDPOINT, [
             'headers'     => ['Content-Type' => 'application/json; charset=utf-8'],
             'body'        => wp_json_encode($payload),
             'method'      => 'POST',
             'data_format' => 'body',
             'timeout'     => 30,
-        ]);
+        ], 3, 2, function ($next_attempt, $max_attempts, $reason) {
+            One_Click_Migration::write_to_log(sprintf(
+                'Retrying restore-code email (attempt %d/%d): %s',
+                $next_attempt,
+                $max_attempts,
+                $reason
+            ));
+        });
 
         if (is_wp_error($response)) {
             One_Click_Migration::write_to_log('Error: send_restore_code_email WP_Error: ' . $response->get_error_message());
@@ -119,21 +146,14 @@ class OCM_S3
             'timeout'     => 30,
         ];
 
-        $response = null;
-        for ($attempt = 1; $attempt <= 3; $attempt++) {
-            $response = wp_remote_post(self::REDEEM_CODE_ENDPOINT, $args);
-            if (!is_wp_error($response) && (int) wp_remote_retrieve_response_code($response) < 500) {
-                break;
-            }
-
-            if ($attempt < 3) {
-                One_Click_Migration::write_to_log(sprintf(
-                    'Restore code lookup got transient error, retrying (attempt %d/3)...',
-                    $attempt + 1
-                ));
-                sleep($attempt * 2);
-            }
-        }
+        $response = self::post_with_retry(self::REDEEM_CODE_ENDPOINT, $args, 3, 2, function ($next_attempt, $max_attempts, $reason) {
+            One_Click_Migration::write_to_log(sprintf(
+                'Restore code lookup got transient error, retrying (attempt %d/%d): %s',
+                $next_attempt,
+                $max_attempts,
+                $reason
+            ));
+        });
 
         if (is_wp_error($response)) {
             return (object) ['error' => 'network', 'message' => $response->get_error_message()];
@@ -160,18 +180,17 @@ class OCM_S3
             'timeout'     => $timeout,
         ];
 
-        $attempt = 0;
-        do {
-            $attempt++;
-            $response = wp_remote_post(self::REGISTER_BACKUP_ENDPOINT, $args);
-            if (!is_wp_error($response) && (int) wp_remote_retrieve_response_code($response) < 500) {
-                break;
-            }
-
-            if ($attempt < $max_attempts) {
-                sleep($attempt);
-            }
-        } while ($attempt < $max_attempts);
+        $action = $payload['action'] ?? '';
+        $response = self::post_with_retry(self::REGISTER_BACKUP_ENDPOINT, $args, $max_attempts, 1, function ($next_attempt, $max_attempts, $reason) use ($action) {
+            // Hidden from the progress card: the upload carries on by itself.
+            One_Click_Migration::write_to_log(sprintf(
+                ' SYSLOG: Lambda action "%s" got transient error, retrying (attempt %d/%d): %s',
+                $action,
+                $next_attempt,
+                $max_attempts,
+                $reason
+            ));
+        });
 
         if (is_wp_error($response)) {
             One_Click_Migration::write_to_log('Error: Lambda action WP_Error: ' . $response->get_error_message());
@@ -181,12 +200,102 @@ class OCM_S3
         $code = (int) wp_remote_retrieve_response_code($response);
         $body = wp_remote_retrieve_body($response);
         if ($code < 200 || $code >= 300) {
-            One_Click_Migration::write_to_log(sprintf('Error: Lambda action "%s" failed (code=%d): %s', $payload['action'] ?? '', $code, substr(self::plain_body($body), 0, 500)));
+            One_Click_Migration::write_to_log(sprintf('Error: Lambda action "%s" failed (code=%d): %s', $action, $code, substr(self::plain_body($body), 0, 500)));
             return false;
         }
 
         $decoded = json_decode($body);
         return is_object($decoded) ? $decoded : false;
+    }
+
+    /**
+     * POST to a Lambda, sending the request again while the failure is one
+     * that passes by itself: no answer, a 5xx, or a 429 from rate limiting.
+     * Any other answer (a 200, a 4xx) is returned at once.
+     *
+     * The wait before attempt n+1 is $backoff * n seconds, or a 429's
+     * Retry-After up to RETRY_AFTER_MAX_SECONDS.
+     *
+     * @param string   $url
+     * @param array    $args         wp_remote_post() arguments.
+     * @param int      $max_attempts
+     * @param int      $backoff      Seconds.
+     * @param callable $on_retry     Called as ($next_attempt, $max_attempts, $reason) before each wait.
+     * @param int      $attempts     Set to the number of requests made.
+     * @return array|\WP_Error The last response.
+     */
+    private static function post_with_retry($url, array $args, $max_attempts, $backoff, callable $on_retry, &$attempts = 0)
+    {
+        $attempts = 0;
+        while (true) {
+            $attempts++;
+            $response = wp_remote_post($url, $args);
+            $reason = self::transient_failure($response);
+            if (null === $reason || $attempts >= $max_attempts) {
+                return $response;
+            }
+
+            $wait = $backoff * $attempts;
+            if (!is_wp_error($response) && 429 === (int) wp_remote_retrieve_response_code($response)) {
+                $retry_after = self::retry_after_seconds($response);
+                if (null !== $retry_after) {
+                    $wait = $retry_after;
+                }
+            }
+
+            $on_retry($attempts + 1, $max_attempts, $reason);
+            sleep($wait);
+        }
+    }
+
+    /**
+     * Why a Lambda response is worth sending again ("HTTP 429"), or null
+     * when it is final.
+     *
+     * @param array|\WP_Error $response
+     * @return string|null
+     */
+    private static function transient_failure($response)
+    {
+        if (is_wp_error($response)) {
+            // The reason goes into a log line, and a line holding "Error:"
+            // ends the run's start mark (One_Click_Migration::write_to_log()).
+            return 'network error (' . str_replace('Error:', 'error', $response->get_error_message()) . ')';
+        }
+
+        $code = (int) wp_remote_retrieve_response_code($response);
+        return (429 === $code || $code >= 500) ? 'HTTP ' . $code : null;
+    }
+
+    /**
+     * A 429's Retry-After (seconds or an HTTP date) as a wait of 1 to
+     * RETRY_AFTER_MAX_SECONDS seconds, or null when it has none.
+     *
+     * @param array $response
+     * @return int|null
+     */
+    private static function retry_after_seconds($response)
+    {
+        $value = wp_remote_retrieve_header($response, 'retry-after');
+        if (is_array($value)) {
+            $value = reset($value);
+        }
+        $value = trim((string) $value);
+        if ('' === $value) {
+            return null;
+        }
+
+        if (preg_match('/^\d+$/', $value)) {
+            $seconds = (int) $value;
+        } else {
+            $when = strtotime($value);
+            if (false === $when) {
+                return null;
+            }
+            $seconds = $when - time();
+        }
+
+        return min(self::RETRY_AFTER_MAX_SECONDS, max(1, $seconds));
     }
 
     /**
@@ -204,21 +313,40 @@ class OCM_S3
         return max(self::MULTIPART_CHUNK_SIZE, $needed);
     }
 
+    /**
+     * Upload an archive of MULTIPART_THRESHOLD or more in parts, resuming the
+     * parts an earlier worker stored.
+     *
+     * Once the archive goes up in parts it never falls back to one PUT of
+     * the whole file: that PUT ignores the worker's time budget and cannot
+     * store more than 5 GB. A failed Lambda action (init, presign,
+     * complete) or part PUT counts a retry and hands over to the next
+     * worker instead (retry_upload_in_next_worker()).
+     *
+     * @param string $zip_file
+     * @param string $folder_type
+     * @return bool|null True once the archive is stored; false when the
+     *                   upload retries are used up (the caller must not
+     *                   send the archive another way); null when the
+     *                   archive does not go up in parts (under the
+     *                   threshold, no curl, no bucket id), so the caller
+     *                   sends it in one PUT.
+     */
     private static function upload_zip_multipart($zip_file, $folder_type)
     {
         if (!function_exists('curl_init')) {
-            return false;
+            return null;
         }
 
         $bucket_id = get_option('ocm_bucket_id');
         if (!$bucket_id) {
-            return false;
+            return null;
         }
 
         $key = basename($zip_file);
         $file_size = filesize($zip_file);
         if (!$file_size || $file_size < self::MULTIPART_THRESHOLD) {
-            return false;
+            return null;
         }
 
         $state_option = 'ocm_multipart_upload_' . $folder_type;
@@ -235,7 +363,7 @@ class OCM_S3
             ]);
 
             if (!$init || empty($init->upload_id)) {
-                return false;
+                return self::retry_upload_in_next_worker($folder_type);
             }
 
             $state = [
@@ -283,20 +411,14 @@ class OCM_S3
             ]);
 
             if (!$presign || empty($presign->url)) {
-                return false;
+                return self::retry_upload_in_next_worker($folder_type);
             }
 
             $offset = ($part_number - 1) * $chunk_size;
             $part_size = min($chunk_size, $file_size - $offset);
             $etag = self::upload_multipart_part($zip_file, $presign->url, $offset, $part_size);
             if (!$etag) {
-                $retry_count = get_option('ocm_backup_upload_retry_' . $folder_type, 1);
-                if ($retry_count <= self::MAX_UPLOAD_RETRIES) {
-                    One_Click_Migration::write_to_log("Process is Restarting");
-                    update_option('ocm_backup_upload_retry_' . $folder_type, $retry_count + 1, true);
-                    One_Click_Migration::$process_backup_single->restart_task();
-                }
-                return false;
+                return self::retry_upload_in_next_worker($folder_type);
             }
 
             $parts[$part_number] = $etag;
@@ -334,11 +456,36 @@ class OCM_S3
         ], 60);
 
         if (!$complete || empty($complete->ok)) {
-            return false;
+            // The stored ETags stay, so the next worker only sends complete.
+            return self::retry_upload_in_next_worker($folder_type);
         }
 
         delete_option($state_option);
         return true;
+    }
+
+    /**
+     * Count a failed upload attempt and hand the part over to the next
+     * worker, which tries again (a multipart upload resumes from its stored
+     * parts). Returns only once MAX_UPLOAD_RETRIES attempts since the last
+     * stored part are used up: the part then fails closed.
+     *
+     * @param string $folder_type
+     * @return false
+     */
+    private static function retry_upload_in_next_worker($folder_type)
+    {
+        $retry_count = get_option('ocm_backup_upload_retry_' . $folder_type, 1);
+        if ($retry_count <= self::MAX_UPLOAD_RETRIES) {
+            One_Click_Migration::write_to_log("Process is Restarting");
+            update_option('ocm_backup_upload_retry_' . $folder_type, $retry_count + 1, true);
+            // Dispatches the next worker and ends this request.
+            One_Click_Migration::$process_backup_single->restart_task();
+            return false;
+        }
+
+        One_Click_Migration::write_to_log(sprintf('Upload retries exhausted for %s; backup will fail closed.', $folder_type));
+        return false;
     }
 
     private static function upload_multipart_part($zip_file, $url, $offset, $part_size)
@@ -440,7 +587,7 @@ class OCM_S3
         }
 
         $multipart_result = self::upload_zip_multipart($zip_file, $folder_type);
-        if ($multipart_result) {
+        if (null !== $multipart_result) {
             return $multipart_result;
         }
 
@@ -476,16 +623,7 @@ class OCM_S3
 
         } catch (Exception $e) {
             One_Click_Migration::write_to_log("Upload failed for " . $folder_type . ": " . $e->getMessage());
-
-            $next_retry_count = get_option('ocm_backup_upload_retry_' . $folder_type, 1);
-            if($next_retry_count <= self::MAX_UPLOAD_RETRIES){
-              One_Click_Migration::write_to_log("Process is Restarting");
-              update_option('ocm_backup_upload_retry_' . $folder_type , $next_retry_count + 1, true);
-              One_Click_Migration::$process_backup_single->restart_task();
-            }else{
-              One_Click_Migration::write_to_log(sprintf('Upload retries exhausted for %s; backup will fail closed.', $folder_type));
-            }
-            return false;
+            return self::retry_upload_in_next_worker($folder_type);
         } finally {
             if (is_resource($file_handle)) {
                 fclose($file_handle);

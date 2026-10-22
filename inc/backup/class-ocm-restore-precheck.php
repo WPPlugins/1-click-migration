@@ -13,6 +13,32 @@ class OCM_Restore_Precheck {
         return $values;
     }
 
+    /**
+     * Did a restore-code lookup fail because the 1-Click Migration service was
+     * busy or out of reach, rather than because of the code? OCM_S3 has already
+     * retried no answer, 429 and 5xx by then, so this is a rate limit or an
+     * outage that outlasted the retries. Only a 4xx other than 429 is an answer
+     * about the code itself: wrong, or expired.
+     *
+     * @param int   $status HTTP status of the last answer, 0 when none came.
+     * @param mixed $error  The answer's error field; 'network' when none came.
+     * @return bool
+     */
+    public static function lookup_unavailable($status, $error) {
+        $status = (int) $status;
+        return 'network' === $error || 429 === $status || $status < 400 || $status >= 500;
+    }
+
+    /** @return string For the admin when the lookup failed but the backup is fine. */
+    public static function service_busy_message() {
+        return __('The 1-Click Migration service is busy or could not be reached right now. Your backup is safe. Please try again in a minute.', '1-click-migration');
+    }
+
+    /** @return string For the admin when the service says the code is wrong or expired. */
+    public static function code_not_found_message() {
+        return __('No backup was found for this restore code. Check the code in your email. Restore codes work for 48 hours after the backup; if yours is older, make a new backup on the old site.', '1-click-migration');
+    }
+
     public static function prepare() {
         if (!current_user_can('manage_options')) {
             wp_send_json_error(array('message' => __('Only a site administrator can do this.', '1-click-migration')), 403);
@@ -33,7 +59,12 @@ class OCM_Restore_Precheck {
         $redeem = OCM_S3::redeem_restore_code($code);
         if (!is_object($redeem) || ($redeem->_status ?? 0) !== 200 || !empty($redeem->error)
             || empty($redeem->bucket_id) || empty($redeem->aes_key_b64) || empty($redeem->urls)) {
-            wp_send_json_error(array('message' => __('No backup was found for this restore code. Check the code in your email. Restore codes work for 48 hours after the backup; if yours is older, make a new backup on the old site.', '1-click-migration')), 400);
+            // A busy or unreachable service must not read as a lost backup.
+            $redeem = is_object($redeem) ? $redeem : (object) array();
+            if (self::lookup_unavailable($redeem->_status ?? 0, $redeem->error ?? '')) {
+                wp_send_json_error(array('message' => self::service_busy_message()), 503);
+            }
+            wp_send_json_error(array('message' => self::code_not_found_message()), 400);
         }
         $manifest = null;
         if (!in_array('db', $excluded, true) && !empty($redeem->urls->log_download)) {

@@ -181,6 +181,7 @@ class OCM_Admin_Page
             'missing_username'      => __('Enter the email address the restore code should go to, then try again.', '1-click-migration'),
             'missing_restore_code'  => __('Restore code is missing. Paste the 8-character code we emailed you after the backup.', '1-click-migration'),
             'invalid_restore_code'  => __('Restore code is invalid or expired. Check the email we sent after your backup, or run a new backup.', '1-click-migration'),
+            'service_busy'          => OCM_Restore_Precheck::service_busy_message(),
             'backup_in_progress'    => __('A backup or restore is already running on this site. Wait for it to finish, or click Stop & Reset to cancel it, then start again.', '1-click-migration'),
             'insufficient_disk_space' => __('The hosting account is out of disk space. Delete files you no longer need or ask your host for more space, then try again.', '1-click-migration'),
             'write_permission'      => __('WordPress isn\'t allowed to write to its wp-content folder. Ask your host to fix the folder permissions, then try again.', '1-click-migration'),
