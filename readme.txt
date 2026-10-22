@@ -4,7 +4,7 @@ Tags: backup, migrate, migration, restore, clone
 Requires at least: 5.3
 Tested up to: 7.1
 Requires PHP: 7.4
-Stable tag: 3.2.2
+Stable tag: 3.2.3
 Author URI: https://1clickmigration.com
 License: GPLv3 or later
 License URI: http://www.gnu.org/licenses/gpl-3.0.html
@@ -113,6 +113,9 @@ Any host that runs WordPress on PHP 7.4 or later, including Bluehost, SiteGround
 4. Enter the restore code on the destination site to finish your WordPress migration.
 
 == Changelog ==
+= 3.2.3 =
+* **Stop & Reset**: Clicking Stop & Reset right after starting a backup could leave the backup running in the background, and it then reported "Backup failed". Stop & Reset now stops the backup straight away.
+
 = 3.2.2 =
 * **Interrupted restores**: When a restore picks up again after being interrupted just as a part of your backup finished downloading, it now keeps that download instead of fetching the same part again, so the restore finishes sooner.
 
@@ -197,6 +200,9 @@ Any host that runs WordPress on PHP 7.4 or later, including Bluehost, SiteGround
 Older versions are listed in [changelog.txt](https://plugins.trac.wordpress.org/browser/1-click-migration/trunk/changelog.txt).
 
 == Upgrade Notice ==
+
+= 3.2.3 =
+Stop & Reset now stops a backup that has just started, instead of letting it run on and report a failure. Includes all 3.2.2 changes.
 
 = 3.2.2 =
 An interrupted restore keeps a part that had already finished downloading instead of downloading it again. Includes all 3.2.1 changes.

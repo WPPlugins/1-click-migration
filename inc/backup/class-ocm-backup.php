@@ -4458,6 +4458,12 @@ class OCM_Backup
 
     public static function is_current_backup_run($run_id)
     {
+        // Stop & Reset or a newer run changes this from another request, so
+        // never trust this request's cached copy of the option: a worker
+        // kept seeing its cancelled run and backed up every queued part.
+        if (function_exists('wp_cache_delete')) {
+            wp_cache_delete(self::BACKUP_RUN_OPTION, 'options');
+        }
         $run = get_option(self::BACKUP_RUN_OPTION, array());
         return is_array($run)
             && isset($run['id'])
