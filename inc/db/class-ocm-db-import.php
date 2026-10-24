@@ -298,6 +298,11 @@ class OCM_SQL_Utils
 
 	        self::reset_import_runtime_state();
 	        self::log_import_driver($wpdb, $result_file);
+	        // Dumps import one table per file in name order, so a child table
+	        // (wp_pbb_ab_test_variants) is created and filled before its parent
+	        // (wp_pbb_ab_tests). The CLI import and mysqldump's header turn the
+	        // checks off for that; the PHP exporter writes no header.
+	        self::query_imported_sql($wpdb, 'SET foreign_key_checks = 0');
 
 	        $error_count = 0;
 	        $statement_index = 0;
@@ -359,6 +364,7 @@ class OCM_SQL_Utils
 	            }
 	        }
 	        fclose($handle);
+	        self::query_imported_sql($wpdb, 'SET foreign_key_checks = 1');
 
 	        if ($remapped_statements > 0) {
 	            One_Click_Migration::write_to_log(sprintf(
@@ -1314,7 +1320,8 @@ class OCM_SQL_Utils
 
     /**
      * Prepare dump for staging: source→dest data swap, statement heads → staging,
-     * foreign tables under staging, CONSTRAINT names stripped inside CREATE TABLE only.
+     * foreign tables under staging; inside CREATE TABLE only, CONSTRAINT names
+     * stripped and foreign keys pointed at the staged parent tables.
      */
     public static function prepare_sql_dump_for_staging($filepath, $dest_prefix, $staging_prefix, $source_prefix = '')
     {
@@ -1334,7 +1341,7 @@ class OCM_SQL_Utils
         if (!self::stage_foreign_table_statements($filepath, $staging_prefix, $dest_prefix, $source_prefix)) {
             return false;
         }
-        return self::strip_create_table_constraint_names($filepath);
+        return self::strip_create_table_constraint_names($filepath, $dest_prefix, $staging_prefix);
     }
 
     /** Remap foreign-prefix statement heads onto `{staging}{original_table}`. */
@@ -1412,8 +1419,15 @@ class OCM_SQL_Utils
      * Bounded fread chunks (never fgets / never loads a whole line). Quote state
      * and a pending-escape flag span chunks so `\` at a 1 MiB boundary cannot
      * close a string early. Offset/strpos scan — no per-line remainder re-copy.
+     *
+     * With $reference_prefix and $staging_prefix, `REFERENCES `{reference}x``
+     * in those statements becomes `{staging}x`: a staged child otherwise keeps
+     * its foreign key on the live table, which a fresh site doesn't have
+     * (field restore 4945c8ae: errno 150 "Foreign key constraint is
+     * incorrectly formed") and which promote moves to the trash. RENAME TABLE
+     * carries the key over to the live name.
      */
-    public static function strip_create_table_constraint_names($filepath)
+    public static function strip_create_table_constraint_names($filepath, $reference_prefix = '', $staging_prefix = '')
     {
         $t0 = microtime(true);
         if (!is_string($filepath) || $filepath === '' || !is_file($filepath) || !is_readable($filepath)) {
@@ -1450,6 +1464,14 @@ class OCM_SQL_Utils
         // Only an incomplete CREATE TABLE line-head prefix (≤64 bytes), never a chunk remainder.
         $create_prefix = '';
         $stripped = 0;
+        $references = 0;
+        $reference_pattern = null;
+        if (is_string($reference_prefix) && $reference_prefix !== ''
+            && is_string($staging_prefix) && $staging_prefix !== ''
+            && $reference_prefix !== $staging_prefix
+        ) {
+            $reference_pattern = '/\b((?i:REFERENCES)\s+`)' . preg_quote($reference_prefix, '/') . '/';
+        }
         $ok = true;
         $create_cap = self::SQL_STREAM_READ_BYTES;
         // Optional post-CREATE tail processed via offset scan (not prepended onto the next fread).
@@ -1491,7 +1513,7 @@ class OCM_SQL_Utils
                         $create_buf = '';
                         break;
                     }
-                    $tail = self::strip_flush_create_buffer($create_buf, $out, $stripped, $ok);
+                    $tail = self::strip_flush_create_buffer($create_buf, $out, $stripped, $ok, $reference_pattern, $staging_prefix, $references);
                     if (!$ok) {
                         break;
                     }
@@ -1677,21 +1699,34 @@ class OCM_SQL_Utils
                 basename($filepath)
             ));
         }
+        if ($references > 0) {
+            One_Click_Migration::write_to_log(sprintf(
+                'Notice: Pointed %d foreign key(s) in "%s" at the staging tables (prefix "%s" to "%s").',
+                $references,
+                basename($filepath),
+                $reference_prefix,
+                $staging_prefix
+            ));
+        }
         return true;
     }
 
     /**
-     * If $create_buf holds a full CREATE…; statement, strip CONSTRAINT names,
-     * write it, and return any trailing bytes after ";". Returns null when more
-     * input is needed. Sets $ok false on write/preg failure.
+     * If $create_buf holds a full CREATE…; statement, strip CONSTRAINT names
+     * (and remap REFERENCES when $reference_pattern is set), write it, and
+     * return any trailing bytes after ";". Returns null when more input is
+     * needed. Sets $ok false on write/preg failure.
      *
-     * @param string   $create_buf
-     * @param resource $out
-     * @param int      $stripped
-     * @param bool     $ok
+     * @param string      $create_buf
+     * @param resource    $out
+     * @param int         $stripped
+     * @param bool        $ok
+     * @param string|null $reference_pattern
+     * @param string      $staging_prefix
+     * @param int         $references
      * @return string|null
      */
-    private static function strip_flush_create_buffer(&$create_buf, $out, &$stripped, &$ok)
+    private static function strip_flush_create_buffer(&$create_buf, $out, &$stripped, &$ok, $reference_pattern = null, $staging_prefix = '', &$references = 0)
     {
         $end = self::sql_statement_end_offset($create_buf);
         if ($end === null) {
@@ -1705,6 +1740,22 @@ class OCM_SQL_Utils
             return null;
         }
         $stripped += (int) $count;
+        if ($reference_pattern !== null) {
+            $rewritten = preg_replace_callback(
+                $reference_pattern,
+                static function ($m) use ($staging_prefix) {
+                    return $m[1] . $staging_prefix;
+                },
+                $rewritten,
+                -1,
+                $count
+            );
+            if (!is_string($rewritten)) {
+                $ok = false;
+                return null;
+            }
+            $references += (int) $count;
+        }
         if (!self::write_all($out, $rewritten)) {
             $ok = false;
             return null;
@@ -1779,7 +1830,7 @@ class OCM_SQL_Utils
         if (!is_array($tables) || !$tables) {
             return 0;
         }
-        $dropped = 0;
+        $stale = array();
         foreach ($tables as $table) {
             $table = (string) $table;
             if (!preg_match('/^(ocm[0-9a-f]{4}_)/', $table, $m)) {
@@ -1788,9 +1839,10 @@ class OCM_SQL_Utils
             if (is_string($protect_prefix) && $protect_prefix !== '' && $m[1] === $protect_prefix) {
                 continue;
             }
-            $wpdb->query('DROP TABLE IF EXISTS `' . str_replace('`', '``', $table) . '`');
-            $dropped++;
+            $stale[] = $table;
         }
+        self::drop_tables($wpdb, $stale);
+        $dropped = count($stale);
         if ($dropped > 0) {
             One_Click_Migration::write_to_log(sprintf(
                 'Notice: Dropped %d stale temporary staging table(s) left by an earlier restore.',
@@ -1863,12 +1915,36 @@ class OCM_SQL_Utils
         if (!is_array($tables)) {
             return;
         }
+        $matching = array();
         foreach ($tables as $table) {
             $table = (string) $table;
             if (strpos($table, $prefix) === 0) {
-                $wpdb->query('DROP TABLE IF EXISTS `' . str_replace('`', '``', $table) . '`');
+                $matching[] = $table;
             }
         }
+        self::drop_tables($wpdb, $matching);
+    }
+
+    /**
+     * DROP TABLE each of $tables with foreign key checks off: staged tables
+     * reference each other once their keys point at staging, and a parent
+     * can't be dropped before its child while checks are on (the tables come
+     * in name order, wp_pbb_browsers before wp_pbb_log_browsers).
+     *
+     * @param object   $wpdb
+     * @param string[] $tables
+     * @return void
+     */
+    private static function drop_tables($wpdb, array $tables)
+    {
+        if (!$tables) {
+            return;
+        }
+        $wpdb->query('SET foreign_key_checks = 0');
+        foreach ($tables as $table) {
+            $wpdb->query('DROP TABLE IF EXISTS `' . str_replace('`', '``', (string) $table) . '`');
+        }
+        $wpdb->query('SET foreign_key_checks = 1');
     }
 
     /**
@@ -1957,9 +2033,7 @@ class OCM_SQL_Utils
             ));
             return false;
         }
-        foreach ($trash_targets as $trash_table) {
-            $wpdb->query('DROP TABLE IF EXISTS `' . str_replace('`', '``', $trash_table) . '`');
-        }
+        self::drop_tables($wpdb, $trash_targets);
         if (function_exists('delete_option')) {
             delete_option(self::OPTION_STAGING_PREFIX);
         }
