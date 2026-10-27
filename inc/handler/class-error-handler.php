@@ -38,6 +38,29 @@ class Error_Handler
     private static $persistent_dedup_interval = 3600;
 
     /**
+     * Last filesystem warning this handler took. Handling an error stops PHP
+     * recording it, so error_get_last() stays empty and
+     * OCM_Backup::last_fs_error_summary() reads this instead (field backup
+     * 917fad44: "Disk quota exceeded" was logged as "unknown I/O error").
+     *
+     * @var string
+     */
+    private static $last_fs_message = '';
+
+    /**
+     * The last filesystem warning this handler took, forgotten once read so a
+     * later failure never reports an earlier one's reason.
+     *
+     * @return string
+     */
+    public static function take_last_fs_message()
+    {
+        $message = self::$last_fs_message;
+        self::$last_fs_message = '';
+        return $message;
+    }
+
+    /**
      * Error handler
      *
      * @param  integer $errno   Error level
@@ -48,6 +71,10 @@ class Error_Handler
      */
     public static function error($errno, $errstr, $errfile, $errline)
     {
+      if (preg_match('/^(?:fopen|fwrite|fread|fflush|fclose|ftruncate|rename|copy|mkdir|unlink|file_put_contents)\(/', (string) $errstr)) {
+          self::$last_fs_message = (string) $errstr;
+      }
+
       $is_plugin_error = strpos($errfile, 'plugins/1-click-migration/') !== false;
       $migration_active = get_option('ocm_action_start_backup') || get_option('ocm_action_start_restore') || OCM_Debug_Mode::is_active();
 

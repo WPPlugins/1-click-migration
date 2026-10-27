@@ -2144,7 +2144,7 @@ class OCM_Backup
 
           $return = self::encryptZipFile($filename, $aes_key);
           if (!$return) {
-              self::fail_backup('encryption of the database archive failed (see previous error line)');
+              self::fail_backup_encryption('the database archive', $filename);
               exit;
           }
 
@@ -2342,7 +2342,7 @@ class OCM_Backup
 
             $zip_filepath = self::encryptZipFile($filename, $aes_key);
             if (!$zip_filepath) {
-                self::fail_backup(sprintf('encryption of the "%s" archive failed (see previous error line)', $folder_name));
+                self::fail_backup_encryption(sprintf('the "%s" archive', $folder_name), $filename);
                 exit;
             }
 
@@ -3384,6 +3384,11 @@ class OCM_Backup
     {
         $err = error_get_last();
         $message = ($err && isset($err['message'])) ? (string) $err['message'] : '';
+        // The plugin's error handler takes warnings before PHP records them.
+        $handled = class_exists(__NAMESPACE__ . '\\Error_Handler', false) ? Error_Handler::take_last_fs_message() : '';
+        if ('' === $message) {
+            $message = $handled;
+        }
 
         $errno = 0;
         if (preg_match('/errno=(\d+)/', $message, $m)) {
@@ -3393,6 +3398,7 @@ class OCM_Backup
         } elseif (false !== stripos($message, 'No space left on device')) {
             $errno = 28;
         }
+        self::$last_fs_errno = $errno;
 
         if (122 === $errno) {
             return 'Reason: errno=122 EDQUOT (hosting disk quota exceeded — not the same as disk full/ENOSPC).';
@@ -3409,8 +3415,29 @@ class OCM_Backup
         return 'Reason: ' . substr($message, 0, 200);
     }
 
+    /** errno last_fs_error_summary() found: 122 (quota), 28 (disk full), other or 0. */
+    private static $last_fs_errno = 0;
+
+    /**
+     * End the run after $what (e.g. 'the "uploads" archive') could not be
+     * encrypted. When the hosting account ran out of space, say so in plain
+     * words (the progress screen then shows its out-of-space hint) and delete
+     * the archive: the run is over, and a full account can break the live site
+     * until someone clicks Stop & Reset.
+     */
+    private static function fail_backup_encryption($what, $archive)
+    {
+        if (in_array(self::$last_fs_errno, array(122, 28), true)) {
+            self::unlink_if_present($archive);
+            self::fail_backup(sprintf('the hosting account ran out of disk space while encrypting %s (see previous error line)', $what));
+            return;
+        }
+        self::fail_backup(sprintf('encryption of %s failed (see previous error line)', $what));
+    }
+
     public static function encryptZipFile($filename, $key)
     {
+        self::$last_fs_errno = 0;
         // open file to read
         if (false === ($file_handle = fopen($filename, 'rb'))) {
             One_Click_Migration::write_to_log(sprintf('Error: Failed to open file "%s" for encryption. %s', $filename, self::last_fs_error_summary()));
@@ -3488,6 +3515,8 @@ class OCM_Backup
                 ));
                 fclose($encrypted_handle);
                 fclose($file_handle);
+                // Half an encrypted archive is useless and holds the space that ran out.
+                self::unlink_if_present($encrypted_path);
                 return false;
             }
 
@@ -4076,7 +4105,7 @@ class OCM_Backup
             return '';
         }
 
-        if (strpos($log, 'disk quota') !== false || strpos($log, 'Not enough disk space') !== false || strpos($log, 'Restore workspace is not writable') !== false) {
+        if (strpos($log, 'disk quota') !== false || strpos($log, 'Not enough disk space') !== false || strpos($log, 'ran out of disk space') !== false || strpos($log, 'Restore workspace is not writable') !== false) {
             return __('The hosting account is out of disk space. Delete files you no longer need or ask your host for more space, then try again. If your hosting panel shows plenty of free space, ask your host to check the account\'s disk and file limits.', '1-click-migration');
         }
 
