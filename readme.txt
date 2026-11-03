@@ -4,7 +4,7 @@ Tags: backup, migrate, migration, restore, clone
 Requires at least: 5.3
 Tested up to: 7.1
 Requires PHP: 7.4
-Stable tag: 3.2.5
+Stable tag: 3.2.6
 Author URI: https://1clickmigration.com
 License: GPLv3 or later
 License URI: http://www.gnu.org/licenses/gpl-3.0.html
@@ -113,6 +113,10 @@ Any host that runs WordPress on PHP 7.4 or later, including Bluehost, SiteGround
 4. Enter the restore code on the destination site to finish your WordPress migration.
 
 == Changelog ==
+= 3.2.6 =
+* **After a restore**: The "Restore complete" window now asks whether everything came across. "Yes, looks good" leads to the review ask and says that a free WordPress.org account is needed. "Something's off" leads straight to the support forum instead.
+* **Restores that use the MySQL command line**: On some servers the database import reported success while WordPress couldn't see the imported tables, and the restore stopped with "the backup's main options table didn't pass the check". The restore now checks each imported table and, if WordPress can't see it, imports that table again through WordPress.
+
 = 3.2.5 =
 * **Out of disk space during a backup**: When the hosting account ran out of disk space while a backup was being prepared, the backup stopped with "encryption of the archive failed" and left its unfinished files behind. It now says the account is out of disk space, shows how to fix it, and deletes those files right away so the account isn't left full.
 
@@ -206,6 +210,9 @@ Any host that runs WordPress on PHP 7.4 or later, including Bluehost, SiteGround
 Older versions are listed in [changelog.txt](https://plugins.trac.wordpress.org/browser/1-click-migration/trunk/changelog.txt).
 
 == Upgrade Notice ==
+
+= 3.2.6 =
+The restore complete window asks whether everything came across, and restores on servers whose MySQL command line imports out of WordPress's sight no longer stop at the options check. Includes all 3.2.5 changes.
 
 = 3.2.5 =
 A backup that runs out of disk space now says so and removes its unfinished files right away. Includes all 3.2.4 changes.

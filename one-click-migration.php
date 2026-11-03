@@ -4,7 +4,7 @@
  * Plugin Name: 1 Click Migration
  * Plugin URI: https://wordpress.org/plugins/1-click-migration/
  * Description: Migrate, copy, or clone your entire site with 1 click. <strong>Any host, no size limitation, no premium versions.</strong>
- * Version: 3.2.5
+ * Version: 3.2.6
  * Requires at least: 5.3
  * Requires PHP: 7.4
  * Author: 1ClickMigration
@@ -337,7 +337,7 @@ class One_Click_Migration
         $dismiss_url = wp_nonce_url(add_query_arg('ocm_dismiss_review', '1'), 'ocm_dismiss_review');
         ?>
         <div class="notice notice-info ocm-review-notice">
-            <p><?php esc_html_e('Your site was restored. If 1-Click Migration helped, leave a review.', '1-click-migration'); ?></p>
+            <p><?php esc_html_e('Your site was restored. If 1-Click Migration helped, leave a review on WordPress.org. You need a free WordPress.org account.', '1-click-migration'); ?></p>
             <p>
                 <a class="button button-primary" href="<?php echo esc_url($review_url); ?>" target="_blank" rel="noopener noreferrer"><?php esc_html_e('Leave a review', '1-click-migration'); ?></a>
                 <a href="<?php echo esc_url($dismiss_url); ?>" style="margin-left: 12px;"><?php esc_html_e('Don\'t ask again', '1-click-migration'); ?></a>

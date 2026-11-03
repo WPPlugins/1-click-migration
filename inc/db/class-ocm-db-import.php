@@ -254,6 +254,13 @@ class OCM_SQL_Utils
         }
 
         $result = self::run('/usr/bin/env mysql --no-defaults --no-auto-rehash', $mysql_args);
+        if ($result && '-' !== $result_file && !self::cli_import_visible($result_file)) {
+            One_Click_Migration::write_to_log(sprintf(
+                'SYSLOG: mysql command-line import of "%s" reported success, but WordPress\'s database connection can\'t see it; importing it through $wpdb instead.',
+                basename($result_file)
+            ));
+            $result = false;
+        }
         if ($result == false)
         {
 	        One_Click_Migration::write_to_log('Notice: Database restore in progress. Please don\'t leave the plugin page.');
@@ -265,6 +272,49 @@ class OCM_SQL_Utils
         }
 
         self::sql_fix_after($result_file);
+        return true;
+    }
+
+    /**
+     * After the mysql command line reports success, check through WordPress's
+     * own connection that the dump's table is there, with rows when the dump
+     * inserts any. The command line can land where WordPress doesn't look
+     * (another server or socket, a db.php drop-in) or skip a file and still
+     * exit 0, and the options check then finds no siteurl (field restore
+     * 84630436). True when the table is visible, or when it can't be told.
+     *
+     * @param string $result_file
+     * @return bool
+     */
+    public static function cli_import_visible($result_file)
+    {
+        global $wpdb;
+        if (!is_object($wpdb) || !method_exists($wpdb, 'get_col') || !method_exists($wpdb, 'get_var')) {
+            return true;
+        }
+        $handle = @fopen($result_file, 'rb');
+        if (!$handle) {
+            return true;
+        }
+        $head = (string) fread($handle, self::SQL_STREAM_READ_BYTES);
+        fclose($handle);
+        if (!preg_match('/^\s*CREATE\s+TABLE(?:\s+IF\s+NOT\s+EXISTS)?\s+`?([^`\s(]+)`?/mi', $head, $m)) {
+            return true;
+        }
+        $table = $m[1];
+
+        $wpdb->last_error = '';
+        $tables = $wpdb->get_col('SHOW TABLES');
+        if (!is_array($tables) || (!$tables && '' !== (string) $wpdb->last_error)) {
+            return true;
+        }
+        // lower_case_table_names hosts list names in lower case.
+        if (!in_array(strtolower($table), array_map('strtolower', array_map('strval', $tables)), true)) {
+            return false;
+        }
+        if (preg_match('/^\s*INSERT\s+(?:IGNORE\s+)?INTO\s+`?' . preg_quote($table, '/') . '`?[\s(]/mi', $head)) {
+            return null !== $wpdb->get_var('SELECT 1 FROM `' . str_replace('`', '``', $table) . '` LIMIT 1');
+        }
         return true;
     }
 

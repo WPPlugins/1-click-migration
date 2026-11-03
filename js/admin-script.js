@@ -495,6 +495,13 @@
         var isPartial = typeof siteData !== 'undefined' && ocmFlagOn(siteData.showRestorePartial);
         var isWarned = typeof siteData !== 'undefined' && ocmFlagOn(siteData.showRestoreWarned);
         var isIncomplete = isPartial || isWarned;
+        // A clean restore asks "did everything come across?" first. "Yes" leads
+        // to the review ask, "Something's off" to the forum; the review link is
+        // never shown to someone whose site is broken.
+        var askFirst = false;
+        if (withReviewCta && !isIncomplete) {
+            askFirst = true;
+        }
         var titleText = t(isPartial
             ? 'restorePartialTitle'
             : (isWarned ? 'restoreWarnedTitle' : 'restoreDoneTitle'));
@@ -502,15 +509,20 @@
             ? 'restorePartialBody'
             : (isWarned
                 ? 'restoreWarnedBody'
-                : (withReviewCta ? 'restoreReviewBody' : 'restoreDoneBody')));
-        var reviewBlock = '';
-        if (withReviewCta && !isIncomplete) {
-            reviewBlock = ''
-                + '      <a class="ocm-btn ocm-btn-primary ocm-modal-review" id="ocm-review-btn" href="' + reviewUrl + '" target="_blank" rel="noopener noreferrer">' + escHtml(t('leaveReview')) + '</a>'
-                + (dismissUrl
-                    ? '      <a class="ocm-btn-link ocm-modal-never" id="ocm-dismiss-review" href="' + dismissUrl + '">' + escHtml(t('dontAskAgain')) + '</a>'
-                    : '');
-        }
+                : (askFirst ? 'restoreCheckBody' : 'restoreDoneBody')));
+        // The forum is public: anyone with the restore code can restore the backup.
+        var forumSentence = fmt(escHtml(t('supportForum')), '<a href="' + escHtml(supportUrl) + '" target="_blank" rel="noopener noreferrer">', '</a>');
+        var closeButton = '      <button type="button" class="ocm-btn ocm-btn-ghost ocm-modal-dismiss" data-ocm-modal-close>' + escHtml(t('close')) + '</button>';
+        var checkActions = ''
+            + '      <button type="button" class="ocm-btn ocm-btn-primary ocm-modal-choice" id="ocm-restore-ok">' + escHtml(t('looksGood')) + '</button>'
+            + '      <button type="button" class="ocm-btn ocm-btn-ghost ocm-modal-choice" id="ocm-restore-off">' + escHtml(t('somethingOff')) + '</button>';
+        var reviewActions = ''
+            + '      <a class="ocm-btn ocm-btn-primary ocm-modal-review" id="ocm-review-btn" href="' + reviewUrl + '" target="_blank" rel="noopener noreferrer">' + escHtml(t('leaveReview')) + '</a>'
+            + (dismissUrl
+                ? '      <a class="ocm-btn-link ocm-modal-never" id="ocm-dismiss-review" href="' + dismissUrl + '">' + escHtml(t('dontAskAgain')) + '</a>'
+                : '');
+        var forumActions = ''
+            + '      <a class="ocm-btn ocm-btn-primary ocm-modal-forum" id="ocm-forum-btn" href="' + escHtml(supportUrl) + '" target="_blank" rel="noopener noreferrer">' + escHtml(t('openForum')) + '</a>';
         var domains = extraDomainsBlock();
         var cardClass = 'ocm-modal-card' + (domains ? ' ocm-has-extra-domains' : '');
         var html = ''
@@ -520,23 +532,31 @@
             + '    <button type="button" class="ocm-modal-close" data-ocm-modal-close aria-label="' + escHtml(t('close')) + '">&times;</button>'
             + '    <div class="ocm-modal-icon" aria-hidden="true">' + (isIncomplete ? '!' : '✓') + '</div>'
             + '    <h2 id="ocm-restore-success-title" class="ocm-modal-title">' + escHtml(titleText) + '</h2>'
-            + '    <p class="ocm-modal-body">' + escHtml(bodyText) + '</p>'
-            // The forum is public: anyone with the restore code can restore the backup.
+            + '    <p class="ocm-modal-body" id="ocm-restore-modal-body">' + escHtml(bodyText) + '</p>'
             + (isIncomplete
-                ? '    <p class="ocm-modal-body ocm-modal-support">' + escHtml(t('needHelp')) + ' '
-                    + fmt(escHtml(t('supportForum')), '<a href="' + escHtml(supportUrl) + '" target="_blank" rel="noopener noreferrer">', '</a>')
-                    + '</p>'
+                ? '    <p class="ocm-modal-body ocm-modal-support">' + escHtml(t('needHelp')) + ' ' + forumSentence + '</p>'
                 : '')
             + domains
-            + '    <div class="ocm-modal-actions">'
-            + reviewBlock
-            + '      <button type="button" class="ocm-btn ocm-btn-ghost ocm-modal-dismiss" data-ocm-modal-close>' + escHtml(t('close')) + '</button>'
+            + '    <div class="ocm-modal-actions" id="ocm-restore-modal-actions">'
+            + (askFirst ? checkActions : '')
+            + closeButton
             + '    </div>'
             + '  </div>'
             + '</div>';
         $('body').append(html);
         $('#ocm-restore-success-modal').on('click', '[data-ocm-modal-close]', function () {
             hideRestoreSuccessModal();
+        });
+        $('#ocm-restore-ok').on('click', function () {
+            $('#ocm-restore-modal-body').text(t('restoreReviewBody'));
+            $('#ocm-restore-modal-actions').html(reviewActions + closeButton);
+            $('#ocm-review-btn').trigger('focus');
+        });
+        $('#ocm-restore-off').on('click', function () {
+            $('#ocm-restore-modal-body').text(t('restoreTroubleBody'))
+                .after('<p class="ocm-modal-body ocm-modal-support">' + forumSentence + '</p>');
+            $('#ocm-restore-modal-actions').html(forumActions + closeButton);
+            $('#ocm-forum-btn').trigger('focus');
         });
         $('#ocm-extra-domains-apply').on('click', function () {
             applyExtraDomains();
@@ -554,7 +574,7 @@
         setTimeout(function () {
             var $focus = extraDomainRows().length
                 ? $('#ocm-extra-domains-apply')
-                : (withReviewCta ? $('#ocm-review-btn') : $m.find('[data-ocm-modal-close]').first());
+                : ($('#ocm-restore-ok').length ? $('#ocm-restore-ok') : $m.find('[data-ocm-modal-close]').first());
             $focus.trigger('focus');
         }, 50);
     }
