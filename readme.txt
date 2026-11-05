@@ -4,7 +4,7 @@ Tags: backup, migrate, migration, restore, clone
 Requires at least: 5.3
 Tested up to: 7.1
 Requires PHP: 7.4
-Stable tag: 3.2.6
+Stable tag: 3.2.7
 Author URI: https://1clickmigration.com
 License: GPLv3 or later
 License URI: http://www.gnu.org/licenses/gpl-3.0.html
@@ -113,6 +113,9 @@ Any host that runs WordPress on PHP 7.4 or later, including Bluehost, SiteGround
 4. Enter the restore code on the destination site to finish your WordPress migration.
 
 == Changelog ==
+= 3.2.7 =
+* **Large restores on hosts with a short request limit**: Some hosts end every request after a minute or two. On those, a large database part (over 1 GB) could never finish decrypting or unzipping, because each attempt started over, and the restore stopped with "database part could not be downloaded or unpacked". Decrypting and unzipping now save their progress and continue in the next step, as downloads already did.
+
 = 3.2.6 =
 * **After a restore**: The "Restore complete" window now asks whether everything came across. "Yes, looks good" leads to the review ask and says that a free WordPress.org account is needed. "Something's off" leads straight to the support forum instead.
 * **Restores that use the MySQL command line**: On some servers the database import reported success while WordPress couldn't see the imported tables, and the restore stopped with "the backup's main options table didn't pass the check". The restore now checks each imported table and, if WordPress can't see it, imports that table again through WordPress.
@@ -210,6 +213,9 @@ Any host that runs WordPress on PHP 7.4 or later, including Bluehost, SiteGround
 Older versions are listed in [changelog.txt](https://plugins.trac.wordpress.org/browser/1-click-migration/trunk/changelog.txt).
 
 == Upgrade Notice ==
+
+= 3.2.7 =
+Large restores no longer stop while decrypting or unzipping on hosts that end long requests. Includes all 3.2.6 changes.
 
 = 3.2.6 =
 The restore complete window asks whether everything came across, and restores on servers whose MySQL command line imports out of WordPress's sight no longer stop at the options check. Includes all 3.2.5 changes.

@@ -88,6 +88,12 @@ class OCM_Backup
     const STEP_RESTORE_CHILD_DB_URLS = 'dbUrlsRewritten';
     /** Staging tables are live. */
     const STEP_RESTORE_CHILD_DB_PROMOTED = 'dbPromoted';
+    /** Source bytes a paused decryption has written (int; see decryptZipFile()). */
+    const STEP_RESTORE_CHILD_DECRYPT_DONE = 'decryptDone';
+    /** Where a paused extraction stopped (array; see extract_zip_resumable()). */
+    const STEP_RESTORE_CHILD_EXTRACT_RESUME = 'extractResume';
+    /** Stored zip entries at least this big are copied in slices, so a worker can stop partway through one. */
+    const EXTRACT_SLICED_MIN_BYTES = 33554432;
 
     const LOG_MESSAGE_BG_PROCESS_RESTARTING = 'Timeout approaching. Restarting';
     const LOG_MESSAGE_BG_PROCESS_RESTARTING_LOG = 'Notice: Please wait. This is taking longer than expected but we are still making progress';
@@ -1259,7 +1265,8 @@ class OCM_Backup
                   }
                   $aes_key_b64 = get_option('ocm_aes_key');
                   $aes_key = $aes_key_b64 ? base64_decode($aes_key_b64) : '';
-                  $unencrypted_zip = self::decryptZipFile($file_path, $aes_key);
+                  $decrypt_from = (int) self::get_restore_step_value($key, self::STEP_RESTORE_CHILD_DECRYPT_DONE);
+                  $unencrypted_zip = self::decryptZipFile($file_path, $aes_key, $decrypt_from);
                   if (self::restore_run_ended()) {
                       return OCM_BackgroundRestore::RETURN_TYPE_STOP_PROCESSS;
                   }
@@ -1276,6 +1283,21 @@ class OCM_Backup
                           'Error: Restore failed while decrypting "%s.zip.crypt". Please check disk quota and write permissions.',
                           $key
                       ));
+                  }
+                  if (!empty($unencrypted_zip['paused'])) {
+                      // Saved progress: the next worker continues it, so this
+                      // isn't a failed attempt (as with a partial download).
+                      self::set_complete_restore_step($key, self::STEP_RESTORE_CHILD_DECRYPT_DONE, $unencrypted_zip['done']);
+                      update_option('ocm_restore_decrypt_retry_' . $key, 0, true);
+                      One_Click_Migration::write_to_log(sprintf(
+                          'Decrypting file: "%s.zip.crypt" (%s of %s done)',
+                          $key,
+                          self::convertToReadableSize($unencrypted_zip['done']),
+                          self::convertToReadableSize($unencrypted_zip['size'])
+                      ));
+                      One_Click_Migration::write_to_log("Process is Restarting");
+                      One_Click_Migration::$process_restore_single->restart_task();
+                      exit;
                   }
 
                   // Decrypted: record it before handing over (see download above).
@@ -1353,11 +1375,17 @@ class OCM_Backup
                       ));
                   }
 
+                  // A worker that ran out of time saved where it stopped.
+                  $resume = self::get_restore_step_value($key, self::STEP_RESTORE_CHILD_EXTRACT_RESUME);
+                  $resume_index = is_array($resume) && isset($resume['index']) ? (int) $resume['index'] : 0;
+                  $resume_offset = is_array($resume) && isset($resume['offset']) ? (int) $resume['offset'] : 0;
+
+                  // Only what is still to be written needs room.
                   $zip_uncompressed = 0;
-                  for ($i = 0; $i < $zip->numFiles; $i++) {
+                  for ($i = $resume_index; $i < $zip->numFiles; $i++) {
                       $stat = $zip->statIndex($i);
                       if ($stat !== false) {
-                          $zip_uncompressed += (int) $stat['size'];
+                          $zip_uncompressed += (int) $stat['size'] - ($i === $resume_index ? min($resume_offset, (int) $stat['size']) : 0);
                       }
                   }
                   $free_before_extract = self::get_free_disk_space($content_dir);
@@ -1371,10 +1399,27 @@ class OCM_Backup
                       ));
                   }
 
-                  $extract_result = $zip->extractTo($extract_path);
+                  $extract_result = self::extract_zip_resumable($zip, $unencrypted_zip['filename'], $extract_path, $resume_index, $resume_offset);
+                  $zip_files = $zip->numFiles;
                   $zip->close();
                   if (self::restore_run_ended()) {
                       return OCM_BackgroundRestore::RETURN_TYPE_STOP_PROCESSS;
+                  }
+
+                  if (is_array($extract_result)) {
+                      // Saved progress: the next worker continues it, so this
+                      // isn't a failed attempt (as with a partial download).
+                      self::set_complete_restore_step($key, self::STEP_RESTORE_CHILD_EXTRACT_RESUME, $extract_result);
+                      update_option('ocm_restore_extract_retry_' . $key, 0, true);
+                      One_Click_Migration::write_to_log(sprintf(
+                          'Extracting file: "%s.zip.crypt" (%d of %d files done)',
+                          $key,
+                          $extract_result['index'],
+                          $zip_files
+                      ));
+                      One_Click_Migration::write_to_log("Process is Restarting");
+                      One_Click_Migration::$process_restore_single->restart_task();
+                      exit;
                   }
 
                   if (!$extract_result || !is_dir($extract_path)) {
@@ -3551,7 +3596,20 @@ class OCM_Backup
         return $result_path;
     }
 
-    public static function decryptZipFile($filename, $key)
+    /**
+     * @param string   $filename    The .crypt file.
+     * @param string   $key
+     * @param int|null $resume_from Null decrypts the whole file in one call. An
+     *                              int makes the call resumable (a restore
+     *                              worker): it continues the partial output a
+     *                              paused call left at that many source bytes,
+     *                              and once the worker is out of time it stops
+     *                              at a chunk boundary and returns
+     *                              array('paused' => true, 'done' => <bytes>,
+     *                              'size' => <bytes>) for the next worker.
+     * @return array|false
+     */
+    public static function decryptZipFile($filename, $key, $resume_from = null)
     {
         // open file to read
         if (false === ($file_handle = fopen($filename, 'rb'))) {
@@ -3560,11 +3618,38 @@ class OCM_Backup
         }
 
         $decrypted_path = dirname($filename) . '/decrypt_' . basename($filename);
+        $file_size = filesize($filename);
+        $bytes_decrypted = 0;
+        $buffer_size = 2097152;
+
+        // CBC with a continuous buffer: each chunk's IV is the last cipher
+        // block before it, so decryption can pick up at any chunk boundary.
+        $resume_iv = null;
+        if ($resume_from > 0) {
+            clearstatcache(true, $decrypted_path);
+            if (0 === $resume_from % $buffer_size && $resume_from < $file_size
+                && is_file($decrypted_path) && filesize($decrypted_path) >= $resume_from
+                && 0 === fseek($file_handle, $resume_from - 16)
+                && 16 === strlen($resume_iv = (string) fread($file_handle, 16))
+            ) {
+                $bytes_decrypted = (int) $resume_from;
+            } else {
+                One_Click_Migration::write_to_log(sprintf(' SYSLOG: Saved decryption of "%s" can\'t be continued; starting it again.', basename($filename)));
+                $resume_iv = null;
+                rewind($file_handle);
+            }
+        }
+
         // open new file from new path
-        if (false === ($decrypted_handle = fopen($decrypted_path, 'wb+'))) {
+        if (false === ($decrypted_handle = fopen($decrypted_path, $bytes_decrypted > 0 ? 'cb' : 'wb+'))) {
             One_Click_Migration::write_to_log(sprintf('Error: Failed to open file "%s" for writing. %s', $decrypted_path, self::last_fs_error_summary()));
             fclose($file_handle);
             return false;
+        }
+        if ($bytes_decrypted > 0) {
+            // A worker cut off mid-chunk may have written past the saved point.
+            ftruncate($decrypted_handle, $bytes_decrypted);
+            fseek($decrypted_handle, $bytes_decrypted);
         }
 
         // setup encryption
@@ -3572,10 +3657,9 @@ class OCM_Backup
         $rijndael->setKey($key);
         $rijndael->disablePadding();
         $rijndael->enableContinuousBuffer();
-
-        $file_size = filesize($filename);
-        $bytes_decrypted = 0;
-        $buffer_size = 2097152;
+        if (null !== $resume_iv) {
+            $rijndael->setIV($resume_iv);
+        }
 
         // loop around the file
         while ($bytes_decrypted < $file_size) {
@@ -3644,6 +3728,13 @@ class OCM_Backup
                 @unlink($decrypted_path);
                 return false;
             }
+            // Some hosts end every request after a fixed time (two minutes on
+            // one Hostinger site), so a large part never finished in one go.
+            if (null !== $resume_from && $bytes_decrypted < $file_size && self::restore_worker_should_hand_over()) {
+                fclose($decrypted_handle);
+                fclose($file_handle);
+                return array('paused' => true, 'done' => $bytes_decrypted, 'size' => $file_size);
+            }
         }
 
         // close the main file handle
@@ -3667,6 +3758,221 @@ class OCM_Backup
             'filename' => $filename_new,
             'basename' => $filename_basename
         );
+    }
+
+    /**
+     * ZipArchive::extractTo() one entry at a time, so a restore worker hands
+     * over between entries, or partway through a large stored one, instead of
+     * being cut off by the host and starting the whole zip again.
+     *
+     * @param \ZipArchive $zip
+     * @param string      $zip_path     The file $zip has open.
+     * @param string      $extract_path
+     * @param int         $index  First entry to extract.
+     * @param int         $offset Bytes of that entry a paused call already wrote.
+     * @return bool|array True when every entry is out, false on failure, or
+     *                    array('index' => <entry>, 'offset' => <bytes>) when the
+     *                    worker ran out of time.
+     */
+    private static function extract_zip_resumable($zip, $zip_path, $extract_path, $index = 0, $offset = 0)
+    {
+        // extractTo() creates the folder even for an empty archive (an empty
+        // uploads part), and the caller checks for it.
+        if (!is_dir($extract_path) && !@mkdir($extract_path, 0777, true) && !is_dir($extract_path)) {
+            return false;
+        }
+        $count = (int) $zip->numFiles;
+        for (; $index < $count; $index++, $offset = 0) {
+            $stat = $zip->statIndex($index);
+            if (false === $stat) {
+                return false;
+            }
+            $name = (string) $stat['name'];
+            $size = (int) $stat['size'];
+            $target = $size >= self::EXTRACT_SLICED_MIN_BYTES ? self::zip_entry_target($extract_path, $name) : null;
+            $span = null !== $target ? self::zip_stored_entry_span($zip_path, $index, $name) : null;
+            if (null !== $span && $span[1] === $size) {
+                $offset = self::extract_stored_entry_slice($zip_path, $span[0], $size, $target, $offset);
+                if (false === $offset) {
+                    return false;
+                }
+                if ($offset < $size) {
+                    return array('index' => $index, 'offset' => $offset);
+                }
+                // As extractTo() does.
+                if (!empty($stat['mtime'])) {
+                    @touch($target, (int) $stat['mtime']);
+                }
+            } elseif (!$zip->extractTo($extract_path, array($name))) {
+                return false;
+            }
+            One_Click_Migration::transfer_heartbeat(One_Click_Migration::$process_restore_single);
+            if (self::restore_run_ended_throttled()) {
+                return false;
+            }
+            if ($index + 1 < $count && self::restore_worker_should_hand_over()) {
+                return array('index' => $index + 1, 'offset' => 0);
+            }
+        }
+        return true;
+    }
+
+    /**
+     * The path extractTo() would write an entry to, for plain relative file
+     * names only; anything odd is left to extractTo(), which cleans it.
+     *
+     * @return string|null
+     */
+    private static function zip_entry_target($extract_path, $name)
+    {
+        if ('' === $name || '/' === $name[0] || '/' === substr($name, -1)
+            || false !== strpbrk($name, "\\\0:")
+            || preg_match('#(^|/)\.{1,2}(/|$)#', $name)
+        ) {
+            return null;
+        }
+        return rtrim($extract_path, '/') . '/' . $name;
+    }
+
+    /**
+     * Where a stored (uncompressed, unencrypted) entry's bytes sit in the zip,
+     * read from the central directory. ZipArchive streams can't seek with
+     * libzip before 1.9, so this is how a slice starts partway through.
+     *
+     * @return array|null array(<offset of the data>, <size>), or null.
+     */
+    private static function zip_stored_entry_span($zip_path, $index, $name)
+    {
+        $fh = @fopen($zip_path, 'rb');
+        if (!$fh) {
+            return null;
+        }
+        $span = null;
+        $total = (int) filesize($zip_path);
+        $tail_len = min($total, 65557);
+        fseek($fh, $total - $tail_len);
+        $tail = (string) fread($fh, $tail_len);
+        $eocd = strrpos($tail, "PK\x05\x06");
+        if (false !== $eocd && strlen($tail) - $eocd >= 22) {
+            $e = unpack('ventries/Vcd_size/Vcd_offset', substr($tail, $eocd + 10, 10));
+            $cd_offset = $e['cd_offset'];
+            // ZIP64: its locator sits right before the EOCD record.
+            if (0xFFFFFFFF === $cd_offset || 0xFFFF === $e['entries']) {
+                $cd_offset = 0xFFFFFFFF === $cd_offset ? -1 : $cd_offset;
+                if ($eocd >= 20 && "PK\x06\x07" === substr($tail, $eocd - 20, 4)) {
+                    $z64 = unpack('P', substr($tail, $eocd - 12, 8));
+                    fseek($fh, $z64[1]);
+                    $rec = (string) fread($fh, 56);
+                    if (56 === strlen($rec) && "PK\x06\x06" === substr($rec, 0, 4)) {
+                        $cd = unpack('P', substr($rec, 48, 8));
+                        $cd_offset = $cd[1];
+                    }
+                }
+            }
+            if ($cd_offset >= 0 && 0 === fseek($fh, $cd_offset)) {
+                for ($i = 0; $i <= $index; $i++) {
+                    $head = (string) fread($fh, 46);
+                    if (46 !== strlen($head) || "PK\x01\x02" !== substr($head, 0, 4)) {
+                        break;
+                    }
+                    $h = unpack('vflags/vmethod/x8/Vcsize/Vusize/vname_len/vextra_len/vcomment_len/x8/Voffset', substr($head, 8));
+                    if ($i < $index) {
+                        fseek($fh, $h['name_len'] + $h['extra_len'] + $h['comment_len'], SEEK_CUR);
+                        continue;
+                    }
+                    $entry_name = $h['name_len'] > 0 ? (string) fread($fh, $h['name_len']) : '';
+                    $extra = $h['extra_len'] > 0 ? (string) fread($fh, $h['extra_len']) : '';
+                    if ($entry_name !== $name || 0 !== $h['method'] || ($h['flags'] & 1)) {
+                        break;
+                    }
+                    // ZIP64 extra field: 8-byte values for the 32-bit fields
+                    // set to 0xFFFFFFFF, in this order.
+                    $usize = $h['usize'];
+                    $offset = $h['offset'];
+                    for ($p = 0; $p + 4 <= strlen($extra);) {
+                        $f = unpack('vid/vlen', substr($extra, $p, 4));
+                        if (1 === $f['id']) {
+                            $q = $p + 4;
+                            foreach (array('usize', 'csize', 'offset') as $field) {
+                                if (0xFFFFFFFF === $h[$field] && $q + 8 <= $p + 4 + $f['len']) {
+                                    $v = unpack('P', substr($extra, $q, 8));
+                                    if ('usize' === $field) {
+                                        $usize = $v[1];
+                                    } elseif ('offset' === $field) {
+                                        $offset = $v[1];
+                                    }
+                                    $q += 8;
+                                }
+                            }
+                        }
+                        $p += 4 + $f['len'];
+                    }
+                    fseek($fh, $offset);
+                    $local = (string) fread($fh, 30);
+                    if (30 === strlen($local) && "PK\x03\x04" === substr($local, 0, 4)) {
+                        $l = unpack('vname_len/vextra_len', substr($local, 26, 4));
+                        $start = $offset + 30 + $l['name_len'] + $l['extra_len'];
+                        if ($start + $usize <= $total) {
+                            $span = array($start, $usize);
+                        }
+                    }
+                }
+            }
+        }
+        fclose($fh);
+        return $span;
+    }
+
+    /**
+     * Copy a stored entry's bytes from $offset on, until done or the worker
+     * runs out of time.
+     *
+     * @return int|false Bytes of the entry now written.
+     */
+    private static function extract_stored_entry_slice($zip_path, $start, $size, $target, $offset)
+    {
+        $dir = dirname($target);
+        if (!is_dir($dir) && !@mkdir($dir, 0777, true) && !is_dir($dir)) {
+            return false;
+        }
+        clearstatcache(true, $target);
+        if ($offset <= 0 || $offset > $size || !is_file($target) || filesize($target) < $offset) {
+            $offset = 0;
+        }
+        $in = @fopen($zip_path, 'rb');
+        $out = $in ? @fopen($target, $offset > 0 ? 'cb' : 'wb') : false;
+        if (!$in || !$out) {
+            if ($in) {
+                fclose($in);
+            }
+            return false;
+        }
+        if ($offset > 0) {
+            ftruncate($out, $offset);
+            fseek($out, $offset);
+        }
+        fseek($in, $start + $offset);
+        $ok = true;
+        while ($offset < $size) {
+            $buf = fread($in, (int) min(2097152, $size - $offset));
+            $written = (false === $buf || '' === $buf) ? false : fwrite($out, $buf);
+            if (false === $written || $written < strlen($buf)) {
+                $ok = false;
+                break;
+            }
+            $offset += $written;
+            One_Click_Migration::transfer_heartbeat(One_Click_Migration::$process_restore_single);
+            if (self::restore_run_ended_throttled()) {
+                $ok = false;
+                break;
+            }
+            if ($offset < $size && self::restore_worker_should_hand_over()) {
+                break;
+            }
+        }
+        fclose($out);
+        fclose($in);
+        return $ok ? $offset : false;
     }
 
     /**
@@ -5589,6 +5895,8 @@ class OCM_Backup
             self::STEP_RESTORE_CHILD_DB_IMPORTED => false,
             self::STEP_RESTORE_CHILD_DB_URLS => false,
             self::STEP_RESTORE_CHILD_DB_PROMOTED => false,
+            self::STEP_RESTORE_CHILD_DECRYPT_DONE => null,
+            self::STEP_RESTORE_CHILD_EXTRACT_RESUME => null,
         );
 
         return array(
@@ -7750,6 +8058,20 @@ class OCM_Backup
     {
         $process = One_Click_Migration::$process_restore_single;
         return is_object($process) && method_exists($process, 'time_exceeded') && $process->time_exceeded();
+    }
+
+    /**
+     * Like restore_worker_out_of_time(), but only inside a worker: without the
+     * batch clock time_exceeded() is always true, and a step would stop after
+     * every chunk.
+     *
+     * @return bool
+     */
+    private static function restore_worker_should_hand_over()
+    {
+        $process = One_Click_Migration::$process_restore_single;
+        return is_object($process) && method_exists($process, 'has_batch_clock') && $process->has_batch_clock()
+            && self::restore_worker_out_of_time();
     }
 
     /**
