@@ -718,7 +718,11 @@ class OCM_Backup
         }
     }
 
-    private static function admin_ajax_loopback_check_passed()
+    /**
+     * @param string $what "backup" or "restore", for the log.
+     * @return bool
+     */
+    private static function admin_ajax_loopback_check_passed($what = 'backup')
     {
         $url = add_query_arg(
             array(
@@ -728,7 +732,7 @@ class OCM_Backup
             admin_url('admin-ajax.php')
         );
 
-        One_Click_Migration::write_to_log(' SYSLOG: Checking admin-ajax loopback before backup worker dispatch');
+        One_Click_Migration::write_to_log(sprintf(' SYSLOG: Checking admin-ajax loopback before %s worker dispatch', $what));
 
         $response = wp_remote_get($url, array(
             'timeout' => 8,
@@ -738,7 +742,8 @@ class OCM_Backup
 
         if (is_wp_error($response)) {
             One_Click_Migration::write_to_log(sprintf(
-                ' SYSLOG: admin-ajax loopback check failed before backup worker dispatch: %s',
+                ' SYSLOG: admin-ajax loopback check failed before %s worker dispatch: %s',
+                $what,
                 $response->get_error_message()
             ));
             return false;
@@ -751,9 +756,10 @@ class OCM_Backup
 
         if (200 !== $code || false === strpos($body, '"success":true')) {
             One_Click_Migration::write_to_log(sprintf(
-                ' SYSLOG: admin-ajax loopback check returned HTTP %d %s before backup worker dispatch. Body: %s',
+                ' SYSLOG: admin-ajax loopback check returned HTTP %d %s before %s worker dispatch. Body: %s',
                 $code,
                 $message,
+                $what,
                 $body_preview
             ));
             return false;
@@ -880,6 +886,20 @@ class OCM_Backup
             ));
         }
         $exluded_folders = self::get_excluded_folders();
+
+        // The first worker runs in this request, and each hand-over starts the
+        // next with a loopback request. Where the site can't reach itself (a
+        // new domain that isn't in public DNS yet, a firewall) only an open
+        // plugin page moves the restore on: field run fcf734ad stopped after
+        // its first 20 seconds and sat in maintenance mode until the customer
+        // reset it. The flag puts "keep this page open" on the progress card
+        // and lets the page revive a stalled worker sooner.
+        if (self::admin_ajax_loopback_check_passed('restore')) {
+            delete_option('ocm_dispatch_blocked');
+        } else {
+            update_option('ocm_dispatch_blocked', 1, false);
+            One_Click_Migration::write_to_log('Notice: This host blocks loopback requests to admin-ajax.php; the restore moves on only while this page is open.');
+        }
 
         // A fresh watchdog clock for this run (see reset_worker_watchdog()).
         One_Click_Migration::reset_worker_watchdog();

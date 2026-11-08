@@ -4,7 +4,7 @@ Tags: backup, migrate, migration, restore, clone
 Requires at least: 5.3
 Tested up to: 7.1
 Requires PHP: 7.4
-Stable tag: 3.2.7
+Stable tag: 3.2.8
 Author URI: https://1clickmigration.com
 License: GPLv3 or later
 License URI: http://www.gnu.org/licenses/gpl-3.0.html
@@ -113,6 +113,9 @@ Any host that runs WordPress on PHP 7.4 or later, including Bluehost, SiteGround
 4. Enter the restore code on the destination site to finish your WordPress migration.
 
 == Changelog ==
+= 3.2.8 =
+* **Restores on a site that can't reach itself**: A restore moves from step to step by having the site call itself. Some new sites can't do that, for example when their domain isn't live yet. On those, the restore stopped after its first minute and left the site in maintenance mode, without saying why. The restore now checks this before it starts, and if the site can't reach itself, it asks you to keep the plugin page open, which keeps the restore going.
+
 = 3.2.7 =
 * **Large restores on hosts with a short request limit**: Some hosts end every request after a minute or two. On those, a large database part (over 1 GB) could never finish decrypting or unzipping, because each attempt started over, and the restore stopped with "database part could not be downloaded or unpacked". Decrypting and unzipping now save their progress and continue in the next step, as downloads already did.
 
@@ -213,6 +216,9 @@ Any host that runs WordPress on PHP 7.4 or later, including Bluehost, SiteGround
 Older versions are listed in [changelog.txt](https://plugins.trac.wordpress.org/browser/1-click-migration/trunk/changelog.txt).
 
 == Upgrade Notice ==
+
+= 3.2.8 =
+A restore on a site that can't reach itself now asks you to keep the plugin page open instead of stopping. Includes all 3.2.7 changes.
 
 = 3.2.7 =
 Large restores no longer stop while decrypting or unzipping on hosts that end long requests. Includes all 3.2.6 changes.
