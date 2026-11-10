@@ -39,6 +39,59 @@ class OCM_Restore_Precheck {
         return __('No backup was found for this restore code. Check the code in your email. Restore codes work for 48 hours after the backup; if yours is older, make a new backup on the old site.', '1-click-migration');
     }
 
+    /** Our own site: the only place a "Pay now" link may point. */
+    const PAY_URL_PREFIX = 'https://1clickmigration.com/';
+
+    /**
+     * Did the service answer that this backup exists but has not been paid for
+     * yet (HTTP 402, error payment_required)? Returns what the admin sees: the
+     * price ('' when the service named none) and the pay link ('' unless it
+     * points at our own site). Null for every other answer.
+     *
+     * @param mixed $redeem What OCM_S3::redeem_restore_code() returned.
+     * @return array|null
+     */
+    public static function payment_required($redeem) {
+        if (!is_object($redeem) || 402 !== (int) ($redeem->_status ?? 0) || 'payment_required' !== ($redeem->error ?? '')) {
+            return null;
+        }
+        return array(
+            'price'   => self::price_label($redeem->amount ?? '', $redeem->currency ?? ''),
+            'pay_url' => self::pay_url($redeem->pay_url ?? ''),
+        );
+    }
+
+    /**
+     * "9.99", "USD" → "$9.99"; other currencies read "9.99 EUR". '' unless both
+     * are exactly an amount with two decimals and a three-letter code, so the
+     * service's answer can go into a message as it is.
+     */
+    public static function price_label($amount, $currency) {
+        if (!is_string($amount) || !is_string($currency)
+            || !preg_match('/^[0-9]{1,6}\.[0-9]{2}$/D', $amount) || !preg_match('/^[A-Z]{3}$/D', $currency)) {
+            return '';
+        }
+        return 'USD' === $currency ? '$' . $amount : $amount . ' ' . $currency;
+    }
+
+    /** The pay link, or '' unless it is a plain https address on our own site. */
+    public static function pay_url($url) {
+        return is_string($url) && strlen($url) <= 300 && 0 === strpos($url, self::PAY_URL_PREFIX)
+            && preg_match('/^[A-Za-z0-9:\/?&=._~%-]+$/D', $url) ? $url : '';
+    }
+
+    /** @return string For the admin when the backup has to be paid for before it can be restored. */
+    public static function payment_required_message($price = '') {
+        if ('' !== $price) {
+            return sprintf(
+                /* translators: %s: price of the migration, e.g. $9.99 */
+                __('This backup hasn\'t been paid for yet. Restoring it costs %s, one time. Pay from the link in your restore-code email, then click Check backup & restore again. If the migration doesn\'t work, reply to that email and we\'ll fix it or refund you in full.', '1-click-migration'),
+                $price
+            );
+        }
+        return __('This backup hasn\'t been paid for yet. Pay from the link in your restore-code email, then click Check backup & restore again. If the migration doesn\'t work, reply to that email and we\'ll fix it or refund you in full.', '1-click-migration');
+    }
+
     public static function prepare() {
         if (!current_user_can('manage_options')) {
             wp_send_json_error(array('message' => __('Only a site administrator can do this.', '1-click-migration')), 403);
@@ -61,6 +114,15 @@ class OCM_Restore_Precheck {
             || empty($redeem->bucket_id) || empty($redeem->aes_key_b64) || empty($redeem->urls)) {
             // A busy or unreachable service must not read as a lost backup.
             $redeem = is_object($redeem) ? $redeem : (object) array();
+            // Neither must a backup that is simply waiting to be paid for.
+            $payment = self::payment_required($redeem);
+            if (null !== $payment) {
+                wp_send_json_error(array(
+                    'code'    => 'payment_required',
+                    'message' => self::payment_required_message($payment['price']),
+                    'pay_url' => $payment['pay_url'],
+                ), 400);
+            }
             if (self::lookup_unavailable($redeem->_status ?? 0, $redeem->error ?? '')) {
                 wp_send_json_error(array('message' => self::service_busy_message()), 503);
             }

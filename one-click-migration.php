@@ -3,8 +3,8 @@
 /**
  * Plugin Name: 1 Click Migration
  * Plugin URI: https://wordpress.org/plugins/1-click-migration/
- * Description: Migrate, copy, or clone your entire site with 1 click. <strong>Any host, no size limitation, no premium versions.</strong>
- * Version: 3.2.8
+ * Description: Migrate, copy, or clone your entire site with 1 click. <strong>Any host, no size limitation.</strong> $9.99 per migration, success guaranteed or a refund.
+ * Version: 3.3.0
  * Requires at least: 5.3
  * Requires PHP: 7.4
  * Author: 1ClickMigration
@@ -435,6 +435,7 @@ class One_Click_Migration
       delete_option('ocm_bucket_id');
       delete_option('ocm_aes_key');
       delete_option('ocm_restore_code_plain');
+      delete_option('ocm_backup_price');
       delete_option('ocm_extra_domain_candidates');
       delete_option('ocm_restore_url_plan');
       delete_option('ocm_active_backup_run');

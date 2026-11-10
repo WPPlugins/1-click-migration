@@ -267,12 +267,26 @@
         displayProgressBar();
     }
 
-    function restoreStartFailed(message) {
+    // The service names the pay page for a backup that has not been paid for.
+    // Only an https address on our own site ever becomes a link.
+    function payLink(data) {
+        var url = data && data.code === 'payment_required' && typeof data.pay_url === 'string' ? data.pay_url : '';
+        return /^https:\/\/1clickmigration\.com\/[A-Za-z0-9:\/?&=._~%-]*$/.test(url) ? url : '';
+    }
+
+    function restoreStartFailed(message, data) {
         stopProgressPolling();
         clearRestorePreparation();
         $('#ocm_restore_code, input[data-ocm-exclude]').prop('disabled', false);
-        $('#ocm-restore-precheck').prop('hidden', false)
+        var $box = $('#ocm-restore-precheck').prop('hidden', false)
             .append($('<p role="alert"></p>').text(message || t('checkBackupAgain')));
+        var url = payLink(data);
+        if (url) {
+            $box.append($('<p class="ocm-precheck-actions"></p>').append(
+                $('<a class="ocm-btn ocm-btn-primary" id="ocm-pay-now" target="_blank" rel="noopener noreferrer"></a>')
+                    .attr('href', url).text(t('payNow'))
+            )).append($('<p class="ocm-precheck-note"></p>').text(t('payOpensNewTab')));
+        }
     }
 
     function renderRestorePreparation(preparation) {
@@ -340,7 +354,7 @@
         }).done(function (response) {
             if (generation !== prepareGeneration) return;
             if (!response || !response.success) {
-                restoreStartFailed(response && response.data && response.data.message);
+                restoreStartFailed(response && response.data && response.data.message, response && response.data);
                 return;
             }
             var preparation = response.data;
@@ -356,7 +370,7 @@
         }).fail(function (xhr) {
             if (generation !== prepareGeneration) return;
             restoreStartFailed(xhr.responseJSON && xhr.responseJSON.data && xhr.responseJSON.data.message
-                || t('checkFailed'));
+                || t('checkFailed'), xhr.responseJSON && xhr.responseJSON.data);
         });
     }
 

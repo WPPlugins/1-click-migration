@@ -4,18 +4,18 @@ Tags: backup, migrate, migration, restore, clone
 Requires at least: 5.3
 Tested up to: 7.1
 Requires PHP: 7.4
-Stable tag: 3.2.8
+Stable tag: 3.3.0
 Author URI: https://1clickmigration.com
 License: GPLv3 or later
 License URI: http://www.gnu.org/licenses/gpl-3.0.html
 
-Free one-click WordPress migration plugin with no 4GB cap. Clone, transfer or move a site to a new host or domain with an emailed restore code.
+One-click WordPress migration plugin, no 4GB cap. Clone, transfer or move a site to a new host or domain. $9.99, success guaranteed or a refund.
 
 == Description ==
 
 ### Back up, migrate and clone a WordPress site ###
 
-1-Click Migration backs up your WordPress website and emails you an 8-character restore code. Paste that code into a new host, a new domain or a second install, and the site is restored there. Site addresses are updated throughout the database, serialized data included. Your live site stays online while the backup runs. It's free, with no account or license key.
+1-Click Migration backs up your WordPress website and emails you an 8-character restore code. Paste that code into a new host, a new domain or a second install, and the site is restored there. Site addresses are updated throughout the database, serialized data included. Your live site stays online while the backup runs. There's no account and no license key. Each migration costs $9.99, with success guaranteed or a refund.
 
 https://vimeo.com/1236211963
 
@@ -28,13 +28,19 @@ https://vimeo.com/1236211963
 * **Clone or duplicate a site.** Duplicate a WordPress site for staging or testing by restoring its backup on a second install.
 * **Move large sites.** There is no 4GB zip cap. Back up and restore the database, plugins, themes and uploads together, or one part at a time.
 
-Use it for any WordPress site migration: a hosting migration to a new provider, a server migration within the same host, a domain migration, or a move from localhost to live. You can move WordPress to another server, host or domain, and the migration itself needs no FTP, cPanel or phpMyAdmin, just a WordPress login on each site. It's a free, automatic migration tool for a complete website migration, from the database to the uploads folder.
+Use it for any WordPress site migration: a hosting migration to a new provider, a server migration within the same host, a domain migration, or a move from localhost to live. You can move WordPress to another server, host or domain, and the migration itself needs no FTP, cPanel or phpMyAdmin, just a WordPress login on each site. It's an automatic migration tool for a complete website migration, from the database to the uploads folder.
+
+**Pricing**
+
+* **$9.99 per migration, success guaranteed or a refund.** One payment per backup, through PayPal, from the link in your restore-code email, before you restore. It covers retries, and restoring the same backup on a second site.
+* **$15 a month for unlimited migrations.** For agencies and anyone who moves many sites. [Subscribe](https://1clickmigration.com/subscriptions/) with the email you use in the plugin, and cancel anytime.
+* **If it doesn't work, we fix it or refund you.** Reply to the restore-code email and we'll fix the migration or refund you in full. No questions asked.
 
 **Built to fail safely**
 
 * The database is imported into temporary tables and checked before it replaces anything. If a check fails, the restore stops, says why, and leaves your site as it was.
 * Before the restore starts, the plugin checks your code and lists other domains found in the backup, such as an old domain or a CDN, so you choose which ones to rewrite.
-* Free disk space is checked before files are unpacked.
+* Available disk space is checked before files are unpacked.
 * Long backups and restores run in short steps and pick up where they left off, so hosts with strict PHP time limits are fine.
 
 **Private by default**
@@ -42,6 +48,7 @@ Use it for any WordPress site migration: a hosting migration to a new provider, 
 * Every part of the backup is AES-256 encrypted on your server before it's uploaded.
 * Backups are stored on Amazon S3 and deleted after 48 hours.
 * Only someone with the restore code can restore the backup, and we email the code only to the address you enter.
+* Payments happen on PayPal's own page. The plugin never asks for card or payment details.
 
 Learn more at [1clickmigration.com](https://1clickmigration.com).
 
@@ -52,14 +59,15 @@ Learn more at [1clickmigration.com](https://1clickmigration.com).
 1. Remove themes, plugins and media you don't need. A smaller site backs up faster.
 2. Deactivate every plugin except 1-Click Migration.
 3. Go to **Tools → One Click Migration**, enter your email and click **Start backup**. Most backups finish in 10–30 minutes.
-4. Keep the email with your 8-character restore code. It's the only way to restore the backup.
+4. Keep the email with your 8-character restore code. It's the only way to restore the backup, and it has the payment link.
 
 **On the site you're moving to**
 
 1. Install WordPress and 1-Click Migration on the new host or domain.
 2. Delete any other plugins the host pre-installed.
-3. Paste the restore code, click **Check backup & restore**, review any extra site addresses, then start the restore.
-4. Log in with the usernames and passwords from the original site.
+3. Pay for the migration from the link in your restore-code email. Subscribers skip this step.
+4. Paste the restore code, click **Check backup & restore**, review any extra site addresses, then start the restore.
+5. Log in with the usernames and passwords from the original site.
 
 If a large site fails to back up or restore in one go, click **Stop & Reset** and use **Advanced options** to move one part at a time, with the database last. Each partial backup gets its own restore code.
 
@@ -69,6 +77,18 @@ If a large site fails to back up or restore in one go, click **Stop & Reset** an
 3. Go to Tools → One Click Migration to start a backup or a restore.
 
 == Frequently Asked Questions ==
+
+= How much does it cost? =
+$9.99 per migration, with success guaranteed or a refund. You pay once through PayPal, from the link in your restore-code email, before you restore. If you move many sites, [$15 a month covers unlimited migrations](https://1clickmigration.com/subscriptions/), and you can cancel anytime.
+
+= What if the migration doesn't work? =
+Reply to the restore-code email and we'll fix it or refund you in full, no questions asked.
+
+= Do I pay again if I retry, or restore the same backup twice? =
+No. One payment covers the backup for the 48 hours it is kept. You can retry a restore, or restore the same code on a second site.
+
+= How do I pay? =
+With a PayPal account or a card, on PayPal's own page. The plugin never asks for payment details. If the restore check says a backup hasn't been paid for yet, it shows the payment link too.
 
 = How long does a migration take? =
 Most backups and restores finish in 10–30 minutes. Large sites and slow hosts take longer.
@@ -107,12 +127,16 @@ Yes. Back up the local site, then restore it on the live server with the restore
 Any host that runs WordPress on PHP 7.4 or later, including Bluehost, SiteGround, Hostinger, GoDaddy, HostGator, DreamHost, Namecheap, IONOS, A2 Hosting, InMotion Hosting, GreenGeeks, ScalaHosting, Liquid Web, Cloudways, WP Engine, Flywheel, Kinsta, Pressable and Pantheon, plus cloud servers on DigitalOcean, AWS Lightsail, Vultr and Linode, and local development sites. It works with cPanel, Plesk or no control panel at all. It also works on hosts that block background requests or cut long PHP requests short. On Pantheon, restore onto the Dev environment in SFTP mode, because code folders on Test and Live are read-only.
 
 == Screenshots ==
-1. Free one-click WordPress migration plugin. Back up a live site; it stays up while you migrate.
+1. One-click WordPress migration plugin. Back up a live site; it stays up while you migrate.
 2. Selective WordPress migrate — choose database, plugins, themes, or uploads to back up.
 3. Restore finished on the destination site. WordPress migration complete.
 4. Enter the restore code on the destination site to finish your WordPress migration.
 
 == Changelog ==
+= 3.3.0 =
+* **Pricing**: A migration now costs $9.99, with success guaranteed or a refund. You pay through PayPal from the link in the restore-code email, before you restore. $15 a month covers unlimited migrations. If a migration doesn't work, reply to that email and we'll fix it or refund you in full.
+* **Paying is part of the restore check**: When a backup hasn't been paid for yet, the restore check says so and shows the payment link, and the backup-completed notice names the price.
+
 = 3.2.8 =
 * **Restores on a site that can't reach itself**: A restore moves from step to step by having the site call itself. Some new sites can't do that, for example when their domain isn't live yet. On those, the restore stopped after its first minute and left the site in maintenance mode, without saying why. The restore now checks this before it starts, and if the site can't reach itself, it asks you to keep the plugin page open, which keeps the restore going.
 
@@ -216,6 +240,9 @@ Any host that runs WordPress on PHP 7.4 or later, including Bluehost, SiteGround
 Older versions are listed in [changelog.txt](https://plugins.trac.wordpress.org/browser/1-click-migration/trunk/changelog.txt).
 
 == Upgrade Notice ==
+
+= 3.3.0 =
+A migration now costs $9.99 (or $15 a month for unlimited), with success guaranteed or a refund. The restore check shows the payment link when a backup hasn't been paid for.
 
 = 3.2.8 =
 A restore on a site that can't reach itself now asks you to keep the plugin page open instead of stopping. Includes all 3.2.7 changes.

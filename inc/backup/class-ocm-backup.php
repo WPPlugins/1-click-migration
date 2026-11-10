@@ -113,6 +113,12 @@ class OCM_Backup
     /** Sender of the restore code email, named on the backup-completed banner. */
     const RESTORE_CODE_SENDER = 'pr@1clickmigration.com';
 
+    /**
+     * What restoring the current backup costs (e.g. "$9.99"), as the service
+     * named it at registration. Unset for a free backup.
+     */
+    const OPTION_BACKUP_PRICE = 'ocm_backup_price';
+
     /** Inline markup translated progress-card text may keep (ui_html()). */
     const UI_HTML = array('strong' => array(), 'code' => array(), 'em' => array());
 
@@ -574,6 +580,14 @@ class OCM_Backup
         update_option('ocm_aes_key',   base64_encode($aes_key), true);
         update_option('ocm_presigned_urls', $presigned_urls, true);
         update_option('ocm_restore_code_plain', $restore_code, false);
+        // Set only when the service says restoring this backup has to be paid
+        // for; the backup-completed banner then names the price up front.
+        $backup_price = isset($registration->payment) && is_object($registration->payment)
+            ? OCM_Restore_Precheck::price_label($registration->payment->amount ?? '', $registration->payment->currency ?? '')
+            : '';
+        if ('' !== $backup_price) {
+            update_option(self::OPTION_BACKUP_PRICE, $backup_price, false);
+        }
         self::set_backup_run_bucket($run_id, $bucket_id);
 
         // Publish the uncompressed part sizes into the log. The log is uploaded to
@@ -983,6 +997,9 @@ class OCM_Backup
                 self::end_restore_run();
                 $message = OCM_Restore_Precheck::lookup_unavailable($status, $has_error ? $redeem->error : '')
                     ? 'service_busy' : 'invalid_restore_code';
+                if (null !== OCM_Restore_Precheck::payment_required($redeem)) {
+                    $message = 'payment_required';
+                }
                 wp_safe_redirect(admin_url('tools.php?page=one-click-migration&message=' . $message));
                 exit;
             }
@@ -4301,7 +4318,7 @@ class OCM_Backup
                         self::ui_html(__('<strong>Check your email</strong> for the restore code from %1$s. If you don\'t see it within a few minutes, check your <strong>spam/junk folder</strong> and mark messages from %2$s as not spam so future restore codes arrive in your inbox.', '1-click-migration')),
                         '<strong>' . self::RESTORE_CODE_SENDER . '</strong>',
                         '<code>' . self::RESTORE_CODE_SENDER . '</code>'
-                    ) . self::backup_id_banner_line();
+                    ) . self::backup_price_banner_line() . self::backup_id_banner_line();
                 } elseif (strpos($lastLog, 'Backup completed with missing parts') === 0) {
                     $missing_label = esc_html(trim((string) substr($lastLog, strlen('Backup completed with missing parts:'))));
                     $progress_item_text['topBanner'] = sprintf(
@@ -4319,7 +4336,7 @@ class OCM_Backup
                             self::ui_html(__('To get a complete backup, ask your host to raise the PHP %s, then run the backup again.', '1-click-migration')),
                             '<code>max_execution_time</code>'
                         )
-                        . self::backup_id_banner_line();
+                        . self::backup_price_banner_line() . self::backup_id_banner_line();
                 }
                 $recovery_hint = self::get_recovery_hint_for_log($lastLog);
                 if ($recovery_hint !== '') {
@@ -4368,6 +4385,24 @@ class OCM_Backup
     private static function ui_html($text)
     {
         return wp_kses($text, self::UI_HTML);
+    }
+
+    /**
+     * @return string For the backup-completed banner when restoring this backup
+     *                has to be paid for: the price, where to pay, and the
+     *                guarantee. '' for a free backup.
+     */
+    private static function backup_price_banner_line()
+    {
+        $price = (string) get_option(self::OPTION_BACKUP_PRICE, '');
+        if ('' === $price) {
+            return '';
+        }
+        return '<br>' . sprintf(
+            /* translators: %s: price of the migration, e.g. $9.99 */
+            self::ui_html(__('Restoring this backup costs %s, one time. The email has the payment link. If the migration doesn\'t work, reply to that email and we\'ll fix it or refund you in full.', '1-click-migration')),
+            '<strong>' . esc_html($price) . '</strong>'
+        );
     }
 
     /** @return string "<br>Backup ID: …" for the backup-completed banner, or ''. */
@@ -6443,6 +6478,9 @@ class OCM_Backup
         // read as a lost backup. "Error: " stays English so admin-script.js
         // still shows it as an error.
         if (preg_match('/Error: Restore code lookup failed \(status=(\d+) error=(\S*)/', $line, $m)) {
+            if (402 === (int) $m[1] && 'payment_required' === $m[2]) {
+                return 'Error: ' . esc_html(OCM_Restore_Precheck::payment_required_message());
+            }
             return 'Error: ' . esc_html(OCM_Restore_Precheck::lookup_unavailable((int) $m[1], $m[2])
                 ? OCM_Restore_Precheck::service_busy_message()
                 : OCM_Restore_Precheck::code_not_found_message());
@@ -8871,6 +8909,7 @@ class OCM_Backup
       delete_option('ocm_skipped_folders');
       delete_option('ocm_eexcluded_folders');
       delete_option('ocm_restore_code_plain');
+      delete_option(self::OPTION_BACKUP_PRICE);
       delete_option(self::BACKUP_UPLOADED_PARTS_OPTION);
 
 
