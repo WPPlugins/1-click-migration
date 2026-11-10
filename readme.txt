@@ -4,12 +4,12 @@ Tags: backup, migrate, migration, restore, clone
 Requires at least: 5.3
 Tested up to: 7.1
 Requires PHP: 7.4
-Stable tag: 3.3.0
+Stable tag: 3.3.1
 Author URI: https://1clickmigration.com
 License: GPLv3 or later
 License URI: http://www.gnu.org/licenses/gpl-3.0.html
 
-One-click WordPress migration plugin, no 4GB cap. Clone, transfer or move a site to a new host or domain. $9.99, success guaranteed or a refund.
+One-click WordPress migration plugin, no size cap. Clone, transfer or move a site to a new host or domain.
 
 == Description ==
 
@@ -26,7 +26,7 @@ https://vimeo.com/1236211963
 * **Hand a site over to a client.** Move WordPress to the client's own hosting account. The site transfer takes one backup and one restore.
 * **Go from localhost or staging to live.** [Push staging to live, or move WordPress from localhost to a server](https://1clickmigration.com/move-wordpress-localhost-to-live/). Back up the staging or local site and restore it on the live server.
 * **Clone or duplicate a site.** Duplicate a WordPress site for staging or testing by restoring its backup on a second install.
-* **Move large sites.** There is no 4GB zip cap. Back up and restore the database, plugins, themes and uploads together, or one part at a time.
+* **Move large sites.** There is no size cap. Back up and restore the database, plugins, themes and uploads together, or one part at a time.
 
 Use it for any WordPress site migration: a hosting migration to a new provider, a server migration within the same host, a domain migration, or a move from localhost to live. You can move WordPress to another server, host or domain, and the migration itself needs no FTP, cPanel or phpMyAdmin, just a WordPress login on each site. It's an automatic migration tool for a complete website migration, from the database to the uploads folder.
 
@@ -106,7 +106,7 @@ Yes. Use Advanced options to back up or restore the database, plugins, themes an
 Yes. The restore replaces the old site address throughout the database, including inside serialized data. You choose whether other domains found in the backup are rewritten too.
 
 = Is there a size limit? =
-There's no 4GB zip cap, and [no 512MB import limit to fix or upload limit to bypass](https://1clickmigration.com/wordpress-migration-upload-limit/). You never upload a backup file through your browser, so there's no file size limit to increase in php.ini. Very large databases may need a higher PHP memory_limit on the source host. If a big site fails in one go, move it one part at a time.
+There's no size cap, and [no 512MB import limit to fix or upload limit to bypass](https://1clickmigration.com/wordpress-migration-upload-limit/). You never upload a backup file through your browser, so there's no file size limit to increase in php.ini. Very large databases may need a higher PHP memory_limit on the source host. If a big site fails in one go, move it one part at a time.
 
 = Does my site go down during a migration? =
 The site you back up stays online, so the migration causes no downtime there. The site you restore onto shows a maintenance page while the restore runs.
@@ -133,6 +133,9 @@ Any host that runs WordPress on PHP 7.4 or later, including Bluehost, SiteGround
 4. Enter the restore code on the destination site to finish your WordPress migration.
 
 == Changelog ==
+= 3.3.1 =
+* **Listing**: A shorter description. No change to the plugin itself.
+
 = 3.3.0 =
 * **Pricing**: A migration now costs $9.99, with success guaranteed or a refund. You pay through PayPal from the link in the restore-code email, before you restore. $15 a month covers unlimited migrations. If a migration doesn't work, reply to that email and we'll fix it or refund you in full.
 * **Paying is part of the restore check**: When a backup hasn't been paid for yet, the restore check says so and shows the payment link, and the backup-completed notice names the price.
