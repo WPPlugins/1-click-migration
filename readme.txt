@@ -4,7 +4,7 @@ Tags: backup, migrate, migration, restore, clone
 Requires at least: 5.3
 Tested up to: 7.1
 Requires PHP: 7.4
-Stable tag: 3.3.2
+Stable tag: 3.3.3
 Author URI: https://1clickmigration.com
 License: GPLv3 or later
 License URI: http://www.gnu.org/licenses/gpl-3.0.html
@@ -133,6 +133,9 @@ Any host that runs WordPress on PHP 7.4 or later, including Bluehost, SiteGround
 4. Enter the restore code on the destination site to finish your WordPress migration.
 
 == Changelog ==
+= 3.3.3 =
+* **"Out of disk space" now shows on the page**: When a hosting account ran out of space during a backup, the plugin's own progress notes could get cut short. The page then stayed on the last step, such as "Archiving plugins", without saying the backup had stopped or why. It now shows that the account is out of disk space and how to fix it.
+
 = 3.3.2 =
 * **Backups that take a while to get ready**: Before a backup starts, the plugin measures your folders and registers the backup, which takes more than 20 seconds on some sites. With the plugin page open, it could take that pause for a stalled backup and stop it with "Backup failed: it stopped unexpectedly", again on every try. A backup now gets up to 10 minutes to get ready before the page checks on it.
 
@@ -246,6 +249,9 @@ Any host that runs WordPress on PHP 7.4 or later, including Bluehost, SiteGround
 Older versions are listed in [changelog.txt](https://plugins.trac.wordpress.org/browser/1-click-migration/trunk/changelog.txt).
 
 == Upgrade Notice ==
+
+= 3.3.3 =
+A backup that runs out of disk space now says so on the page instead of stopping silently. Includes all 3.3.2 changes.
 
 = 3.3.2 =
 Backups that take a while to get ready no longer stop with "it stopped unexpectedly". Includes all 3.3.1 changes.

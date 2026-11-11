@@ -6195,6 +6195,26 @@ class OCM_Backup
      * @param string $line
      * @return string
      */
+    /**
+     * The log's lines, newest last. A line that holds another line's
+     * timestamp partway through (written onto a line a full disk cut short,
+     * before 3.3.3, or by an older plugin) is split there, so the line after
+     * it isn't lost inside the one before.
+     *
+     * @param string $contents
+     * @return string[]
+     */
+    public static function split_log_lines($contents)
+    {
+        $lines = array();
+        foreach (preg_split('/\r?\n/', (string) $contents) as $line) {
+            foreach (preg_split('#(?<=.)(?=\d{2}/\d{2}/\d{4}(?:[A-Za-z]{1,6}|[+-]\d{2}(?::?\d{2})?)\d{2}:\d{2}:\d{2}[ap]m - )#', $line) as $part) {
+                $lines[] = $part;
+            }
+        }
+        return $lines;
+    }
+
     public static function log_line_message($line)
     {
         $line = (string) $line;
@@ -6213,7 +6233,7 @@ class OCM_Backup
         }
 
         $lastLine = '';
-        $lines = array_reverse(explode(PHP_EOL, $contents));
+        $lines = array_reverse(self::split_log_lines($contents));
         $lines = OCM_Backup::unset_empty_log_line($lines);
 
         foreach ($lines as $key => $line) {
@@ -6361,7 +6381,7 @@ class OCM_Backup
         // recovered from: skip its error lines and find the step it was on.
         // $skip_error_lines does the same from the newest line on.
         $crash_block = (bool) $skip_error_lines;
-        foreach (array_reverse(explode(PHP_EOL, (string) file_get_contents($file))) as $raw) {
+        foreach (array_reverse(self::split_log_lines((string) file_get_contents($file))) as $raw) {
             $line = trim(self::log_line_message($raw));
             if ($line === '' || self::is_handover_line($line) || self::is_php_fatal_syslog_line($line)) {
                 continue;
@@ -6399,7 +6419,8 @@ class OCM_Backup
      */
     private static function progress_status_text($line)
     {
-        $line = trim((string) $line);
+        // The line it points to is a SYSLOG line, hidden from the card.
+        $line = trim(str_replace(' (see previous error line)', '', (string) $line));
         if (strpos($line, 'SYSLOG:') === 0) {
             $labels = array(
                 'Dispatching backup worker' => __('Starting the backup', '1-click-migration'),
@@ -6549,7 +6570,7 @@ class OCM_Backup
       }
 
       $lastLine = '';
-      $lines = array_reverse(explode(PHP_EOL, $contents));
+      $lines = array_reverse(self::split_log_lines($contents));
 
       foreach ($lines as $key => $line) {
 

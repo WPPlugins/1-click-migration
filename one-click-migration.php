@@ -4,7 +4,7 @@
  * Plugin Name: 1 Click Migration
  * Plugin URI: https://wordpress.org/plugins/1-click-migration/
  * Description: Migrate, copy, or clone your entire site with 1 click. <strong>Any host, no size limitation.</strong> $9.99 per migration, success guaranteed or a refund.
- * Version: 3.3.2
+ * Version: 3.3.3
  * Requires at least: 5.3
  * Requires PHP: 7.4
  * Author: 1ClickMigration
@@ -646,9 +646,7 @@ class One_Click_Migration
             }
         }
 
-        $log_file = fopen($file, 'ab');
-        fwrite($log_file, $line . PHP_EOL);
-        fclose($log_file);
+        self::append_log_line($file, $line);
 
         // Every S3 copy PUTs the whole log, so copy at most every
         // LOG_UPLOAD_INTERVAL seconds; flush_log_upload() sends the rest.
@@ -667,12 +665,35 @@ class One_Click_Migration
               self::flush_log_upload();
           }
 
-          $log_file = fopen($file, 'ab');
-          fwrite($log_file, $line . PHP_EOL);
-          fclose($log_file);
+          self::append_log_line($file, $line);
 
       }
 
+    }
+
+    /**
+     * Append one line to the debug log, always on a line of its own. On a
+     * full disk or quota a write can stop partway and lose its newline; the
+     * next line was then glued onto it. Field run 49d64d83: "Backup failed:
+     * the hosting account ran out of disk space" landed on a hidden SYSLOG
+     * line, and the progress card kept showing "Archiving plugins".
+     *
+     * @param string $file
+     * @param string $line Without its newline.
+     * @return void
+     */
+    private static function append_log_line($file, $line)
+    {
+        $handle = @fopen($file, 'a+b');
+        if (!$handle) {
+            return;
+        }
+        $stat = fstat($handle);
+        if (!empty($stat['size']) && 0 === fseek($handle, -1, SEEK_END) && "\n" !== fread($handle, 1)) {
+            $line = PHP_EOL . $line;
+        }
+        fwrite($handle, $line . PHP_EOL);
+        fclose($handle);
     }
 
     /**
