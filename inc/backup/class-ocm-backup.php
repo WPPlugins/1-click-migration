@@ -119,6 +119,14 @@ class OCM_Backup
      */
     const OPTION_BACKUP_PRICE = 'ocm_backup_price';
 
+    /**
+     * When start_backup() began a run that has no queue item yet (int). Until
+     * the queue is saved the watchdog leaves the run alone, for at most
+     * BACKUP_START_GRACE seconds.
+     */
+    const OPTION_BACKUP_STARTING = 'ocm_backup_starting';
+    const BACKUP_START_GRACE = 600;
+
     /** Inline markup translated progress-card text may keep (ui_html()). */
     const UI_HTML = array('strong' => array(), 'code' => array(), 'em' => array());
 
@@ -503,6 +511,7 @@ class OCM_Backup
         update_option('ocm_action_start_backup', true, true);
         update_option('ocm_is_stopped', false, true);
         One_Click_Migration::reset_worker_watchdog();
+        update_option(self::OPTION_BACKUP_STARTING, time(), false);
         update_option('ocm_upload_auto_try_nb_db', 0, true);
         update_option('ocm_upload_auto_try_nb_themes', 0, true);
         update_option('ocm_upload_auto_try_nb_plugins', 0, true);
@@ -684,6 +693,10 @@ class OCM_Backup
         One_Click_Migration::start_backup_plugin_isolation();
 
         One_Click_Migration::$process_backup_single->save();
+        // The queue is saved: from here the watchdog judges the run by its
+        // heartbeat, starting now.
+        delete_option(self::OPTION_BACKUP_STARTING);
+        One_Click_Migration::worker_heartbeat();
         // Checks on the worker once a minute until the run ends, so a stalled or
         // crashed backup resumes even if the plugin page is closed.
         self::schedule_worker_watchdog(60);
@@ -4051,6 +4064,17 @@ class OCM_Backup
         }
 
         $now = time();
+        // The backup's start request is still checking disk space and
+        // registering it, so there is no queue item and no heartbeat yet. On one
+        // local site that took 17-35 s, and polls ended three backups in a row
+        // as orphaned (la-mansardina.local, 3.2.8). A start request that died
+        // ages out of this after BACKUP_START_GRACE.
+        if ($backup_active && !$restore_active) {
+            $starting = (int) get_option(self::OPTION_BACKUP_STARTING, 0);
+            if ($starting > 0 && $now - $starting < self::BACKUP_START_GRACE) {
+                return;
+            }
+        }
         // A worker that died on a PHP fatal asked for this: no need to wait for
         // its heartbeat to go stale.
         $resume_option = $restore_active ? self::RESTORE_RESUME_OPTION : self::BACKUP_RESUME_OPTION;
