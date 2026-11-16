@@ -432,6 +432,8 @@ class OCM_Backup
     /** Persisted binary-preflight verdict for this restore's dump fingerprint. */
     const OPTION_BINARY_PREFLIGHT = 'ocm_binary_preflight_verdict';
     const OPTION_RESTORE_PLUGINS_ISOLATED = 'ocm_restore_plugins_isolated';
+    /** Plugins a finished restore left turned off; drives the wp-admin reminder. */
+    const OPTION_PLUGINS_OFF_AFTER_RESTORE = 'ocm_plugins_off_after_restore';
     /** Hosts the staging URL rewrite collected so far, for a resumed rewrite. */
     const OPTION_RESTORE_URL_HOSTS = 'ocm_restore_url_hosts';
     /** Suffix of the untouched copy kept while a dump's table prefix is rewritten. */
@@ -1839,8 +1841,64 @@ class OCM_Backup
      * @param bool   $is_warned
      * @param string $reason    Short reason for the review_ask log line.
      */
+    /**
+     * A restore turns every other plugin off (active_plugins is written
+     * directly, no hooks) and leaves them off. Remember which ones at every
+     * successful end, so wp-admin can remind the admin to turn them back on.
+     *
+     * @return void
+     */
+    private static function remember_plugins_off_after_restore()
+    {
+        $saved = get_option('ocm_force_deactivated_plugins', array());
+        if (!is_array($saved) || !$saved) {
+            return;
+        }
+        $own = plugin_basename(OCM_MAIN_FILE);
+        $list = array();
+        foreach ($saved as $plugin) {
+            if (is_string($plugin) && $plugin !== '' && $plugin !== $own) {
+                $list[$plugin] = true;
+            }
+        }
+        if ($list) {
+            update_option(self::OPTION_PLUGINS_OFF_AFTER_RESTORE, array_keys($list), false);
+        }
+    }
+
+    /**
+     * Plugins the last finished restore turned off that are still off and
+     * still installed. Clears the reminder once none are left.
+     *
+     * @return string[] plugin basenames
+     */
+    public static function plugins_still_off_after_restore()
+    {
+        $list = get_option(self::OPTION_PLUGINS_OFF_AFTER_RESTORE, array());
+        if (!is_array($list) || !$list) {
+            return array();
+        }
+        $active = get_option('active_plugins', array());
+        $active = is_array($active) ? $active : array();
+        $still_off = array();
+        foreach ($list as $plugin) {
+            if (!is_string($plugin) || $plugin === '' || in_array($plugin, $active, true)) {
+                continue;
+            }
+            if (validate_file($plugin) !== 0 || !is_file(WP_PLUGIN_DIR . '/' . $plugin)) {
+                continue;
+            }
+            $still_off[] = $plugin;
+        }
+        if (!$still_off) {
+            delete_option(self::OPTION_PLUGINS_OFF_AFTER_RESTORE);
+        }
+        return $still_off;
+    }
+
     public static function apply_restore_success_flags($is_warned, $reason = '')
     {
+        self::remember_plugins_off_after_restore();
         update_option('ocm_show_restore_success', time(), false);
         $is_partial = (is_string($reason) && false !== strpos($reason, 'partial'));
         // files-only is a clean Restore completed. — not a warned UI state.
@@ -8906,6 +8964,7 @@ class OCM_Backup
       delete_option(self::OPTION_RESTORE_PART_WARNINGS);
       delete_option(self::OPTION_RESTORE_PLUGINS_ISOLATED);
       delete_option(self::OPTION_RESTORE_WAS_WARNED);
+      delete_option(self::OPTION_PLUGINS_OFF_AFTER_RESTORE);
       delete_option(self::OPTION_RESTORE_URL_HOSTS);
       // A run abandoned mid-import left its prefix; this run's dumps are new.
       delete_option(OCM_SQL_Utils::OPTION_STAGING_PREFIX);

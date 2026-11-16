@@ -4,7 +4,7 @@
  * Plugin Name: 1 Click Migration
  * Plugin URI: https://wordpress.org/plugins/1-click-migration/
  * Description: Migrate, copy, or clone your entire site with 1 click. <strong>Any host, no size limitation.</strong> $9.99 per migration, success guaranteed or a refund.
- * Version: 3.3.3
+ * Version: 3.3.4
  * Requires at least: 5.3
  * Requires PHP: 7.4
  * Author: 1ClickMigration
@@ -181,6 +181,10 @@ class One_Click_Migration
         add_action('admin_init', array(__CLASS__, 'handle_review_dismiss'));
         add_action('admin_notices', array(__CLASS__, 'maybe_show_review_notice'));
 
+        // After a restore the site's other plugins are still turned off.
+        add_action('admin_init', array(__CLASS__, 'handle_plugins_off_dismiss'));
+        add_action('admin_notices', array(__CLASS__, 'maybe_show_plugins_off_notice'));
+
     }
 
     public function get_version_from_php_doc()
@@ -316,6 +320,75 @@ class One_Click_Migration
         update_option('ocm_show_review_cta', 0, false);
     }
 
+    /** Dismiss the "your plugins are still turned off" reminder. */
+    public static function handle_plugins_off_dismiss()
+    {
+        if (empty($_GET['ocm_dismiss_plugins_off']) || empty($_GET['_wpnonce']) // phpcs:ignore WordPress.Security.NonceVerification.Recommended
+            || !wp_verify_nonce(sanitize_text_field(wp_unslash($_GET['_wpnonce'])), 'ocm_dismiss_plugins_off') // phpcs:ignore WordPress.Security.NonceVerification.Recommended
+        ) {
+            return;
+        }
+        if (!current_user_can('activate_plugins')) {
+            return;
+        }
+        delete_option(OCM_Backup::OPTION_PLUGINS_OFF_AFTER_RESTORE);
+    }
+
+    /**
+     * After a finished restore, every plugin except this one is still turned
+     * off. Say so on every wp-admin screen until they are back on or the
+     * admin dismisses the reminder.
+     */
+    public static function maybe_show_plugins_off_notice()
+    {
+        if (!current_user_can('activate_plugins')) {
+            return;
+        }
+        $still_off = OCM_Backup::plugins_still_off_after_restore();
+        if (!$still_off) {
+            return;
+        }
+
+        $names = array();
+        $all = function_exists('get_plugins') ? get_plugins() : array();
+        foreach ($still_off as $plugin) {
+            if (!empty($all[$plugin]['Name'])) {
+                $names[] = $all[$plugin]['Name'];
+            } else {
+                $names[] = dirname($plugin) === '.' ? basename($plugin, '.php') : dirname($plugin);
+            }
+        }
+        $shown = array_slice($names, 0, 8);
+        $more = count($names) - count($shown);
+        $list = implode(', ', $shown);
+        if ($more > 0) {
+            /* translators: 1: list of plugin names, 2: how many more plugins are not listed */
+            $list = sprintf(__('%1$s and %2$d more', '1-click-migration'), $list, $more);
+        }
+        $count = count($still_off);
+        $plugins_url = admin_url('plugins.php?plugin_status=inactive');
+        $dismiss_url = wp_nonce_url(add_query_arg('ocm_dismiss_plugins_off', '1'), 'ocm_dismiss_plugins_off');
+        ?>
+        <div class="notice notice-warning ocm-plugins-off-notice">
+            <p><strong><?php
+                /* translators: %d: number of plugins */
+                echo esc_html(sprintf(_n(
+                    'Your restore is done, but %d plugin is still turned off.',
+                    'Your restore is done, but %d plugins are still turned off.',
+                    $count,
+                    '1-click-migration'
+                ), $count));
+            ?></strong>
+            <?php esc_html_e('1 Click Migration turns your other plugins off while it restores a site. They do not work until you turn them back on.', '1-click-migration'); ?></p>
+            <p><?php echo esc_html($list); ?></p>
+            <p>
+                <a class="button button-primary" href="<?php echo esc_url($plugins_url); ?>"><?php esc_html_e('Turn my plugins back on', '1-click-migration'); ?></a>
+                <a href="<?php echo esc_url($dismiss_url); ?>" style="margin-left: 12px;"><?php esc_html_e('Dismiss', '1-click-migration'); ?></a>
+            </p>
+        </div>
+        <?php
+    }
+
     /**
      * Persistent admin notice asking for a review after the first clean restore.
      * Gated on ocm_clean_restore_count (never consumed) rather than
@@ -366,6 +439,7 @@ class One_Click_Migration
             'ocm_is_stopped',
             'ocm_show_restore_success',
             'ocm_show_review_cta',
+            'ocm_plugins_off_after_restore',
             'ocm_extra_domain_candidates',
             'ocm_restore_url_plan',
             'ocm_clean_restore_count',
