@@ -12,6 +12,9 @@ namespace OCM;
  * after its ABSPATH. Keying on ABSPATH rather than home_url keeps the name
  * stable while a restore imports another site's URLs.
  *
+ * Where that folder can't be written, resolve() falls back to a directory
+ * with an unguessable name inside wp-content.
+ *
  * Earlier plugin versions wrote ocm_debug.log and restore-worker.lock to the
  * root itself. Those may belong to any of the siblings, so nothing here reads,
  * moves or deletes them.
@@ -46,6 +49,97 @@ class OCM_Private_Dir
         $name = $name === '' ? 'site' : substr($name, 0, 40);
 
         return self::root_for($abspath) . '/' . $name . '-' . substr(md5($path), 0, 8);
+    }
+
+    /**
+     * Whether a site directory exists and can be written, or could be created:
+     * nothing is created here, so this is safe on every page load.
+     *
+     * @param string $site_dir
+     * @return bool
+     */
+    public static function usable($site_dir)
+    {
+        $site_dir = rtrim((string) $site_dir, '/\\');
+        if ($site_dir === '') {
+            return false;
+        }
+        if (@is_dir($site_dir)) {
+            return @is_writable($site_dir);
+        }
+        $root = dirname($site_dir);
+        if (@is_dir($root)) {
+            return @is_writable($root);
+        }
+
+        return @is_dir(dirname($root)) && @is_writable(dirname($root));
+    }
+
+    /**
+     * The fallback for hosts where the folder above the WordPress root can't
+     * be written (it belongs to root, or open_basedir stops at the site): a
+     * directory inside wp-content whose name nobody can guess. The name comes
+     * from wp-config.php secrets, not from the database, so it stays the same
+     * while a restore replaces the options table. It carries the same deny
+     * files as the shared root; on servers that ignore them, the name is what
+     * keeps the log private.
+     *
+     * @param string $abspath
+     * @param string $content_dir WP_CONTENT_DIR
+     * @param string $secret      Site secret (salts, database password)
+     * @return string '' when there is no secret to build an unguessable name from.
+     */
+    public static function fallback_site_dir_for($abspath, $content_dir, $secret)
+    {
+        $content_dir = rtrim((string) $content_dir, '/\\');
+        if ($content_dir === '' || strlen((string) $secret) < 16) {
+            return '';
+        }
+        $token = substr(hash_hmac('sha256', self::normalize_abspath($abspath), (string) $secret), 0, 32);
+
+        return $content_dir . '/ocm-private-' . $token . '/site';
+    }
+
+    /**
+     * This site's private directory: beside the WordPress root when that
+     * works, else the wp-content fallback when that works. When neither can be
+     * written the preferred path comes back, so callers fail the way they
+     * always did.
+     *
+     * @param string $abspath
+     * @param string $content_dir
+     * @param string $secret
+     * @return string
+     */
+    public static function resolve($abspath, $content_dir, $secret)
+    {
+        $preferred = self::site_dir_for($abspath);
+        if (self::usable($preferred)) {
+            return $preferred;
+        }
+        $fallback = self::fallback_site_dir_for($abspath, $content_dir, $secret);
+        if ($fallback !== '' && self::usable($fallback)) {
+            return $fallback;
+        }
+
+        return $preferred;
+    }
+
+    /**
+     * Secret for fallback_site_dir_for(), from constants wp-config.php defines.
+     *
+     * @return string
+     */
+    public static function site_secret()
+    {
+        $secret = '';
+        foreach (array('AUTH_KEY', 'SECURE_AUTH_KEY', 'LOGGED_IN_KEY', 'NONCE_KEY', 'AUTH_SALT', 'DB_PASSWORD', 'DB_NAME', 'DB_USER') as $name) {
+            if (defined($name) && is_string(constant($name))) {
+                $secret .= '|' . constant($name);
+            }
+        }
+
+        return $secret;
     }
 
     /**

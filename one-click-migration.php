@@ -4,7 +4,7 @@
  * Plugin Name: 1 Click Migration
  * Plugin URI: https://wordpress.org/plugins/1-click-migration/
  * Description: Migrate, copy, or clone your entire site with 1 click. <strong>Any host, no size limitation.</strong> $9.99 per migration, success guaranteed or a refund.
- * Version: 3.3.4
+ * Version: 3.3.5
  * Requires at least: 5.3
  * Requires PHP: 7.4
  * Author: 1ClickMigration
@@ -33,7 +33,9 @@ require_once __DIR__ . '/inc/handler/class-ocm-private-dir.php';
 define('OCM_DEBUG_LOG_FILENAME', 'ocm_debug.log');
 // This site's private directory (log, restore worker lock), inside the
 // .ocm-private shared with sibling installs.
-define('OCM_DEBUG_LOG_DIR', OCM_Private_Dir::site_dir_for(ABSPATH));
+// It moves inside wp-content, under an unguessable name, only on hosts where
+// the folder above the WordPress root can't be written.
+define('OCM_DEBUG_LOG_DIR', OCM_Private_Dir::resolve(ABSPATH, defined('WP_CONTENT_DIR') ? WP_CONTENT_DIR : '', OCM_Private_Dir::site_secret()));
 define('OCM_DEBUG_LOG_FILE', OCM_DEBUG_LOG_DIR . '/' . OCM_DEBUG_LOG_FILENAME);
 define('OCM_DEBUG_LOG_FILE_URL', '');
 define('OCM_WP_CONFIG_FILE', ABSPATH . 'wp-config.php');
@@ -184,6 +186,7 @@ class One_Click_Migration
         // After a restore the site's other plugins are still turned off.
         add_action('admin_init', array(__CLASS__, 'handle_plugins_off_dismiss'));
         add_action('admin_notices', array(__CLASS__, 'maybe_show_plugins_off_notice'));
+        add_action('admin_notices', array(__CLASS__, 'maybe_show_log_folder_notice'));
 
     }
 
@@ -318,6 +321,36 @@ class One_Click_Migration
         }
         update_option('ocm_review_ask_dismissed', 1, false);
         update_option('ocm_show_review_cta', 0, false);
+    }
+
+    /**
+     * On the plugin's own page, say so when the site has nowhere to keep the
+     * migration log: without it a backup or restore shows no progress and no
+     * reason when it stops.
+     */
+    public static function maybe_show_log_folder_notice()
+    {
+        if (!current_user_can('manage_options')) {
+            return;
+        }
+        if (!isset($_GET['page']) || 'one-click-migration' !== $_GET['page']) {
+            return;
+        }
+        if (OCM_Private_Dir::usable(OCM_DEBUG_LOG_DIR)) {
+            return;
+        }
+
+        echo '<div class="notice notice-error ocm-log-folder-notice"><p><strong>'
+            . esc_html__('1 Click Migration can\'t save its log on this server.', '1-click-migration')
+            . '</strong> '
+            . esc_html__('A backup or restore would show no progress here and no reason if it stops.', '1-click-migration')
+            . '</p><p>'
+            . sprintf(
+                /* translators: %s: folder path */
+                esc_html__('Ask your host to let WordPress write to this folder, or create it yourself with the same owner as wp-content: %s', '1-click-migration'),
+                '<code>' . esc_html(OCM_Private_Dir::root_for(ABSPATH)) . '</code>'
+            )
+            . '</p></div>';
     }
 
     /** Dismiss the "your plugins are still turned off" reminder. */
