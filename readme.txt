@@ -4,7 +4,7 @@ Tags: backup, migrate, migration, restore, clone
 Requires at least: 5.3
 Tested up to: 7.1
 Requires PHP: 7.4
-Stable tag: 3.3.5
+Stable tag: 3.3.6
 Author URI: https://1clickmigration.com
 License: GPLv3 or later
 License URI: http://www.gnu.org/licenses/gpl-3.0.html
@@ -133,6 +133,9 @@ Any host that runs WordPress on PHP 7.4 or later, including Bluehost, SiteGround
 4. Enter the restore code on the destination site to finish your WordPress migration.
 
 == Changelog ==
+= 3.3.6 =
+* **Restores of very large tables on servers with a 60-second limit**: Before a restore loads your database, it prepares each table's file. For one very large table, such as 1 GB of posts, that step took longer than some servers allow a request to run. The restore then started the same table over and over, gave up, and left the site as it was. That step is now about ten times faster, so it finishes within the limit.
+
 = 3.3.5 =
 * **Servers where the plugin could not save its log**: The plugin keeps its log in a private folder next to your WordPress folder. On some servers WordPress is not allowed to create that folder. A backup or restore there showed no progress, had no "Download log" link, and gave no reason when it stopped. The plugin now keeps the log in a private folder inside wp-content on those servers, and the plugin page tells you if it can't save a log at all.
 
@@ -255,6 +258,9 @@ Any host that runs WordPress on PHP 7.4 or later, including Bluehost, SiteGround
 Older versions are listed in [changelog.txt](https://plugins.trac.wordpress.org/browser/1-click-migration/trunk/changelog.txt).
 
 == Upgrade Notice ==
+
+= 3.3.6 =
+Restores with a very large database table now finish on servers that limit each request to 60 seconds. Includes all 3.3.5 changes.
 
 = 3.3.5 =
 Backups and restores now show progress on servers where the plugin could not save its log. Includes all 3.3.4 changes.

@@ -1627,6 +1627,15 @@ class OCM_SQL_Utils
                 if ($in_string) {
                     $start = $i;
                     while ($i < $len) {
+                        // Jump to the next backslash or quote in one native
+                        // call. Walking a long text value byte by byte in PHP
+                        // took over 55 s of CPU on a 1 GB posts dump, more
+                        // than a host that caps requests at 60 s allows, and
+                        // the restore restarted this file until it gave up.
+                        $i += strcspn($chunk, "\\'", $i);
+                        if ($i >= $len) {
+                            break;
+                        }
                         $ch = $chunk[$i];
                         if ($ch === '\\') {
                             if ($i + 1 < $len) {
@@ -1848,6 +1857,11 @@ class OCM_SQL_Utils
     {
         $len = strlen($chunk);
         for ($i = 0; $i < $len; $i++) {
+            // Skip the bytes that can't change the state in one native call.
+            $i += $in_string ? strcspn($chunk, "\\'", $i) : strcspn($chunk, "'", $i);
+            if ($i >= $len) {
+                break;
+            }
             $ch = $chunk[$i];
             if ($in_string) {
                 if ($ch === '\\' && $i + 1 < $len) {
