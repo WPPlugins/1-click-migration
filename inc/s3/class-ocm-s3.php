@@ -6,8 +6,6 @@ use Exception;
 use GuzzleHttp\Client;
 use GuzzleHttp\Psr7\Request;
 
-require_once __DIR__ . '/../handler/class-ocm-ca-bundle.php';
-
 class OCM_S3
 {
     const REGISTER_BACKUP_ENDPOINT = 'https://9ulcorn6i3.execute-api.us-east-1.amazonaws.com/Prod/createOCMBucket';
@@ -19,8 +17,6 @@ class OCM_S3
     const REGISTER_MAX_ATTEMPTS = 4;
     /** Longest wait a 429's Retry-After can ask for: the call runs inside a worker or a page load. */
     const RETRY_AFTER_MAX_SECONDS = 10;
-    /** Seconds relay_log() waits for the Lambda. */
-    const RELAY_LOG_TIMEOUT = 15;
 
     /**
      * Register a new backup with the Lambda. Server generates bucket_id, restore code,
@@ -131,56 +127,6 @@ class OCM_S3
         }
 
         $decoded = json_decode($body);
-        return is_object($decoded) && !empty($decoded->ok);
-    }
-
-    /**
-     * Send the debug log through the Lambda when this site cannot reach S3
-     * itself, so a backup whose uploads never connect still reports why. The
-     * Lambda writes it as the bucket's ocm_debug.log, only for the backup
-     * this email and restore code registered and only until that backup is
-     * finished.
-     *
-     * One request, no retry, a short timeout: this runs inside
-     * One_Click_Migration::upload_log(), so it must not log through
-     * write_to_log() and must never hold up or fail the backup.
-     *
-     * @param string $log Log text, already cut to size by the caller.
-     * @return bool True when the Lambda stored it.
-     */
-    public static function relay_log($email, $bucket_id, $code, $log)
-    {
-        if (!function_exists('wp_remote_post') || '' === (string) $log) {
-            return false;
-        }
-
-        $body = wp_json_encode([
-            'action'    => 'relay_log',
-            // Not "email": a Lambda from before relay_log would take that
-            // for a new registration. It answers this with a 400.
-            'registered_email' => (string) $email,
-            'bucket_id' => (string) $bucket_id,
-            'code'      => (string) $code,
-            // Base64: the log can hold bytes that are not valid UTF-8.
-            'log_b64'   => base64_encode((string) $log),
-        ]);
-        if (!is_string($body)) {
-            return false;
-        }
-
-        $response = wp_remote_post(self::REGISTER_BACKUP_ENDPOINT, [
-            'headers'     => ['Content-Type' => 'application/json; charset=utf-8'],
-            'body'        => $body,
-            'method'      => 'POST',
-            'data_format' => 'body',
-            'timeout'     => self::RELAY_LOG_TIMEOUT,
-        ]);
-
-        if (is_wp_error($response) || 200 !== (int) wp_remote_retrieve_response_code($response)) {
-            return false;
-        }
-
-        $decoded = json_decode(wp_remote_retrieve_body($response));
         return is_object($decoded) && !empty($decoded->ok);
     }
 
@@ -563,7 +509,6 @@ class OCM_S3
 
         $headers = [];
         $ch = curl_init($url);
-        OCM_CA_Bundle::curl($ch);
         curl_setopt($ch, CURLOPT_UPLOAD, true);
         curl_setopt($ch, CURLOPT_INFILE, $file_handle);
         curl_setopt($ch, CURLOPT_INFILESIZE, $part_size);
@@ -671,9 +616,9 @@ class OCM_S3
                 [],
                 $file_handle
             );
-            $client = new Client(OCM_CA_Bundle::guzzle([
+            $client = new Client([
                 'timeout' => $upload_timeout,
-            ]));
+            ]);
 
             $response = $client->send($request);
             $status = (int) $response->getStatusCode();

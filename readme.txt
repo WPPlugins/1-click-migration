@@ -1,23 +1,21 @@
-=== 1-Click WordPress Migration Plugin ===
+=== 1-Click WordPress Migration Plugin – Backup, Migrate & Clone ===
 Contributors: 1clickmigration
-Tags: wordpress migration, migration plugin, migration, migrate, backup
+Tags: backup, migrate, migration, restore, clone
 Requires at least: 5.3
-Tested up to: 7.2
+Tested up to: 7.1
 Requires PHP: 7.4
-Stable tag: 4.2.0
+Stable tag: 3.3.7
 Author URI: https://1clickmigration.com
 License: GPLv3 or later
 License URI: http://www.gnu.org/licenses/gpl-3.0.html
 
-One-click WordPress migration plugin, success guaranteed, no size cap. Free extra tools: local backups, search & replace and site cleanup.
+One-click WordPress migration plugin, no size cap. Clone, transfer or move a site to a new host or domain.
 
 == Description ==
 
-### 1-Click WordPress Migration Plugin ###
+### Back up, migrate and clone a WordPress site ###
 
-1-Click Migration is a WordPress migration plugin with success guaranteed. This migration plugin backs up your WordPress website and emails you an 8-character restore code. Paste that code into a new host, a new domain or a second install to finish your WordPress migration. Site addresses are updated throughout the database, serialized data included, while your live site stays online. No account and no license key. Each migration costs $9.99, success guaranteed or a refund.
-
-The plugin also comes with three free extra tools: Local Backup & Restore, Search & Replace and Site Cleanup.
+1-Click Migration backs up your WordPress website and emails you an 8-character restore code. Paste that code into a new host, a new domain or a second install, and the site is restored there. Site addresses are updated throughout the database, serialized data included. Your live site stays online while the backup runs. There's no account and no license key. Each migration costs $9.99, with success guaranteed or a refund.
 
 https://vimeo.com/1236211963
 
@@ -30,101 +28,82 @@ https://vimeo.com/1236211963
 * **Clone or duplicate a site.** Duplicate a WordPress site for staging or testing by restoring its backup on a second install.
 * **Move large sites.** There is no size cap. Back up and restore the database, plugins, themes and uploads together, or one part at a time.
 
-Use this WordPress migration plugin for any WordPress migration, WP migration or WordPress site migration: a hosting migration to a new provider, a server migration within the same host, a domain migration, or a move from localhost to live. Move WordPress to another server, host or domain with no FTP, cPanel or phpMyAdmin — just a WordPress login on each site. It's an automatic migration tool and WP migration plugin for a complete website migration, from the database to the uploads folder.
-
-**Built to fail safely**
-
-* The database imports into temporary tables and is checked before anything is replaced. If a check fails, the migration plugin stops, explains why, and leaves your site untouched.
-* Before the restore starts, the plugin checks your code and lists other domains found in the backup (such as an old domain or CDN) so you choose which ones to rewrite.
-* Available disk space is checked before files are unpacked.
-* Long backups and restores run in short steps and pick up where they left off, so hosts with strict PHP time limits are fine.
-
-**Free Extra Tools**
-
-The migration is the paid part. These three tools come with the plugin and are free to use as often as you like, with no account, email or cloud upload.
-
-* **Local Backup & Restore.** Back up the database, plugins, themes and uploads, in full or in any combination, to a private folder on your own server. Create a quick on-demand WordPress database backup or a full site backup before updating plugins, themes or WordPress core, or run automatic scheduled backups hourly, daily, weekly or monthly in your site's timezone. Automatic retention keeps your last N backups (default 5, or unlimited), and a configurable free-space guard means scheduled backups never fill your hosting disk. A safe one-click restore imports the database into temporary staging tables and verifies its core options before your live site is replaced. A full activity history and log viewer show every run.
-* **Search & Replace.** Find and replace text anywhere in the database: posts, pages, settings, widgets and page builder data, including serialized data, which is updated safely so nothing breaks. Preview how many rows would change, with before → after examples, before anything is changed. Change a domain or switch http to https with one click.
-* **Site Cleanup.** Database cleanup in one click: old revisions, old auto-drafts, spam comments, expired transients and leftover data from deleted posts and comments. A scan shows how many items each kind of leftover has and how much space it takes, before anything changes. Optionally empty the trash, and optimize database tables to reclaim space, so your host gets the freed space back. See the largest tables and folders, other plugins' old backups and inactive themes and plugins. Delete revisions and leftovers before a migration and there is less to move.
-
-Search & Replace and Site Cleanup back up your database before every change. If something looks wrong, click Undo to put it back.
+Use it for any WordPress site migration: a hosting migration to a new provider, a server migration within the same host, a domain migration, or a move from localhost to live. You can move WordPress to another server, host or domain, and the migration itself needs no FTP, cPanel or phpMyAdmin, just a WordPress login on each site. It's an automatic migration tool for a complete website migration, from the database to the uploads folder.
 
 **Pricing**
 
-* **Migration — $9.99, success guaranteed or a refund.** One PayPal payment per migration before you restore on the new host or domain — covers retries and restoring on a second site.
-* **Unlimited migrations — $15 a month.** [Subscribe](https://1clickmigration.com/subscriptions/) with the email you use in the plugin; cancel anytime.
-* **Fix or refund guarantee.** If a migration doesn't work, we'll fix it or refund you.
-* **Free extra tools.** Local Backup & Restore, Search & Replace and Site Cleanup cost nothing: unlimited manual and scheduled local backups, same-site restores, database search & replace and database cleanup.
+* **$9.99 per migration, success guaranteed or a refund.** One payment per backup, through PayPal, from the link in your restore-code email, before you restore. It covers retries, and restoring the same backup on a second site.
+* **$15 a month for unlimited migrations.** For agencies and anyone who moves many sites. [Subscribe](https://1clickmigration.com/subscriptions/) with the email you use in the plugin, and cancel anytime.
+* **If it doesn't work, we fix it or refund you.** Reply to the restore-code email and we'll fix the migration or refund you in full. No questions asked.
+
+**Built to fail safely**
+
+* The database is imported into temporary tables and checked before it replaces anything. If a check fails, the restore stops, says why, and leaves your site as it was.
+* Before the restore starts, the plugin checks your code and lists other domains found in the backup, such as an old domain or a CDN, so you choose which ones to rewrite.
+* Available disk space is checked before files are unpacked.
+* Long backups and restores run in short steps and pick up where they left off, so hosts with strict PHP time limits are fine.
 
 **Private by default**
 
-* Cloud backup parts are AES-256 encrypted on your server before upload, stored on Amazon S3, and deleted after 48 hours.
-* Only someone with the restore code can restore a cloud backup, and we email the code only to the address you enter.
-* Payments happen on PayPal's own page; the plugin never asks for card or payment details.
-* Local backups are stored as plain ZIP archives in a private folder on your own server and are never uploaded.
+* Every part of the backup is AES-256 encrypted on your server before it's uploaded.
+* Backups are stored on Amazon S3 and deleted after 48 hours.
+* Only someone with the restore code can restore the backup, and we email the code only to the address you enter.
+* Payments happen on PayPal's own page. The plugin never asks for card or payment details.
 
-Questions before backing up, or running into a plugin issue? [Ask on the WordPress.org support forum](https://wordpress.org/support/plugin/1-click-migration/) and share your site's domain (never your restore code). Learn more at [1clickmigration.com](https://1clickmigration.com).
+Learn more at [1clickmigration.com](https://1clickmigration.com).
 
 == How it works ==
 
 **On the site you're moving from**
 
-1. Remove themes, plugins and media you don't need. A smaller site backs up faster. The Site Cleanup tab shows what takes up space.
+1. Remove themes, plugins and media you don't need. A smaller site backs up faster.
 2. Deactivate every plugin except 1-Click Migration.
 3. Go to **Tools → One Click Migration**, enter your email and click **Start backup**. Most backups finish in 10–30 minutes.
-4. Keep the email with your 8-character restore code — it's the only way to restore the backup.
+4. Keep the email with your 8-character restore code. It's the only way to restore the backup, and it has the payment link.
 
 **On the site you're moving to**
 
-1. Install WordPress and the 1-Click Migration plugin on the new host or domain.
+1. Install WordPress and 1-Click Migration on the new host or domain.
 2. Delete any other plugins the host pre-installed.
-3. Paste the restore code, click **Check backup & restore**, complete payment (subscribers skip this), review any extra site addresses, and start the restore.
-4. Log in with the usernames and passwords from the original site.
+3. Pay for the migration from the link in your restore-code email. Subscribers skip this step.
+4. Paste the restore code, click **Check backup & restore**, review any extra site addresses, then start the restore.
+5. Log in with the usernames and passwords from the original site.
 
-If a large site fails in one go, click **Stop & Reset** and use **Advanced options** to move one part at a time, database last.
-
-**Free extra tool: Local Backups**
-
-1. Go to **Tools → One Click Migration** and switch to **Local Backups**.
-2. Click **Create Local Backup** for an immediate backup, or enable a schedule (hourly, daily, weekly or monthly) with retention and free-space guard settings.
-3. Click **Restore** next to any saved backup to restore the selected parts safely on the same site.
-
-**Free extra tool: Search & Replace**
-
-1. Go to **Tools → One Click Migration** and switch to **Search & Replace**.
-2. Type what to search for and what to replace it with, and click **Preview changes**.
-3. Check the preview, then click **Back up & replace**. Click **Undo** if you want the database back as it was.
-
-**Free extra tool: Site Cleanup**
-
-1. Go to **Tools → One Click Migration** and switch to **Site Cleanup**.
-2. Click **Scan site** to see what can be removed and how much space it takes.
-3. Tick what to remove and click **Back up & clean**. Click **Undo** if you want the database back as it was.
+If a large site fails to back up or restore in one go, click **Stop & Reset** and use **Advanced options** to move one part at a time, with the database last. Each partial backup gets its own restore code.
 
 == Installation ==
 1. Install 1-Click Migration from Plugins → Add New, or upload the `1-click-migration` folder to `/wp-content/plugins/`.
-2. Activate the migration plugin on the Plugins screen.
-3. Go to Tools → One Click Migration to start a migration. The free extra tools (Local Backups, Search & Replace and Site Cleanup) are tabs on the same screen.
+2. Activate it on the Plugins screen.
+3. Go to Tools → One Click Migration to start a backup or a restore.
 
 == Frequently Asked Questions ==
 
-= How much does a WordPress migration cost, and how do I pay? =
-A WordPress migration costs $9.99, success guaranteed or a refund. Pay once via PayPal or card on PayPal's own page (from the plugin or restore-code email) before you restore; one payment covers retries and restoring the same backup on a second site for 48 hours. If you move many sites, [$15 a month covers unlimited migrations](https://1clickmigration.com/subscriptions/), cancel anytime. Local backups, same-site restores, search & replace and site cleanup are free.
+= How much does it cost? =
+$9.99 per migration, with success guaranteed or a refund. You pay once through PayPal, from the link in your restore-code email, before you restore. If you move many sites, [$15 a month covers unlimited migrations](https://1clickmigration.com/subscriptions/), and you can cancel anytime.
 
-= What if my WordPress migration doesn't work? =
-We'll fix it or refund you in full, no questions asked. For general plugin questions or backup errors, [ask on the support forum](https://wordpress.org/support/plugin/1-click-migration/) with your site's domain (never post your restore code).
+= What if the migration doesn't work? =
+Reply to the restore-code email and we'll fix it or refund you in full, no questions asked.
 
-= How long does a WordPress migration take? =
+= Do I pay again if I retry, or restore the same backup twice? =
+No. One payment covers the backup for the 48 hours it is kept. You can retry a restore, or restore the same code on a second site.
+
+= How do I pay? =
+With a PayPal account or a card, on PayPal's own page. The plugin never asks for payment details. If the restore check says a backup hasn't been paid for yet, it shows the payment link too.
+
+= How long does a migration take? =
 Most backups and restores finish in 10–30 minutes. Large sites and slow hosts take longer.
 
-= How long is my backup available, and what if I lose the restore code? =
-Backups are kept for 48 hours, then deleted. We can't retrieve a lost restore code — check spam, or run a new backup.
+= How long is my backup available? =
+48 hours. After that the backup is deleted from storage and the restore code stops working, so run a new backup.
+
+= I lost the restore code email. Can you resend it? =
+No. We can't retrieve a lost code. Check your spam folder; if it isn't there, run the backup again to get a new code.
 
 = Can I move only part of a site? =
 Yes. Use Advanced options to back up or restore the database, plugins, themes and uploads separately. Each partial backup gets its own restore code.
 
 = Will links and images work on the new domain? =
-Yes. The migration plugin replaces the old site address throughout the database, including inside serialized data, and lets you choose whether other domains found in the backup are rewritten too.
+Yes. The restore replaces the old site address throughout the database, including inside serialized data. You choose whether other domains found in the backup are rewritten too.
 
 = Is there a size limit? =
 There's no size cap, and [no 512MB import limit to fix or upload limit to bypass](https://1clickmigration.com/wordpress-migration-upload-limit/). You never upload a backup file through your browser, so there's no file size limit to increase in php.ini. Very large databases may need a higher PHP memory_limit on the source host. If a big site fails in one go, move it one part at a time.
@@ -132,93 +111,28 @@ There's no size cap, and [no 512MB import limit to fix or upload limit to bypass
 = Does my site go down during a migration? =
 The site you back up stays online, so the migration causes no downtime there. The site you restore onto shows a maintenance page while the restore runs.
 
-= Can I use this migration plugin to create a staging site? =
+= Can I use it to create a staging site? =
 Yes. Restore the backup on a separate WordPress install, such as a staging subdomain. The copy uses the staging site's address.
 
 = Can I migrate a WooCommerce store? =
-Yes. Products, orders and customers are in the database, so [a WooCommerce store moves like any other site](https://1clickmigration.com/migrate-woocommerce-store/). Move the store at a quiet time or pause orders until the new site is live.
+Yes. Products, orders and customers are in the database, so [a WooCommerce store moves like any other site](https://1clickmigration.com/migrate-woocommerce-store/). Orders placed on the old store after the backup starts may not be in it, so move the store at a quiet time or pause orders until the new site is live.
 
 = Does it work with WordPress Multisite? =
-Not yet. This WordPress migration plugin supports single-site installs.
+Not yet. It supports single-site installs.
 
 = Can I move a local site to a live server? =
 Yes. Back up the local site, then restore it on the live server with the restore code. The local site needs an internet connection to upload the backup.
 
-= Which hosts does this WordPress migration plugin work with? =
+= Which hosts does it work with? =
 Any host that runs WordPress on PHP 7.4 or later, including Bluehost, SiteGround, Hostinger, GoDaddy, HostGator, DreamHost, Namecheap, IONOS, A2 Hosting, InMotion Hosting, GreenGeeks, ScalaHosting, Liquid Web, Cloudways, WP Engine, Flywheel, Kinsta, Pressable and Pantheon, plus cloud servers on DigitalOcean, AWS Lightsail, Vultr and Linode, and local development sites. It works with cPanel, Plesk or no control panel at all. It also works on hosts that block background requests or cut long PHP requests short. On Pantheon, restore onto the Dev environment in SFTP mode, because code folders on Test and Live are read-only.
 
-= Are local backups and restores free? =
-Yes. Manual and scheduled local backups (hourly, daily, weekly or monthly) and same-site restores are completely free, with no account or cloud upload required. You only pay for Cloud Migration to move a site to another host or domain ($9.99, success guaranteed or a refund, or $15 a month unlimited).
-
-= Can I schedule automatic daily or weekly WordPress backups? =
-Yes. Under Local Backups, enable the schedule and choose hourly, daily, weekly or monthly backups, the time in your site's timezone, and which parts (database, plugins, themes, uploads) to include.
-
-= Where are local backups stored, and can they fill up my disk? =
-Local backups are saved as plain ZIP archives in a private folder outside your website's public files where the server allows it, otherwise in a folder with an unguessable name, both protected by `.htaccess`, `web.config` and `index.php`. Automatic retention pruning removes older backups past your "Keep last" limit, and a configurable free-space guard skips scheduled runs if hosting disk space gets low.
-
-= Can I search and replace text in the WordPress database? =
-Yes, and it's free. On the Search & Replace tab, type the text to find and the text to replace it with, and click Preview changes to see what would change. Serialized data is updated safely, your database is backed up first, and Undo puts it back. After a migration it's a quick way to replace a leftover old domain or switch http links to https.
-
-= Can I clean up the database before migrating? =
-Yes, and it's free. Site Cleanup scans for old revisions, auto-drafts, spam comments, expired transients and leftover data, shows how much space each takes, and removes what you tick after backing up the database. A smaller database means a faster backup and a faster migration.
-
 == Screenshots ==
-1. 1-Click WordPress migration plugin. Enter your email and start the backup; the site stays up while you migrate.
-2. Enter the restore code on the destination site to finish your WordPress migration.
-3. WordPress migration complete. The restore finished on the new host and the progress bar turns green.
-4. Free extra tool: Local Backups. Back up now, or schedule hourly, daily, weekly or monthly backups with retention and a free-space guard.
-5. Saved local backups and activity history. Restore, view the log of, or delete any backup.
-6. Free extra tool: Search & Replace. Preview what would change, then replace with a backup first and one-click Undo.
-7. Free extra tool: Site Cleanup. Scan for old revisions, spam and leftovers, see what's taking up space, and clean up with one-click Undo.
+1. One-click WordPress migration plugin. Back up a live site; it stays up while you migrate.
+2. Selective WordPress migrate — choose database, plugins, themes, or uploads to back up.
+3. Restore finished on the destination site. WordPress migration complete.
+4. Enter the restore code on the destination site to finish your WordPress migration.
 
 == Changelog ==
-= 4.2.0 =
-* **New: free Site Cleanup**: Scan your database for old revisions, old auto-drafts, spam comments, expired temporary data and leftover data from deleted posts and comments, see how much space each takes, then remove what you tick. Optionally empty the trash and rebuild tables to give the space back to your host. Your database is backed up before every cleanup, and Undo puts it back with one click.
-* **What's taking up space**: See your largest tables and folders, other plugins' old backups and inactive themes and plugins.
-* **Before a migration**: The Cloud Migration tab tells you when a cleanup would make your backup noticeably smaller.
-* **Backups on servers without an up-to-date certificate list**: Backup uploads, the backup log and restore downloads now check the storage service with WordPress's own certificate list, the same one WordPress already uses to register the backup. Before, a server whose PHP had no certificate list of its own could register a backup and then fail to upload anything.
-* **A backup that can't reach storage still says why**: If your server can't connect to the storage service at all, for example because of a firewall or proxy, the plugin now sends its log through the backup service instead, so the reason reaches us and we can help.
-* **Signed out during Search & Replace or Site Cleanup**: When your WordPress login expires, these tabs now say you were signed out and to reload the page, instead of "Lost the connection", and stop retrying. Anything that was running continues once you sign in again.
-* **Listing**: The WordPress.org page leads with migration again and lists Local Backup & Restore, Search & Replace and Site Cleanup as free extra tools, with new screenshots.
-
-= 4.1.0 =
-* **New: free Search & Replace**: Find text anywhere in your database and replace it, including inside serialized settings and widgets. Preview what would change first. Your database is backed up before every replace, and Undo puts it back with one click. One click also switches an http site's links to https.
-
-= 4.0.2 =
-* **Restoring after your site address changed**: A local restore on a site that has since moved to https or to a new domain now updates the old address everywhere in the database. Before, only the main site address was updated and links inside posts and settings kept the old one.
-* **Safer Stop**: Stop can no longer leave a site half restored. Once a restore has started replacing your database or files it finishes on its own, and Stop tells you so. If a restore gets stuck there, Stop works again after a few minutes and says that part of the backup is already in place.
-* **More reliable restores**: Stopping a restore and starting a new one right away no longer ends the new one. A restore that was cut off right after replacing the database carries on from there instead of reporting that nothing was changed. A restore that stops unexpectedly no longer leaves its temporary files and tables behind.
-* **Clearer Local Backups screen**: The screen now tells you when you were logged out by a database restore, when a backup or restore did not start, and when deleting a backup or clearing the log did not work. Lowering "Keep last" asks before it deletes older backups. The restore window says plainly what will be replaced. Progress messages no longer show stray `&quot;` characters.
-* **Custom plugin folder**: A restore no longer removes this plugin's own files when it is installed in a folder with a different name.
-* **Optional anonymous reports (off by default)**: The Local Backups screen asks once whether you want to send anonymous reports when a local backup or restore finishes, fails or crashes, to help us fix problems faster. Nothing is sent unless you allow it. Click "What is sent" in that window for the full list, and turn it off anytime under Schedule & Storage settings.
-
-= 4.0.1 =
-* **Local backup fixes**: Starting a second backup or a restore no longer shows the previous run's result and stops updating. A restore that keeps getting cut off at the same step now stops and says so, instead of leaving the site in maintenance mode. Scheduled backups start again after the plugin is deactivated and reactivated.
-* **More reliable runs**: A backup that takes a while to finish is no longer reported as failed. Stopping a backup and starting a new one right away no longer cancels the new one. A start that was cut off no longer blocks later backups.
-* **Plugins stay active**: Stopping a local restore from the Cloud Migration tab, or deactivating the plugin during one, no longer leaves your other plugins switched off. A restore that resumes while it is putting plugins back no longer removes plugins it already restored.
-* **Private storage**: When WordPress is installed in a subfolder of the website, local backups now go to a folder with an unguessable name instead of one inside the website's public files. Backups saved by 4.0.0 are moved there automatically.
-
-= 4.0.0 =
-* **Free Local Backup & Restore**: Added free manual and scheduled local backups (hourly, daily, weekly or monthly in your site's timezone) with selective components (database, plugins, themes, uploads), automatic keep-last-N retention pruning, a configurable free-space guard, web-blocked private ZIP storage, safe staging-table restores, and an activity log viewer.
-* **Listing**: Updated plugin title, short description, tags, description and FAQ to cover Free Local Backup & Restore alongside Cloud Migration.
-
-= 3.3.12 =
-* **Clearer guarantee wording**: The payment messages in the plugin now say it plainly: if the migration doesn't work, we'll fix it or refund you in full. For help, post in the support forum and we'll answer you there.
-
-= 3.3.11 =
-* **Faster help when a backup or restore stops**: The progress card now has a "Copy details for the forum" button. It copies your site's domain, the plugin, WordPress and PHP versions, and what the card says happened, so a support forum post starts with what we need to answer it. It never copies your restore code or email address.
-* **Listing**: Shorter plugin title on WordPress.org.
-
-= 3.3.10 =
-* **Easier to reach support**: Added a visible Support forum link in the plugin top bar, beneath the How it works card, and on the WordPress Plugins list.
-* **Listing**: Updated plugin tags, description and FAQ for clearer WordPress migration search discovery, and moved pre-3.3.0 changelog entries to changelog.txt.
-
-= 3.3.9 =
-* New look for the plugin screen: a dark neon panel that matches the new icon. Backup lights up yellow and Restore lights up cyan, and the progress bar turns green when a run finishes and red when it stops. Nothing about how backups and restores work has changed.
-
-= 3.3.8 =
-* **Listing**: The plugin description now says up front that success is guaranteed.
-
 = 3.3.7 =
 * **Pay inside the restore**: When a backup hasn't been paid for yet, the restore check no longer stops with a message. It shows the backup it found and the price, and PayPal opens in a small window. As soon as the payment goes through, the restore carries on by itself.
 * **Pay from the old site**: The notice you see when a backup finishes now has a Pay button, so you can pay right away instead of from the email.
@@ -243,42 +157,112 @@ Yes, and it's free. Site Cleanup scans for old revisions, auto-drafts, spam comm
 * **Listing**: A shorter description. No change to the plugin itself.
 
 = 3.3.0 =
-* **Pricing**: A migration now costs $9.99, with success guaranteed or a refund. You pay through PayPal from the link in the restore-code email, before you restore. $15 a month covers unlimited migrations. If a migration doesn't work, we'll fix it or refund you in full.
+* **Pricing**: A migration now costs $9.99, with success guaranteed or a refund. You pay through PayPal from the link in the restore-code email, before you restore. $15 a month covers unlimited migrations. If a migration doesn't work, reply to that email and we'll fix it or refund you in full.
 * **Paying is part of the restore check**: When a backup hasn't been paid for yet, the restore check says so and shows the payment link, and the backup-completed notice names the price.
+
+= 3.2.8 =
+* **Restores on a site that can't reach itself**: A restore moves from step to step by having the site call itself. Some new sites can't do that, for example when their domain isn't live yet. On those, the restore stopped after its first minute and left the site in maintenance mode, without saying why. The restore now checks this before it starts, and if the site can't reach itself, it asks you to keep the plugin page open, which keeps the restore going.
+
+= 3.2.7 =
+* **Large restores on hosts with a short request limit**: Some hosts end every request after a minute or two. On those, a large database part (over 1 GB) could never finish decrypting or unzipping, because each attempt started over, and the restore stopped with "database part could not be downloaded or unpacked". Decrypting and unzipping now save their progress and continue in the next step, as downloads already did.
+
+= 3.2.6 =
+* **After a restore**: The "Restore complete" window now asks whether everything came across. "Yes, looks good" leads to the review ask and says that a free WordPress.org account is needed. "Something's off" leads straight to the support forum instead.
+* **Restores that use the MySQL command line**: On some servers the database import reported success while WordPress couldn't see the imported tables, and the restore stopped with "the backup's main options table didn't pass the check". The restore now checks each imported table and, if WordPress can't see it, imports that table again through WordPress.
+
+= 3.2.5 =
+* **Out of disk space during a backup**: When the hosting account ran out of disk space while a backup was being prepared, the backup stopped with "encryption of the archive failed" and left its unfinished files behind. It now says the account is out of disk space, shows how to fix it, and deletes those files right away so the account isn't left full.
+
+= 3.2.4 =
+* **Linked database tables**: A restore could stop with "the database could not be imported" when a plugin on the old site keeps database tables that point to each other, such as a popup plugin's A/B test and visit log tables. These tables now restore and stay linked on the new site.
+
+= 3.2.3 =
+* **Stop & Reset**: Clicking Stop & Reset right after starting a backup could leave the backup running in the background, and it then reported "Backup failed". Stop & Reset now stops the backup straight away.
+
+= 3.2.2 =
+* **Interrupted restores**: When a restore picks up again after being interrupted just as a part of your backup finished downloading, it now keeps that download instead of fetching the same part again, so the restore finishes sooner.
+
+= 3.2.1 =
+* **Short service hiccups**: Starting a backup, uploading it, emailing the restore code and checking a restore code now try again on their own when the 1-Click Migration service is briefly busy or a connection drops, instead of stopping.
+* **Large uploads**: If uploading a large backup in parts runs into a problem, the backup now picks up the upload where it left off instead of trying to send the whole file again in one go, which could never work for files over 5 GB.
+* **Clearer restore message**: When the restore-code service is busy or can't be reached, the Restore tab now says so and that your backup is safe, instead of saying no backup was found for your code.
+
+= 3.2.0 =
+* **PHP 8.4 and 8.5**: The plugin no longer adds "Deprecated" notices to your error log, or to your pages when your site shows PHP errors. Its built-in libraries are updated to current versions, including security fixes in the library that encrypts your backups. Backups made with earlier versions still restore.
+
+= 3.1.35 =
+* **Slow connections**: A restore on a slow connection could sit on one download for up to 20 minutes until the host stopped it, or stop with "Restore failed while downloading" after a short pause in the connection. Downloads now pass the work on in short steps, a pause is simply tried again, and a slow download that keeps moving is no longer given up on after a set number of attempts.
+
+= 3.1.34 =
+* **Restores from a shared database**: If the old site's database also holds the tables of another WordPress site, such as a staging copy or a second install, the restore now brings over only your site's tables instead of stopping. If it can't tell which tables are yours, it stops before changing anything and says what to do.
+* **Very large folders**: When the host keeps stopping a backup while it packs a big folder, the backup now waits for the packing already under way instead of starting it over, which could fill the disk. If it still can't finish, it explains how to make the folder smaller. Folders larger than 80 GB can now be uploaded.
+
+= 3.1.33 =
+* **Clearer guidance**: Starting a backup while another one runs now says so instead of waiting silently. If you get logged out during a restore, the page tells you before it reloads, and the logout tip now appears at the step where it happens. The restore-code reminder stays on the page after you reload it. If restored files can't be put in place, the page explains that the site stays in maintenance mode on purpose and how to leave it. The downloaded log starts with a short note on sharing it safely.
+
+= 3.1.32 =
+* **Backups recover on their own too**: If an unexpected error stops a backup partway, it now picks up again from where it stopped, up to two times, even with the plugin page closed. A backup that crashed no longer blocks Start backup until you click Stop & Reset.
+* **Clearer messages**: The progress card explains problems in plain language instead of showing server errors, and a failed backup or restore still shows what happened and how to fix it after you reload the page. Hosts that need the page kept open now say so.
+* **Fix**: A backup or restore could stall after handing its work to a new background request and wait forever. It now continues, and a run that truly can't continue ends with a clear message. Each backup's log also no longer includes the previous backup's log.
+
+= 3.1.31 =
+* **Restores recover on their own**: If an unexpected error stops a restore partway, it now picks up again from where it stopped, up to two times, and the site stays in maintenance mode while it does. It can also recover with the plugin page closed, and a download that had already finished before the interruption no longer makes it fail. In 3.1.30, a PHP time-limit error could take the site out of maintenance mode while the restore was still running.
+
+= 3.1.30 =
+* Fix: restores no longer crash when another plugin (such as WooCommerce) bundles an older background-processing library; a crashed restore no longer leaves the site in maintenance mode.
+* Fix: a restore started right after one that crashed no longer waits forever with no progress. It clears what the crashed run left behind and starts, or tells you to click Stop & Reset if an earlier restore may still be running.
+
+= 3.1.29 =
+* **Minimum WordPress 5.3**: The plugin now lists WordPress 5.3 as its minimum. It's the first version that officially supports PHP 7.4, which the plugin already requires. Backup and restore work exactly as in 3.1.28.
+
+= 3.1.28 =
+* **Ready for translation**: The plugin page, its notices and the help shown with backup and restore progress can now be translated on translate.wordpress.org. Once a translation for your language is ready, WordPress installs it with the plugin. Progress steps come from the migration log and stay in English. The minimum WordPress version is now listed as 4.9, which the plugin already needed.
+
+= 3.1.27 =
+* **Listing update**: The description and FAQ now cover WooCommerce stores, more hosts and cloud servers, staging to live and domain name changes, and link to step-by-step guides on 1clickmigration.com. Backup and restore work exactly as in 3.1.26.
+
+= 3.1.26 =
+* **Listing update**: More hosts and a local-to-live question in the FAQ. Changelog entries before 3.1.20 moved to changelog.txt. Backup and restore work exactly as in 3.1.25.
+
+= 3.1.25 =
+* **Listing update**: New plugin title and short description on WordPress.org. Backup and restore work exactly as in 3.1.24.
+
+= 3.1.24 =
+* **Help links go to the support forum**: When a backup or restore fails, stops or stalls, the progress card now links to the WordPress.org support forum instead of the 1clickmigration.com contact form. It asks you to share your site's domain and never your restore code, because anyone who has the code can restore your backup. The help sections on the plugin page and the summary of an unfinished restore link there too.
+* **Updated plugin listing**: New title, short description and description on WordPress.org. Two corrections: a restore needs only the restore code, and the plugin page is under Tools → One Click Migration.
+
+= 3.1.23 =
+* **Clearer progress card**: The progress card no longer shows internal log lines (such as "SYSLOG: Dispatching backup worker") or full server paths for routine steps. It now shows plain step names such as "Starting the backup worker" or "Archiving themes". Error messages still include the path, so you can fix permissions or quota.
+* **No more false "taking longer than expected" notice**: Workers hand over to the next worker every 20 seconds. These planned hand-overs no longer show "Process is Restarting" or the "taking longer than expected" notice. The notice now appears only when a worker has actually stalled. It goes away once the run is moving again and is cleared when the run finishes. A new run no longer picks up the previous run's stall state.
+* **The progress bar no longer jumps backwards**: During a restore the bar could drop back to 1% ("Starting restore…") on log lines it didn't recognize. After the database import it went 84% → 40% → 83% → 62%. It now keeps the current step and moves forward in the order the restore actually runs.
+
+= 3.1.22 =
+* **Quieter restore log**: Restores no longer log a warning for each temporary copy of a database file that was already removed.
+* **No empty folders after backups**: A finished or failed backup now removes its empty work folder instead of leaving one behind for every run.
+
+= 3.1.21 =
+* **Restores survive strict server time limits**: Some hosts end a PHP request after 30 seconds, sooner than the plugin expected. Backup and restore workers now hand over to the next worker before that limit (20 seconds by default) without losing finished steps. If a worker is cut off during the database import anyway, the next one resumes the import where it stopped, instead of stopping with "the backup's main options table didn't pass the check".
+* **Restore files kept out of the web root**: The restore used to unpack the database dump and the other parts into `wp-content/ocm_restore`. Servers that ignore `.htaccess` (such as nginx) could serve those files to anyone during a restore and after a failed one. Restore and backup work files now go to the private folder outside the web root. Where that isn't possible, they go to a randomly named, access-protected folder. A leftover `wp-content/ocm_restore` from an older version is removed.
+* **Separate logs for sites in the same folder**: Sites installed side by side in one folder no longer share the migration log and the restore lock. Each site now has its own folder inside `.ocm-private`.
+* **Every stopped restore cleans up**: Each restore that stops with "No changes were made" now clears the success and review prompts, the restore queue and any temporary tables. This includes a database part that can't be downloaded.
+* **Restore right after a stopped one**: A restore started from the admin page soon after a failed or stopped run could stop at once with "the database could not be imported". The progress check no longer clears anything while a new restore starts.
+* **No leftover restore workers**: After a restore fails or stops, no worker from that run keeps downloading, decrypting or logging, and a new restore no longer overlaps a worker from the previous run.
+* **Source site's scheduled events stay behind**: A restore no longer copies the source site's scheduled 1 Click Migration events to the destination.
+* **Faster logging**: The migration log is now sent to storage at most every 10 seconds and immediately when a run ends, instead of after every line. This made backups and restores slower.
+
+= 3.1.20 =
+* **Site addresses updated before the swap**: The restore now updates site addresses on the imported copy of the database, before it replaces the live database and files. If that step can't finish safely (for example a table with no primary key, a row too large for the PHP memory limit, or the memory limit itself being reached), the restore stops with no changes made to the site, instead of leaving it half-restored.
+* **Restore never resumes the source's backup**: A backup's database is dumped while that backup is still running. After a restore, the destination could pick up the source site's unfinished backup and upload into the source's storage. The destination now keeps its own plugin state when the database is swapped in, and a backup can't run while a restore is in progress.
+* **One restore worker at a time**: Long downloads and decryption now report progress, so the restore is no longer mistaken for stalled and started twice. A process lock also keeps a second restore worker from running alongside the first. A missing temporary file is no longer reported as a disk-quota problem.
+* **Progress check after backup**: Checking progress the moment a backup finished could log a fatal `count()` error. It now exits quietly and never finishes the backup twice.
+* **Crashes are always logged**: A fatal PHP error during a backup or restore is now always logged, including parse and compile errors and a repeat of an earlier crash. A crashed run no longer looks like it is still in progress.
+* **Clearer storage and disk errors**: Running out of disk space while decrypting a part is reported at that step, not later as a corrupt archive. A failed upload of a large part no longer leaks the storage error into the progress screen, and an upload without a storage receipt is now logged.
+* **No address prompt after a stopped restore**: A restore that stops with no changes made no longer offers to update extra site addresses.
+* **Steadier progress bar**: Some internal log lines, such as low-memory notices and duplicate-worker exits, could send the progress bar back to 1% or show as the current step. They no longer do.
 
 Older versions are listed in [changelog.txt](https://plugins.trac.wordpress.org/browser/1-click-migration/trunk/changelog.txt).
 
 == Upgrade Notice ==
-
-= 4.2.0 =
-Adds two free extra tools, Search & Replace and Site Cleanup, each with a preview or scan first, a backup of your database before every change and one-click Undo. Backups now upload on servers without an up-to-date certificate list. Includes all 4.1.0 changes.
-
-= 4.1.0 =
-Adds free Search & Replace: find and replace text anywhere in your database with a preview first, a backup before every change and one-click Undo.
-
-= 4.0.2 =
-Local restore fixes: the site address is updated everywhere after a move to https or a new domain, Stop can no longer leave a site half restored, and the Local Backups screen explains failures. Adds optional anonymous Local Backups reports, off unless you allow them.
-
-= 4.0.1 =
-Fixes for free Local Backups: reliable progress, restores that can't loop, schedules that survive reactivation, plugins kept active, and safer storage.
-
-= 4.0.0 =
-Adds free manual and scheduled Local Backups & Restores (hourly, daily, weekly or monthly) with retention pruning, disk-space guard, and safe staging-table restore. Cloud migrations remain $9.99, success guaranteed or a refund, or $15 a month unlimited.
-
-= 3.3.12 =
-Clearer wording for the fix-it-or-refund guarantee. Backups and restores work the same.
-
-= 3.3.11 =
-Adds a "Copy details for the forum" button when a backup or restore stops. Backups and restores work the same.
-
-= 3.3.10 =
-Easier-to-find support forum links in the plugin screen and updated WordPress.org listing copy. Backups and restores work the same.
-
-= 3.3.9 =
-New look for the plugin screen. Backups and restores work the same.
-
-= 3.3.8 =
-Listing text only: success guaranteed, said up front.
 
 = 3.3.7 =
 Paying for a restore is now a step inside the restore, which carries on by itself once paid. Includes all 3.3.6 changes.

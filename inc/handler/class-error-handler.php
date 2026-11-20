@@ -79,17 +79,9 @@ class Error_Handler
       $migration_active = get_option('ocm_action_start_backup') || get_option('ocm_action_start_restore') || OCM_Debug_Mode::is_active();
 
       // Do not keep appending unrelated frontend/theme/plugin fatals to an old
-      // migration S3 log after backup/restore has finished. A fatal while a
-      // local backup or restore is running is still seen: it goes to the local
-      // log (never the cloud one) and, when the owner opted in, to a crash
-      // report. Only fatals pay for that check, and nothing is logged while
-      // no run of either kind is active.
-      $local_only = false;
+      // migration S3 log after backup/restore has finished.
       if (!$migration_active && !$is_plugin_error) {
-          if (!self::is_fatal($errno) || !self::is_local_context()) {
-              return;
-          }
-          $local_only = true;
+          return;
       }
 
       // Skip vendor deprecation notices (e.g. nelexa/zip PHP 8.1+ return type warnings)
@@ -113,16 +105,8 @@ class Error_Handler
       // crash. No dedup and no log read, which can itself fail right after an
       // out-of-memory fatal.
       if (self::is_fatal($errno)) {
-          $fatal_line = sprintf(' SYSLOG: "%s"', self::getMessage($errno, $errstr, $errfile, $errline));
-          if ($local_only && method_exists(One_Click_Migration::class, 'run_in_local_log')) {
-              One_Click_Migration::run_in_local_log(static function () use ($fatal_line, $errstr) {
-                  One_Click_Migration::write_to_log($fatal_line);
-                  One_Click_Migration::write_to_log($errstr);
-              });
-          } else {
-              One_Click_Migration::write_to_log($fatal_line);
-              One_Click_Migration::write_to_log($errstr);
-          }
+          One_Click_Migration::write_to_log(sprintf(' SYSLOG: "%s"', self::getMessage($errno, $errstr, $errfile, $errline)));
+          One_Click_Migration::write_to_log($errstr);
           // Only die for fatal errors originating from plugin code
           if ($is_plugin_error) {
               // die() here skips every later shutdown callback, so the backup
@@ -135,12 +119,8 @@ class Error_Handler
               // The shutdown upload of held-back log lines is skipped too, so
               // the S3 copy would end before the fatal (#127).
               One_Click_Migration::flush_log_upload();
-              // Last, after the guards and the log: a second fatal in here
-              // can no longer cost the run its crash handling.
-              self::report_local_crash($errno, $errstr, $errfile, $errline);
               die();
           }
-          self::report_local_crash($errno, $errstr, $errfile, $errline);
           return;
       }
 
@@ -187,54 +167,6 @@ class Error_Handler
         One_Click_Migration::write_to_log(sprintf(' SYSLOG: "%s"', $log_message));
       }
 
-    }
-
-    /**
-     * Whether a local backup or restore is what this request, or this site,
-     * is busy with: the local log channel is on, or a local run is active.
-     *
-     * @return bool
-     */
-    private static function is_local_context()
-    {
-        try {
-            if (class_exists(__NAMESPACE__ . '\\One_Click_Migration', false)
-                && method_exists(One_Click_Migration::class, 'get_log_channel')
-                && One_Click_Migration::get_log_channel() === 'local'
-            ) {
-                return true;
-            }
-            return class_exists(__NAMESPACE__ . '\\OCM_Local_Backup', false) && OCM_Local_Backup::is_running();
-        } catch (\Throwable $e) {
-            return false;
-        }
-    }
-
-    /**
-     * Opt-in crash report for a fatal during a local backup or restore. It
-     * runs after the crash guards and the log flush, is skipped for
-     * out-of-memory fatals (anything more would likely fail the same way),
-     * and never throws out of the handler.
-     *
-     * @param int    $errno
-     * @param string $errstr
-     * @param string $errfile
-     * @param int    $errline
-     * @return void
-     */
-    private static function report_local_crash($errno, $errstr, $errfile, $errline)
-    {
-        try {
-            if (stripos((string) $errstr, 'Allowed memory size') !== false || stripos((string) $errstr, 'Out of memory') !== false) {
-                return;
-            }
-            if (!class_exists(__NAMESPACE__ . '\\OCM_Local_Telemetry', false) || !self::is_local_context()) {
-                return;
-            }
-            OCM_Local_Telemetry::report_crash($errno, $errstr, $errfile, $errline);
-        } catch (\Throwable $e) {
-            // A crash report must never break crash handling.
-        }
     }
 
     private static function should_log_persistent_error($fingerprint, $now)
