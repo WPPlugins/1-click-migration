@@ -4,18 +4,18 @@ Tags: backup, migrate, migration, restore, clone
 Requires at least: 5.3
 Tested up to: 7.1
 Requires PHP: 7.4
-Stable tag: 3.3.7
+Stable tag: 3.3.8
 Author URI: https://1clickmigration.com
 License: GPLv3 or later
 License URI: http://www.gnu.org/licenses/gpl-3.0.html
 
-One-click WordPress migration plugin, no size cap. Clone, transfer or move a site to a new host or domain.
+One-click WordPress migration plugin, success guaranteed, no size cap. Clone, transfer or move a site to a new host or domain.
 
 == Description ==
 
 ### Back up, migrate and clone a WordPress site ###
 
-1-Click Migration backs up your WordPress website and emails you an 8-character restore code. Paste that code into a new host, a new domain or a second install, and the site is restored there. Site addresses are updated throughout the database, serialized data included. Your live site stays online while the backup runs. There's no account and no license key. Each migration costs $9.99, with success guaranteed or a refund.
+1-Click Migration: success guaranteed. It backs up your WordPress website and emails you an 8-character restore code. Paste that code into a new host, a new domain or a second install, and the site is restored there. Site addresses are updated throughout the database, serialized data included. Your live site stays online while the backup runs. There's no account and no license key. Each migration costs $9.99, with success guaranteed or a refund.
 
 https://vimeo.com/1236211963
 
@@ -133,6 +133,9 @@ Any host that runs WordPress on PHP 7.4 or later, including Bluehost, SiteGround
 4. Enter the restore code on the destination site to finish your WordPress migration.
 
 == Changelog ==
+= 3.3.8 =
+* **Listing**: The plugin description now says up front that success is guaranteed.
+
 = 3.3.7 =
 * **Pay inside the restore**: When a backup hasn't been paid for yet, the restore check no longer stops with a message. It shows the backup it found and the price, and PayPal opens in a small window. As soon as the payment goes through, the restore carries on by itself.
 * **Pay from the old site**: The notice you see when a backup finishes now has a Pay button, so you can pay right away instead of from the email.
@@ -263,6 +266,9 @@ Any host that runs WordPress on PHP 7.4 or later, including Bluehost, SiteGround
 Older versions are listed in [changelog.txt](https://plugins.trac.wordpress.org/browser/1-click-migration/trunk/changelog.txt).
 
 == Upgrade Notice ==
+
+= 3.3.8 =
+Listing text only: success guaranteed, said up front.
 
 = 3.3.7 =
 Paying for a restore is now a step inside the restore, which carries on by itself once paid. Includes all 3.3.6 changes.
