@@ -218,7 +218,6 @@ class OCM_Admin_Page
         $top_message  = $message_key && isset($messages[$message_key]) ? $messages[$message_key] : '';
 
         $cancel_url  = wp_nonce_url(admin_url('admin-post.php?action=cancel_actions'), 'one_click_migration_cancel_action');
-        $logo_url    = plugins_url('/images/one-click.png', dirname(dirname(__FILE__)));
         $version     = One_Click_Migration::get_version();
         $support_url = OCM_Backup::SUPPORT_FORUM_URL;
         ?>
@@ -226,7 +225,21 @@ class OCM_Admin_Page
 
             <header class="ocm-topbar">
                 <div class="ocm-brand">
-                    <img class="ocm-brand-logo" src="<?php echo esc_url($logo_url); ?>" alt="OneClick Migration"/>
+                    <svg class="ocm-brand-icon" viewBox="0 0 256 256" role="img" aria-label="1 Click Migration">
+                        <defs>
+                            <filter id="ocm-neon-halo" filterUnits="userSpaceOnUse" x="-40" y="-40" width="336" height="336"><feGaussianBlur stdDeviation="7" result="b"/><feGaussianBlur in="SourceGraphic" stdDeviation="16" result="c"/><feMerge><feMergeNode in="c"/><feMergeNode in="b"/><feMergeNode in="b"/></feMerge></filter>
+                            <filter id="ocm-neon-glow" filterUnits="userSpaceOnUse" x="-40" y="-40" width="336" height="336"><feGaussianBlur stdDeviation="5" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+                        </defs>
+                        <circle cx="128" cy="128" r="110" fill="#0A0C1F"/>
+                        <g fill="none" stroke-linecap="round" stroke-linejoin="round">
+                            <circle class="ocm-brand-halo" cx="128" cy="128" r="110" stroke="#FF1E3C" stroke-width="8" filter="url(#ocm-neon-halo)"/>
+                            <circle cx="128" cy="128" r="110" stroke="#FF1E3C" stroke-width="7"/>
+                            <g filter="url(#ocm-neon-glow)" stroke="#FFE45C" stroke-width="15"><path d="M92 88 L134 60 L134 194"/><path d="M102 196 L166 196"/></g>
+                            <g stroke="#FFF7D0" stroke-width="5"><path d="M92 88 L134 60 L134 194"/><path d="M102 196 L166 196"/></g>
+                            <path filter="url(#ocm-neon-glow)" stroke="#2F86FF" stroke-width="6" d="M177 128 L177 174.8 L187.9 163.9 L196.5 182.6 L204.3 178.7 L195.7 160.8 L210.5 160 Z"/>
+                        </g>
+                    </svg>
+                    <span class="ocm-brand-name">1 Click Migration</span>
                 </div>
                 <div class="ocm-topbar-right">
                     <span>v<?php echo esc_html($version); ?></span>
@@ -421,7 +434,7 @@ class OCM_Admin_Page
                         <span class="ocm-pg-pct" id="ocm-pg-pct"><?php echo esc_html($progress['value']); ?></span>
                     </div>
                     <div>
-                        <div class="ocm-pg-bar"><div class="ocm-pg-fill <?php echo $action_active ? 'running' : ''; ?>" id="ocm-pg-fill" style="width:<?php echo esc_attr($progress['value']); ?>"></div></div>
+                        <div class="ocm-pg-bar"><div class="ocm-pg-fill <?php echo $action_active ? 'running' : ($progress_completed ? 'ocm-pg-done' : (!empty($progress['failed']) ? 'ocm-pg-failed' : '')); ?>" id="ocm-pg-fill" style="width:<?php echo esc_attr($progress['value']); ?>"></div></div>
                         <div class="ocm-pg-status" id="ocm-pg-status">
                             <?php echo $show_progress_text ? $progress_text_safe : esc_html__('Idle — waiting to start.', '1-click-migration'); ?>
                         </div>

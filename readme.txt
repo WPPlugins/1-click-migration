@@ -4,7 +4,7 @@ Tags: backup, migrate, migration, restore, clone
 Requires at least: 5.3
 Tested up to: 7.1
 Requires PHP: 7.4
-Stable tag: 3.3.8
+Stable tag: 3.3.9
 Author URI: https://1clickmigration.com
 License: GPLv3 or later
 License URI: http://www.gnu.org/licenses/gpl-3.0.html
@@ -133,6 +133,9 @@ Any host that runs WordPress on PHP 7.4 or later, including Bluehost, SiteGround
 4. Enter the restore code on the destination site to finish your WordPress migration.
 
 == Changelog ==
+= 3.3.9 =
+* New look for the plugin screen: a dark neon panel that matches the new icon. Backup lights up yellow and Restore lights up cyan, and the progress bar turns green when a run finishes and red when it stops. Nothing about how backups and restores work has changed.
+
 = 3.3.8 =
 * **Listing**: The plugin description now says up front that success is guaranteed.
 
@@ -266,6 +269,9 @@ Any host that runs WordPress on PHP 7.4 or later, including Bluehost, SiteGround
 Older versions are listed in [changelog.txt](https://plugins.trac.wordpress.org/browser/1-click-migration/trunk/changelog.txt).
 
 == Upgrade Notice ==
+
+= 3.3.9 =
+New look for the plugin screen. Backups and restores work the same.
 
 = 3.3.8 =
 Listing text only: success guaranteed, said up front.

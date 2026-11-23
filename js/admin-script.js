@@ -156,7 +156,7 @@
                         }
 
                         // Bar + pct
-                        $('#ocm-pg-fill').css('width', response.value).addClass('running');
+                        $('#ocm-pg-fill').css('width', response.value).addClass('running').removeClass('ocm-pg-done ocm-pg-failed');
                         $('#ocm-pg-pct').text(response.value);
 
                         var responseHead = statusHead(response.text);
@@ -164,10 +164,11 @@
                         if (response.isStopped) {
                             clearInterval(progressIntervalId);
                             clearTimeout(progressTimeoutId);
-                            $('#ocm-pg-fill').removeClass('running');
+                            // Steady red for a failed run; the bar never flickers on an error.
+                            $('#ocm-pg-fill').removeClass('running').toggleClass('ocm-pg-failed', !!response.failed);
                             enableButtons();
                         } else if ('100%' === response.value) {
-                            $('#ocm-pg-fill').removeClass('running');
+                            $('#ocm-pg-fill').removeClass('running').addClass('ocm-pg-done');
                             enableButtons();
                             if (responseHead.indexOf('Backup completed') !== -1 || responseHead.indexOf('Restore completed') !== -1) {
                                 clearInterval(progressIntervalId);
@@ -1054,6 +1055,10 @@
 
         // Tab clicks
         $('.ocm-tab').on('click', function () { setActiveTab($(this).data('ocm-tab')); });
+        // Decoration only: the click rays from the icon flash once above the pressed button.
+        // No timer: the class comes off when the flash ends, so the next click can replay it.
+        $('.ocm-submit').on('click', function () { $(this).addClass('ocm-burst'); })
+            .on('animationend', function () { $(this).removeClass('ocm-burst'); });
 
         // Help accordion (single-open behavior)
         $('[data-ocm-help] .ocm-help-toggle').on('click', function () {

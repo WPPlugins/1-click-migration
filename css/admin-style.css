@@ -144,7 +144,8 @@
     border-top: 1px solid transparent;
 }
 .ocm-help-item.open .ocm-help-body {
-    max-height: 600px; opacity: 1;
+    /* Tall enough for the longest section in any language; 600px cut off the last lines. */
+    max-height: 2400px; opacity: 1;
     padding: 10px 14px 14px 46px;
     border-top-color: var(--ocm-line-2);
 }
@@ -255,12 +256,12 @@
     text-decoration: none;
 }
 .ocm-btn:active { transform: translateY(1px); }
-.ocm-btn-primary { background: var(--ocm-navy); color: #fff; }
-.ocm-btn-primary:hover { background: var(--ocm-navy-700); color: #fff; }
-.ocm-btn-dark { background: var(--ocm-ink); color: #fff; }
-.ocm-btn-dark:hover { background: #1c2027; color: #fff; }
+.ocm-btn-primary { background: var(--ocm-btn-bg, var(--ocm-navy)); color: var(--ocm-btn-fg, #fff); box-shadow: var(--ocm-btn-glow, none); }
+.ocm-btn-primary:hover { background: var(--ocm-btn-bg-hover, var(--ocm-navy-700)); color: var(--ocm-btn-fg, #fff); }
+.ocm-btn-dark { background: var(--ocm-btn2-bg, var(--ocm-ink)); color: var(--ocm-btn-fg, #fff); box-shadow: var(--ocm-btn2-glow, none); }
+.ocm-btn-dark:hover { background: var(--ocm-btn2-bg-hover, #1c2027); color: var(--ocm-btn-fg, #fff); }
 .ocm-btn-ghost {
-    background: #fff; color: var(--ocm-navy);
+    background: var(--ocm-bg); color: var(--ocm-navy);
     border: 1px solid var(--ocm-line);
 }
 .ocm-btn-ghost:hover { background: var(--ocm-navy-50); border-color: #c9d4e8; color: var(--ocm-navy); }
@@ -651,3 +652,191 @@ body.ocm-modal-open { overflow: hidden; }
 #ocm-top-banner a.ocm-banner-pay { margin-top: 10px; }
 #ocm-top-banner a.ocm-banner-pay:focus-visible { outline: 2px solid var(--ocm-navy); outline-offset: 2px; }
 #ocm-top-banner .ocm-pay-thanks { display: inline-block; margin-top: 10px; font-weight: 700; color: var(--ocm-ok); }
+
+
+/* ==========================================================================
+   Neon theme. The plugin's panel is a dark sign inside the light WordPress
+   admin, in the colours of the plugin icon. One thing glows at a time: the
+   tab you are on and the button to press next. Messages that must be read
+   (banners, the plugins warning, the pay step, the dialogs) stay plain,
+   light and still.
+   ========================================================================== */
+.ocm-app {
+    --ocm-neon-red: #FF1E3C;
+    --ocm-neon-yellow: #FFE45C;
+    --ocm-neon-cyan: #19E8FF;
+    --ocm-neon-green: #2BFF88;
+    --ocm-accent: var(--ocm-neon-yellow);          /* backup = yellow, restore = cyan (below) */
+    --ocm-accent-soft: rgba(255, 228, 92, .4);
+
+    --ocm-navy: #8FE9FF;                           /* accent text and outlines on the dark panel */
+    --ocm-navy-700: #C4F4FF;
+    --ocm-navy-50: rgba(143, 233, 255, .1);
+    --ocm-ink: #EEF1FF;
+    --ocm-ink-2: #C9CFEA;
+    --ocm-muted: #9AA3C7;
+    --ocm-line: #2A2F57;
+    --ocm-line-2: #1E2246;
+    --ocm-bg: #0D1026;
+    --ocm-surface: #0D1026;
+    --ocm-ok: #2BFF88;
+    --ocm-err: #FF8A99;
+    --ocm-shadow-1: none;
+
+    --ocm-btn-fg: #0A0C1F;
+    --ocm-btn-bg: var(--ocm-neon-cyan);
+    --ocm-btn-bg-hover: #6FF1FF;
+    --ocm-btn-glow: 0 0 8px var(--ocm-neon-cyan), 0 0 26px rgba(25, 232, 255, .5);
+    --ocm-btn2-bg: var(--ocm-neon-yellow);
+    --ocm-btn2-bg-hover: #FFEE8F;
+    --ocm-btn2-glow: 0 0 8px var(--ocm-neon-yellow), 0 0 26px rgba(255, 228, 92, .5);
+
+    margin: 20px 20px 20px 0;
+    min-height: 0;
+    max-width: 1280px;
+    border-radius: 18px;
+    overflow: hidden;
+    background: radial-gradient(120% 90% at 50% 0%, #16193A 0%, #0A0C1F 55%, #040510 100%);
+    box-shadow: 0 10px 30px rgba(10, 12, 31, .25);
+}
+.ocm-app:has(.ocm-tab[data-ocm-tab="restore"].active) {
+    --ocm-accent: var(--ocm-neon-cyan);
+    --ocm-accent-soft: rgba(25, 232, 255, .4);
+}
+
+/* Plain boxes keep the original light colours, whatever surrounds them. */
+.ocm-app .ocm-banner,
+.ocm-app .ocm-warn,
+.ocm-app .ocm-pay-card,
+.ocm-app .ocm-maintenance-mode-indicator {
+    --ocm-navy: #0b2a5b; --ocm-navy-700: #143a78; --ocm-navy-50: #eef3fb;
+    --ocm-ink: #0f1115; --ocm-ink-2: #2a2f3a; --ocm-muted: #6b7280;
+    --ocm-line: #e5e7ec; --ocm-line-2: #eef0f4; --ocm-bg: #ffffff; --ocm-surface: #f7f8fb;
+    --ocm-ok: #16794f; --ocm-err: #a83227;
+    --ocm-btn-fg: #fff; --ocm-btn-bg: #0b2a5b; --ocm-btn-bg-hover: #143a78; --ocm-btn-glow: none;
+    --ocm-btn2-bg: #0f1115; --ocm-btn2-bg-hover: #1c2027; --ocm-btn2-glow: none;
+}
+.ocm-app .ocm-pay-card { color: var(--ocm-ink); }
+.ocm-app .ocm-maintenance-mode-indicator { background: #fff; color: #5b3a00; border-left: 6px solid #ff9800; text-align: left; }
+
+/* Header: the icon and the name. The ring's glow is the only thing on the page that always moves. */
+.ocm-app .ocm-topbar { height: 64px; background: transparent; border-bottom-color: var(--ocm-line); }
+.ocm-brand-icon { width: 44px; height: 44px; flex: 0 0 auto; overflow: visible; display: block; }
+.ocm-brand-name { font-size: 16px; font-weight: 700; letter-spacing: .01em; color: var(--ocm-ink); }
+.ocm-brand-halo { animation: ocm-buzz 5s steps(1, end) infinite; }
+@keyframes ocm-buzz {
+    0% { opacity: 1 } 9% { opacity: .25 } 10% { opacity: .9 } 11% { opacity: .3 } 12% { opacity: 1 } 22% { opacity: .4 } 23% { opacity: 1 }
+    31% { opacity: .2 } 32% { opacity: .8 } 33% { opacity: .3 } 34% { opacity: 1 } 45% { opacity: .45 } 47% { opacity: 1 }
+    57% { opacity: .25 } 58% { opacity: .95 } 59% { opacity: .2 } 60% { opacity: .6 } 61% { opacity: .3 } 62% { opacity: 1 }
+    78% { opacity: .3 } 79% { opacity: .9 } 80% { opacity: .25 } 81% { opacity: 1 } 100% { opacity: 1 }
+}
+
+/* Surfaces */
+.ocm-app .ocm-card { background: rgba(13, 16, 38, .55); }
+.ocm-app .ocm-help-item,
+.ocm-app .ocm-check { background: transparent; }
+.ocm-app .ocm-check:hover { border-color: #414878; }
+.ocm-app .ocm-check input { accent-color: var(--ocm-accent); }
+.ocm-app .ocm-step-title,
+.ocm-app .ocm-card-title { color: var(--ocm-ink); }
+.ocm-app .ocm-help-body strong { color: var(--ocm-ink); }
+.ocm-app .ocm-help-body a,
+.ocm-app .ocm-pg-status a,
+.ocm-app .ocm-info a { color: var(--ocm-navy); }
+.ocm-app .ocm-callout { border-left-color: var(--ocm-neon-yellow); }
+
+/* Tabs: two tubes, one lit and one unlit glass */
+.ocm-app .ocm-tabs { background: transparent; padding: 0; gap: 10px; border-radius: 0; }
+.ocm-app .ocm-tab {
+    font-size: 14px; padding: 8px 22px; border-radius: 10px;
+    color: rgba(238, 241, 255, .45); border: 2px solid rgba(238, 241, 255, .16);
+}
+.ocm-app .ocm-tab:hover:not(.active) { color: var(--ocm-ink); border-color: rgba(238, 241, 255, .35); }
+.ocm-app .ocm-tab.active {
+    background: transparent; color: var(--ocm-accent); border-color: var(--ocm-accent);
+    box-shadow: 0 0 6px var(--ocm-accent), 0 0 20px var(--ocm-accent-soft), inset 0 0 12px rgba(255, 255, 255, .06);
+    text-shadow: 0 0 10px var(--ocm-accent-soft);
+}
+.ocm-app .ocm-tab:focus-visible,
+.ocm-app .ocm-btn:focus-visible,
+.ocm-app .ocm-help-toggle:focus-visible,
+.ocm-app .ocm-adv-toggle:focus-visible { outline: 2px solid #fff; outline-offset: 3px; }
+
+/* Fields */
+.ocm-app input.ocm-input,
+.ocm-app .ocm-input { background: #0D1026; color: var(--ocm-ink); border-color: var(--ocm-line); height: 46px; font-size: 15px; }
+.ocm-app .ocm-input::placeholder { color: #5d668f; }
+.ocm-app .ocm-input:focus {
+    border-color: var(--ocm-accent);
+    box-shadow: 0 0 0 1px var(--ocm-accent), 0 0 16px var(--ocm-accent-soft) !important;
+}
+.ocm-app input.ocm-input.ocm-input-code,
+.ocm-app .ocm-input-code { font-size: 18px; }
+.ocm-app .ocm-input-icon { color: #7780a8; }
+.ocm-app .ocm-submit { height: 46px; font-size: 14px; font-weight: 700; position: relative; }
+.ocm-app .ocm-btn-ghost { background: transparent; color: var(--ocm-ink); border-color: rgba(238, 241, 255, .3); }
+.ocm-app .ocm-btn-ghost:hover { background: rgba(238, 241, 255, .08); border-color: rgba(238, 241, 255, .5); color: #fff; }
+.ocm-app .ocm-button.one-click-disabled,
+.ocm-app .ocm-submit[disabled] { box-shadow: none; }
+
+/* The click from the icon: five rays flash once above the button that was pressed. */
+.ocm-app .ocm-submit.ocm-burst::after {
+    content: ""; position: absolute; right: -8px; top: -22px; width: 46px; height: 30px; pointer-events: none;
+    background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 46 30'%3E%3Cg stroke='%23FF2E4D' stroke-width='3.5' stroke-linecap='round'%3E%3Cpath d='M4 22 L12 19'/%3E%3Cpath d='M11 8 L17 14'/%3E%3Cpath d='M23 3 L23 11'/%3E%3Cpath d='M35 8 L29 14'/%3E%3Cpath d='M42 22 L34 19'/%3E%3C/g%3E%3C/svg%3E") no-repeat center / contain;
+    filter: drop-shadow(0 0 4px #FF2E4D);
+    animation: ocm-burst .7s steps(1, end) forwards;
+}
+@keyframes ocm-burst { 0% { opacity: 1 } 60% { opacity: .5 } 100% { opacity: 0 } }
+
+/* Progress: a tube that fills. It hums while running, and is steady green when done, steady red when stopped. */
+.ocm-app .ocm-pg-label { color: var(--ocm-ink); }
+.ocm-app .ocm-pg-pct { background: transparent; color: var(--ocm-ink); font-weight: 700; }
+.ocm-app .ocm-pg-status { font-size: 13px; }
+.ocm-app .ocm-pg-extras .ocm-info { font-size: 13px; }
+.ocm-app .ocm-pg-extras .ocm-info.notice { color: #FFD98A; }
+.ocm-app .ocm-pg-bar {
+    height: 14px; padding: 2px; overflow: visible;
+    background: rgba(238, 241, 255, .04); border: 1.5px solid rgba(238, 241, 255, .16);
+}
+.ocm-app .ocm-pg-fill {
+    position: relative; height: 100%; max-width: 100%;
+    background: var(--ocm-accent);
+    box-shadow: 0 0 6px var(--ocm-accent), 0 0 20px var(--ocm-accent);
+}
+.ocm-app .ocm-pg-fill[style*="width:0%"],
+.ocm-app .ocm-pg-fill[style*="width: 0%"] { box-shadow: none; }
+.ocm-app .ocm-pg-fill::after { display: none; }
+.ocm-app .ocm-pg-fill.running { animation: ocm-hum 1.3s steps(1, end) infinite; }
+@keyframes ocm-hum { 0% { filter: brightness(1) } 30% { filter: brightness(.82) } 36% { filter: brightness(1.05) } 70% { filter: brightness(.9) } 76% { filter: brightness(1) } }
+.ocm-app .ocm-pg-fill.ocm-pg-done { background: var(--ocm-neon-green); box-shadow: 0 0 6px var(--ocm-neon-green), 0 0 20px var(--ocm-neon-green); }
+.ocm-app .ocm-pg-fill.ocm-pg-failed { background: var(--ocm-neon-red); box-shadow: 0 0 6px var(--ocm-neon-red), 0 0 20px var(--ocm-neon-red); }
+
+/* The address review inside the restore tab */
+.ocm-app #ocm-restore-precheck h3 { color: var(--ocm-ink); }
+.ocm-app #ocm-restore-precheck p,
+.ocm-app #ocm-restore-precheck label,
+.ocm-app #ocm-restore-precheck summary { color: var(--ocm-ink-2); }
+.ocm-app #ocm-restore-precheck strong { color: var(--ocm-ink); }
+.ocm-app #ocm-restore-precheck .ocm-pay-card p,
+.ocm-app #ocm-restore-precheck .ocm-pay-card label { color: inherit; }
+
+.ocm-app .ocm-footnote { margin-top: 14px; color: #6f789f; }
+
+@media (prefers-reduced-motion: reduce) {
+    .ocm-brand-halo, .ocm-app .ocm-pg-fill.running, .ocm-app .ocm-submit.ocm-burst::after { animation: none; }
+    .ocm-app .ocm-submit.ocm-burst::after { display: none; }
+}
+@media (max-width: 782px) {
+    .ocm-app { margin: 10px 10px 10px 0; border-radius: 14px; }
+}
+/* A stopped or finished run's last line is the thing to read: full-strength text, not the muted grey. */
+.ocm-app .ocm-pg-bar:has(.ocm-pg-failed) ~ .ocm-pg-status,
+.ocm-app .ocm-pg-bar:has(.ocm-pg-done) ~ .ocm-pg-status { color: var(--ocm-ink); font-size: 14px; }
+/* Phones: cards never grow wider than the panel, and the button drops under its field. */
+.ocm-app .ocm-grid > * { min-width: 0; }
+@media (max-width: 600px) {
+    .ocm-app .ocm-action-head { flex-wrap: wrap; }
+    .ocm-app .ocm-input-line { flex-wrap: wrap; }
+    .ocm-app .ocm-input-line .ocm-input-wrap { flex: 1 1 100%; }
+    .ocm-app .ocm-input-line .ocm-submit { width: 100%; }
+}
