@@ -4430,6 +4430,10 @@ class OCM_Backup
                     $progress_item_text['text'] .= '</br></br>' . self::support_forum_html($recovery_hint !== ''
                         ? __('Still stuck?', '1-click-migration')
                         : __('Need help?', '1-click-migration'));
+                    // The words on the card, not the raw log line: the card already
+                    // leaves out paths, IPs and status codes, and the forum is public.
+                    $shown = preg_split('/<\s*\/?\s*br\s*\/?\s*>/i', (string) $progress_item_text['text']);
+                    $progress_item_text['text'] .= '</br></br>' . self::forum_details_button_html(html_entity_decode((string) $shown[0], ENT_QUOTES, 'UTF-8'));
                     // The admin page keeps showing a failed run's outcome after a reload.
                     $progress_item_text['failed'] = true;
                 }
@@ -4457,6 +4461,49 @@ class OCM_Backup
             '<a target="_blank" rel="noopener noreferrer" href="' . self::SUPPORT_FORUM_URL . '">',
             '</a>'
         );
+    }
+
+    /**
+     * What a forum post about a failed run needs, as plain text: the site's
+     * domain, the plugin, WordPress and PHP versions, and what the progress
+     * card says happened. The labels are English on purpose (the forum is). Never the restore code or
+     * an email address. Lines are joined with " || "; the admin script turns
+     * that into line breaks when it copies.
+     *
+     * @param string $line What the progress card says the run stopped on.
+     * @return string
+     */
+    public static function forum_details_text($line)
+    {
+        $host = (string) wp_parse_url(home_url(), PHP_URL_HOST);
+        $line = trim((string) preg_replace('/\s+/', ' ', wp_strip_all_tags((string) $line)));
+        $line = (string) preg_replace('/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i', '[email]', $line);
+        if (strlen($line) > 400) {
+            $line = rtrim(substr($line, 0, 397)) . '...';
+        }
+        $parts = array(
+            'Site: ' . ('' !== $host ? $host : '(your site\'s domain)'),
+            'Plugin: 1 Click Migration ' . One_Click_Migration::get_version(),
+            'WordPress ' . get_bloginfo('version') . ', PHP ' . PHP_VERSION,
+        );
+        if ('' !== $line) {
+            $parts[] = 'What happened: ' . $line;
+        }
+        return implode(' || ', $parts);
+    }
+
+    /**
+     * "Copy details for the forum" button for a failed run's progress card, so
+     * a forum post starts with what we need to answer it.
+     *
+     * @param string $line What the progress card says the run stopped on.
+     * @return string HTML
+     */
+    private static function forum_details_button_html($line)
+    {
+        return '<button type="button" class="ocm-btn ocm-btn-ghost ocm-copy-forum" data-ocm-copy="' . esc_attr(self::forum_details_text($line))
+            . '" data-ocm-copied="' . esc_attr__('Copied. Paste it into your forum post.', '1-click-migration') . '">'
+            . esc_html__('Copy details for the forum', '1-click-migration') . '</button>';
     }
 
     /**

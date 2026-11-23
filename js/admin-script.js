@@ -37,6 +37,33 @@
         return String(text == null ? '' : text).split(/<\s*\/?\s*br\s*\/?\s*>/i)[0];
     }
 
+    // "Copy details for the forum" on a failed run's progress card: the text
+    // comes from the server (site domain, versions, the failure line).
+    function copyText(text, done) {
+        function fallback() {
+            var $ta = $('<textarea readonly></textarea>').val(text).css({ position: 'fixed', top: 0, left: '-9999px' }).appendTo('body');
+            $ta[0].focus();
+            $ta[0].select();
+            try { document.execCommand('copy'); } catch (e) { /* nothing more to try */ }
+            $ta.remove();
+            done();
+        }
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(text).then(done, fallback);
+        } else {
+            fallback();
+        }
+    }
+    $(document).on('click', '.ocm-copy-forum', function (e) {
+        e.preventDefault();
+        var $btn = $(this);
+        var text = String($btn.attr('data-ocm-copy') || '').split(' || ').join('\n');
+        copyText(text, function () {
+            var copied = $btn.attr('data-ocm-copied');
+            if (copied) { $btn.text(copied); }
+        });
+    });
+
     function disableButtons() {
         $('.ocm-button.backup-button, .ocm-button.restore-button').addClass('one-click-disabled');
     }

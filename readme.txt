@@ -1,10 +1,10 @@
-=== 1-Click WordPress Migration Plugin – Backup, Migrate & Clone ===
+=== 1-Click WordPress Migration Plugin ===
 Contributors: 1clickmigration
 Tags: wordpress migration, migration plugin, migration, migrate, backup
 Requires at least: 5.3
 Tested up to: 7.1
 Requires PHP: 7.4
-Stable tag: 3.3.10
+Stable tag: 3.3.11
 Author URI: https://1clickmigration.com
 License: GPLv3 or later
 License URI: http://www.gnu.org/licenses/gpl-3.0.html
@@ -28,7 +28,7 @@ https://vimeo.com/1236211963
 * **Clone or duplicate a site.** Duplicate a WordPress site for staging or testing by restoring its backup on a second install.
 * **Move large sites.** There is no size cap. Back up and restore the database, plugins, themes and uploads together, or one part at a time.
 
-Use this WordPress migration plugin for any WordPress migration or WordPress site migration: a hosting migration to a new provider, a server migration within the same host, a domain migration, or a move from localhost to live. Move WordPress to another server, host or domain with no FTP, cPanel or phpMyAdmin — just a WordPress login on each site. It's an automatic migration tool and migration plugin for a complete website migration, from the database to the uploads folder.
+Use this WordPress migration plugin for any WordPress migration, WP migration or WordPress site migration: a hosting migration to a new provider, a server migration within the same host, a domain migration, or a move from localhost to live. Move WordPress to another server, host or domain with no FTP, cPanel or phpMyAdmin — just a WordPress login on each site. It's an automatic migration tool and WP migration plugin for a complete website migration, from the database to the uploads folder.
 
 **Pricing**
 
@@ -122,6 +122,10 @@ Any host that runs WordPress on PHP 7.4 or later, including Bluehost, SiteGround
 4. Enter the restore code on the destination site to finish your WordPress migration.
 
 == Changelog ==
+= 3.3.11 =
+* **Faster help when a backup or restore stops**: The progress card now has a "Copy details for the forum" button. It copies your site's domain, the plugin, WordPress and PHP versions, and what the card says happened, so a support forum post starts with what we need to answer it. It never copies your restore code or email address.
+* **Listing**: Shorter plugin title on WordPress.org.
+
 = 3.3.10 =
 * **Easier to reach support**: Added a visible Support forum link in the plugin top bar, beneath the How it works card, and on the WordPress Plugins list.
 * **Listing**: Updated plugin tags, description and FAQ for clearer WordPress migration search discovery, and moved pre-3.3.0 changelog entries to changelog.txt.
@@ -162,6 +166,9 @@ Any host that runs WordPress on PHP 7.4 or later, including Bluehost, SiteGround
 Older versions are listed in [changelog.txt](https://plugins.trac.wordpress.org/browser/1-click-migration/trunk/changelog.txt).
 
 == Upgrade Notice ==
+
+= 3.3.11 =
+Adds a "Copy details for the forum" button when a backup or restore stops. Backups and restores work the same.
 
 = 3.3.10 =
 Easier-to-find support forum links in the plugin screen and updated WordPress.org listing copy. Backups and restores work the same.
