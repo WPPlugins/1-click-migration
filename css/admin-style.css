@@ -721,6 +721,23 @@ body.ocm-modal-open { overflow: hidden; }
 
 /* Header: the icon and the name. The ring's glow is the only thing on the page that always moves. */
 .ocm-app .ocm-topbar { height: 64px; background: transparent; border-bottom-color: var(--ocm-line); }
+.ocm-app .ocm-topbar-link {
+    color: var(--ocm-navy); font-weight: 600; text-decoration: none;
+    padding: 5px 11px; border-radius: 999px;
+    border: 1px solid rgba(143, 233, 255, .35);
+    transition: border-color .15s ease, background .15s ease, color .15s ease;
+}
+.ocm-app .ocm-topbar-link:hover,
+.ocm-app .ocm-topbar-link:focus { color: var(--ocm-navy-700); border-color: var(--ocm-navy); background: var(--ocm-navy-50); }
+.ocm-app .ocm-topbar-link:focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
+.ocm-app .ocm-help-forum {
+    margin: 12px 0 0; padding: 10px 12px;
+    border-radius: 10px; border: 1px solid var(--ocm-line);
+    background: rgba(143, 233, 255, .05);
+    color: var(--ocm-ink-2); font-size: 12.5px; line-height: 1.5;
+}
+.ocm-app .ocm-help-forum a { color: var(--ocm-navy); font-weight: 600; }
+.ocm-app .ocm-help-forum a:hover { color: var(--ocm-navy-700); }
 .ocm-brand-icon { width: 44px; height: 44px; flex: 0 0 auto; overflow: visible; display: block; }
 .ocm-brand-name { font-size: 16px; font-weight: 700; letter-spacing: .01em; color: var(--ocm-ink); }
 .ocm-brand-halo { animation: ocm-buzz 5s steps(1, end) infinite; }

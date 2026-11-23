@@ -4,7 +4,7 @@
  * Plugin Name: 1 Click Migration
  * Plugin URI: https://wordpress.org/plugins/1-click-migration/
  * Description: Migrate, copy, or clone your entire site with 1 click. <strong>Any host, no size limitation.</strong> $9.99 per migration, success guaranteed or a refund.
- * Version: 3.3.9
+ * Version: 3.3.10
  * Requires at least: 5.3
  * Requires PHP: 7.4
  * Author: 1ClickMigration
@@ -1537,5 +1537,8 @@ add_filter('plugin_action_links_' . plugin_basename(__FILE__), static function (
     $links[] = '<a href="' .
         esc_url(admin_url('tools.php?page=one-click-migration')) .
         '">' . esc_html__('Settings', '1-click-migration') . '</a>';
+    $links[] = '<a href="' .
+        esc_url(OCM_Backup::SUPPORT_FORUM_URL) .
+        '" target="_blank" rel="noopener noreferrer">' . esc_html__('Support', '1-click-migration') . '</a>';
     return $links;
 });

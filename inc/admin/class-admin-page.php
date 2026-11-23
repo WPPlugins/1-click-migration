@@ -242,6 +242,7 @@ class OCM_Admin_Page
                     <span class="ocm-brand-name">1 Click Migration</span>
                 </div>
                 <div class="ocm-topbar-right">
+                    <a class="ocm-topbar-link" href="<?php echo esc_url($support_url); ?>" target="_blank" rel="noopener noreferrer"><?php esc_html_e('Support forum', '1-click-migration'); ?></a>
                     <span>v<?php echo esc_html($version); ?></span>
                 </div>
             </header>
@@ -322,6 +323,7 @@ class OCM_Admin_Page
                                 </div>
                             </div>
                         </div>
+                        <p class="ocm-help-forum"><?php self::echo_support_forum(__('Questions or backup issues?', '1-click-migration'), $support_url); ?></p>
                     </section>
 
                     <!-- RIGHT: Action panel -->
