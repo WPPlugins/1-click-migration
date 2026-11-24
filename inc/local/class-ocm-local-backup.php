@@ -29,6 +29,8 @@ class OCM_Local_Backup
     const WATCHDOG_HOOK = 'ocm_local_worker_watchdog';
     const RUN_MARKER_PREFIX = '--- OCM_LOCAL_RUN_START ';
     const BACKUP_START_GRACE = 600;
+    /** A run record with no action flag older than this is a start that died. */
+    const STALE_START_LOCK_AGE = 300;
     const MAX_STEP_RETRIES = 4;
     const PRISTINE_DUMP_SUFFIX = '.ocm-pristine';
     const MAX_ACTIVITY_ENTRIES = 50;
@@ -144,6 +146,10 @@ class OCM_Local_Backup
 
     public static function delete_runtime_options()
     {
+        // Stop & Reset on the cloud tab and the watchdog end a restore from
+        // outside it: put the plugins it switched off back before the saved
+        // list is deleted below.
+        self::restore_isolated_plugins();
         self::delete_backup_options();
         self::delete_restore_options();
         delete_option(self::OPTION_ACTION_BACKUP);
@@ -160,6 +166,18 @@ class OCM_Local_Backup
         delete_option(self::OPTION_WORKER_HEARTBEAT);
         delete_option(self::OPTION_WATCHDOG_LAST);
         delete_option(self::OPTION_REVIVAL_COUNT);
+    }
+
+    /**
+     * Mark the local worker alive, whatever log channel the caller is in.
+     * Long steps with no queue work left (hashing, publishing, pruning) call
+     * this so the watchdog doesn't take a finishing run for a dead one.
+     *
+     * @return void
+     */
+    private static function touch_heartbeat()
+    {
+        update_option(self::OPTION_WORKER_HEARTBEAT, time(), false);
     }
 
     public static function set_backup_run_context($run_id)
@@ -649,15 +667,31 @@ class OCM_Local_Backup
             'started_at' => time(),
         );
 
-        if (!add_option(self::OPTION_ACTIVE_BACKUP_RUN, $run_record, '', false)) {
-            return new WP_Error('operation_in_progress', __('Another backup or restore is already running on this site.', '1-click-migration'));
+        $locked = add_option(self::OPTION_ACTIVE_BACKUP_RUN, $run_record, '', false);
+        if (!$locked && self::clear_stale_backup_start_lock()) {
+            $locked = add_option(self::OPTION_ACTIVE_BACKUP_RUN, $run_record, '', false);
+        }
+        if (!$locked) {
+            $msg = __('Another backup or restore is already running on this site.', '1-click-migration');
+            if ($trigger === 'scheduled') {
+                One_Click_Migration::write_to_local_log('Notice: Scheduled local backup skipped — another local backup is starting.');
+                OCM_Local_Scheduler::record_status('skipped', $msg);
+                self::record_run_activity('backup', 'skipped', $run_record, $msg);
+            }
+            return new WP_Error('operation_in_progress', $msg);
         }
 
         OCM_Local_Storage::cleanup_stale_staging_dirs($backup_id);
         $staging_dir = OCM_Local_Storage::staging_dir($backup_id);
         if ($staging_dir === '' || !OCM_Local_Storage::ensure_dir_protected($staging_dir)) {
             self::release_backup_run($run_id);
-            return new WP_Error('storage_unwritable', __('Could not create temporary local backup directory.', '1-click-migration'));
+            $msg = __('Could not create temporary local backup directory.', '1-click-migration');
+            if ($trigger === 'scheduled') {
+                One_Click_Migration::write_to_local_log('Local backup failed: ' . $msg);
+                OCM_Local_Scheduler::record_status('failed', $msg);
+            }
+            self::record_run_activity('backup', 'failed', $run_record, $msg);
+            return new WP_Error('storage_unwritable', $msg);
         }
 
         OCM_Local_Storage::write_manifest($staging_dir, array(
@@ -725,6 +759,36 @@ class OCM_Local_Backup
             'run_id' => $run_id,
             'dispatch_mode' => 'queued',
         );
+    }
+
+    /**
+     * start_backup() takes the run record before it sets the action flag. A
+     * request that dies in between leaves a record nothing else clears, and
+     * every later start is refused. Remove it once it is too old to be a start
+     * still in flight and no backup is flagged as running.
+     *
+     * @return bool Whether a stale record was removed.
+     */
+    private static function clear_stale_backup_start_lock()
+    {
+        if (function_exists('wp_cache_delete')) {
+            wp_cache_delete(self::OPTION_ACTIVE_BACKUP_RUN, 'options');
+            wp_cache_delete(self::OPTION_ACTION_BACKUP, 'options');
+        }
+        if (get_option(self::OPTION_ACTION_BACKUP)) {
+            return false;
+        }
+        $run = get_option(self::OPTION_ACTIVE_BACKUP_RUN, null);
+        if (null === $run || false === $run) {
+            return false;
+        }
+        $started = is_array($run) && isset($run['started_at']) ? (int) $run['started_at'] : 0;
+        if ($started > 0 && (time() - $started) < self::STALE_START_LOCK_AGE) {
+            return false;
+        }
+        One_Click_Migration::write_to_local_log(' SYSLOG: Removed a stale local backup run record left by a start that never finished.');
+        delete_option(self::OPTION_ACTIVE_BACKUP_RUN);
+        return true;
     }
 
     /**
@@ -860,6 +924,7 @@ class OCM_Local_Backup
             return OCM_BackgroundLocalBackup::RETURN_TYPE_END_PROCESS;
         }
 
+        self::touch_heartbeat();
         $zip_size = is_file($target_zip) ? (int) @filesize($target_zip) : 0;
         $sha256 = is_file($target_zip) ? (string) @hash_file('sha256', $target_zip) : '';
 
@@ -876,6 +941,9 @@ class OCM_Local_Backup
         );
         update_option(self::OPTION_BACKUP_STEPS, $steps, false);
         One_Click_Migration::write_to_local_log(sprintf('%s local backup completed.', $part));
+        // Before the queue row goes: the watchdog re-reads this once it finds
+        // the queue empty, so a run that is about to publish is never orphaned.
+        self::touch_heartbeat();
 
         return false;
     }
@@ -892,6 +960,7 @@ class OCM_Local_Backup
         if (!self::is_current_backup_run($run_id)) {
             return false;
         }
+        self::touch_heartbeat();
 
         $run = get_option(self::OPTION_ACTIVE_BACKUP_RUN, array());
         $steps = get_option(self::OPTION_BACKUP_STEPS, array());
@@ -913,6 +982,7 @@ class OCM_Local_Backup
                 self::fail_backup(sprintf('Archive verification failed for "%s".', $part), $run_id);
                 return false;
             }
+            self::touch_heartbeat();
             $size = (int) @filesize($zip_path);
             $total_size += $size;
             $parts_manifest[$part] = array(
@@ -961,7 +1031,9 @@ class OCM_Local_Backup
             return false;
         }
 
+        self::touch_heartbeat();
         OCM_Local_Storage::prune_backups(null, self::active_restore_backup_id());
+        self::touch_heartbeat();
 
         if (isset($run['trigger']) && $run['trigger'] === 'scheduled') {
             OCM_Local_Scheduler::record_status('success', __('Scheduled local backup completed.', '1-click-migration'), $backup_id);
@@ -991,6 +1063,15 @@ class OCM_Local_Backup
      */
     public static function fail_backup($message, $run_id = null)
     {
+        // A worker left over from a cancelled run fails once its staging dir is
+        // gone. It must not take the run that replaced it down with it.
+        if (is_string($run_id) && $run_id !== '' && !self::is_current_backup_run($run_id)) {
+            One_Click_Migration::write_to_local_log(sprintf(
+                ' SYSLOG: Ignoring failure from a local backup run that is no longer current: %s',
+                $message
+            ));
+            return;
+        }
         $run = get_option(self::OPTION_ACTIVE_BACKUP_RUN, array());
         $backup_id = is_array($run) && isset($run['backup_id']) ? (string) $run['backup_id'] : '';
         $trigger = is_array($run) && isset($run['trigger']) ? (string) $run['trigger'] : 'manual';
@@ -1181,6 +1262,21 @@ class OCM_Local_Backup
             $steps = array();
         }
 
+        $stalled = self::count_restore_attempt($steps);
+        if ($stalled > self::MAX_STEP_RETRIES) {
+            $attempts = $stalled - 1;
+            if (self::restore_changed_live_site($steps)) {
+                return self::fail_restore(sprintf(
+                    'The restore was interrupted %d times in a row at the same step and has been stopped. Part of this backup is already restored; start the restore again to finish it.',
+                    $attempts
+                ));
+            }
+            return self::stop_restore_no_change(sprintf(
+                'Local restore stopped: it was interrupted %d times in a row at the same step (the server may be ending long requests). No changes were made.',
+                $attempts
+            ));
+        }
+
         $workspace = isset($steps['init']['workspace']) && is_string($steps['init']['workspace']) ? $steps['init']['workspace'] : '';
         if ($workspace === '' || !is_dir($workspace)) {
             $attempted = '';
@@ -1321,6 +1417,50 @@ class OCM_Local_Backup
 
         // 4. Complete restore cleanly.
         self::finish_restore($workspace, $run_id);
+        return false;
+    }
+
+    /**
+     * Bound the restore the way backup parts are bounded. Every checkpoint
+     * (extract position, prepared or imported dump, preflight offset, swapped
+     * folder) changes the saved state, so a worker that starts from the state
+     * the previous one started from made no progress: it died mid-step.
+     * Planned handovers always follow a checkpoint and never count.
+     *
+     * @param array $steps OPTION_RESTORE_STEPS; the counter is saved in it.
+     * @return int Consecutive starts from the same state, this one included.
+     */
+    private static function count_restore_attempt(array &$steps)
+    {
+        $guard = isset($steps['guard']) && is_array($steps['guard']) ? $steps['guard'] : array();
+        $state = $steps;
+        unset($state['guard']);
+        $signature = sha1(serialize(array($state, get_option(self::OPTION_BINARY_PREFLIGHT, null))));
+        $count = (isset($guard['sig'], $guard['count']) && $guard['sig'] === $signature) ? (int) $guard['count'] + 1 : 1;
+        $steps['guard'] = array('sig' => $signature, 'count' => $count);
+        update_option(self::OPTION_RESTORE_STEPS, $steps, false);
+        return $count;
+    }
+
+    /**
+     * Whether this restore has already replaced live tables or folders.
+     *
+     * @param array $steps
+     * @return bool
+     */
+    private static function restore_changed_live_site(array $steps)
+    {
+        if (get_option(self::OPTION_RESTORE_PLUGINS_ISOLATED)) {
+            return true;
+        }
+        if (!empty($steps['db']['promoted'])) {
+            return true;
+        }
+        foreach (array('themes', 'uploads', 'plugins') as $part) {
+            if (!empty($steps[$part]['swapped']) || !empty($steps[$part]['live_cleared'])) {
+                return true;
+            }
+        }
         return false;
     }
 
@@ -1701,14 +1841,21 @@ class OCM_Local_Backup
         if (in_array('plugins', $selected_parts, true) && empty($steps['plugins']['swapped'])) {
             $extract_plugins_dir = rtrim($workspace, '/\\') . '/plugins';
             if (is_dir($extract_plugins_dir)) {
-                $live_plugins = glob(WP_CONTENT_DIR . '/plugins/*', GLOB_ONLYDIR);
-                if (is_array($live_plugins)) {
-                    foreach ($live_plugins as $plugin_dir) {
-                        if (basename($plugin_dir) === '1-click-migration') {
-                            continue;
+                // Restored folders are moved out of the workspace, so the live
+                // folders are cleared once only: a worker resuming after the
+                // moves began must not delete what is already restored.
+                if (empty($steps['plugins']['live_cleared'])) {
+                    $live_plugins = glob(WP_CONTENT_DIR . '/plugins/*', GLOB_ONLYDIR);
+                    if (is_array($live_plugins)) {
+                        foreach ($live_plugins as $plugin_dir) {
+                            if (basename($plugin_dir) === '1-click-migration') {
+                                continue;
+                            }
+                            OCM_Backup::deleteDirectoryBestEffort($plugin_dir);
                         }
-                        OCM_Backup::deleteDirectoryBestEffort($plugin_dir);
                     }
+                    $steps['plugins']['live_cleared'] = true;
+                    update_option(self::OPTION_RESTORE_STEPS, $steps, false);
                 }
                 $extracted_plugins = glob($extract_plugins_dir . '/*', GLOB_ONLYDIR);
                 if (is_array($extracted_plugins)) {
@@ -1773,6 +1920,34 @@ class OCM_Local_Backup
         }
         delete_option(self::OPTION_RESTORE_DEACTIVATED_PLUGINS);
         delete_option(self::OPTION_RESTORE_PLUGINS_ISOLATED);
+    }
+
+    /**
+     * Deactivating the plugin while a restore has the other plugins switched
+     * off: WordPress writes its own copy of active_plugins after the
+     * deactivation hook, which would undo restore_isolated_plugins(). Call
+     * this before the reset; it hands WordPress the saved list (without this
+     * plugin) to write instead.
+     *
+     * @return void
+     */
+    public static function keep_isolated_plugins_through_deactivation()
+    {
+        $saved = get_option(self::OPTION_RESTORE_DEACTIVATED_PLUGINS, null);
+        if (!is_array($saved) || !$saved || !function_exists('add_filter')) {
+            return;
+        }
+        $own = defined('OCM_MAIN_FILE') ? plugin_basename(OCM_MAIN_FILE) : '1-click-migration/one-click-migration.php';
+        $keep = array_values(array_diff($saved, array($own)));
+        $armed = false;
+        add_filter('pre_update_option_active_plugins', static function ($value) use ($keep, $own, &$armed) {
+            // Skip writes that still list this plugin (the reset's own restore).
+            if ($armed || !is_array($value) || in_array($own, $value, true)) {
+                return $value;
+            }
+            $armed = true;
+            return array_values(array_unique(array_merge($value, $keep)));
+        });
     }
 
     private static function finish_restore($workspace, $run_id)
@@ -1991,6 +2166,15 @@ class OCM_Local_Backup
         update_option(self::OPTION_WATCHDOG_LAST, $now, false);
 
         if (method_exists($process, 'is_queue_empty') && $process->is_queue_empty()) {
+            // A backup touches its heartbeat before its last queue row goes and
+            // while it publishes. Read it again now that the queue is known to
+            // be empty: a fresh one means the run is finishing, not dead.
+            if (function_exists('wp_cache_delete')) {
+                wp_cache_delete(self::OPTION_WORKER_HEARTBEAT, 'options');
+            }
+            if (($now - (int) get_option(self::OPTION_WORKER_HEARTBEAT, 0)) <= $threshold) {
+                return;
+            }
             // Queue drained without completing — mark stopped cleanly.
             $orphan_run = get_option($restore_active ? self::OPTION_ACTIVE_RESTORE_RUN : self::OPTION_ACTIVE_BACKUP_RUN, array());
             $orphan_msg = 'Local operation stopped unexpectedly because no queued work remained.';

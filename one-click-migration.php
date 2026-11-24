@@ -4,7 +4,7 @@
  * Plugin Name: 1 Click Migration
  * Plugin URI: https://wordpress.org/plugins/1-click-migration/
  * Description: FREE local backup & restore (scheduled or manual), plus 1-click cloud migration with no size cap. Cloud migrations: $9.99, success guaranteed or a refund.
- * Version: 4.0.0
+ * Version: 4.0.1
  * Requires at least: 5.3
  * Requires PHP: 7.4
  * Author: 1ClickMigration
@@ -562,6 +562,12 @@ class One_Click_Migration
         // self::ensure_mu_plugin_isolation_shim(); // disabled while debugging restore
         self::remove_mu_plugin_isolation_shim();
 
+        // Deactivation cleared the scheduled local backup event but kept the
+        // setting; put the event back.
+        if (class_exists(__NAMESPACE__ . '\\OCM_Local_Scheduler')) {
+            OCM_Local_Scheduler::ensure_scheduled();
+        }
+
         flush_rewrite_rules();
     }
 
@@ -662,6 +668,11 @@ class One_Click_Migration
 
     public static function uninstall()
     {
+        // A local restore may have the other plugins switched off; make sure
+        // the list WordPress saves after this hook still has them.
+        if (class_exists(__NAMESPACE__ . '\\OCM_Local_Backup')) {
+            OCM_Local_Backup::keep_isolated_plugins_through_deactivation();
+        }
         // Use stop_and_reset for complete cleanup on deactivation
         self::stop_and_reset();
         self::remove_mu_plugin_isolation_shim();

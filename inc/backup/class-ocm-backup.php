@@ -5459,7 +5459,7 @@ class OCM_Backup
      * @return bool True when $path is ABSPATH, WP_CONTENT_DIR or the document
      *              root, or inside one of them.
      */
-    private static function is_inside_web_root($path)
+    public static function is_inside_web_root($path)
     {
         $roots = array(ABSPATH, WP_CONTENT_DIR);
         if (isset($_SERVER['DOCUMENT_ROOT']) && is_string($_SERVER['DOCUMENT_ROOT']) && '' !== $_SERVER['DOCUMENT_ROOT']) {

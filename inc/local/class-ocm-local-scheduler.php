@@ -241,6 +241,22 @@ class OCM_Local_Scheduler
     }
 
     /**
+     * Re-arm the schedule when it is enabled but has no cron event: plugin
+     * deactivation clears the event and keeps the setting.
+     *
+     * @return int Next run (UTC timestamp), or 0 when disabled.
+     */
+    public static function ensure_scheduled()
+    {
+        $schedule = self::get_schedule();
+        if (empty($schedule['enabled'])) {
+            return 0;
+        }
+        $next = self::next_scheduled_timestamp();
+        return $next > 0 ? $next : self::sync_cron_schedule($schedule);
+    }
+
+    /**
      * Unschedule all pending scheduled backup events.
      *
      * @return void

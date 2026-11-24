@@ -172,7 +172,12 @@ class OCM_BackgroundLocalBackup extends WP_Background_Process
         }
 
         if (self::RETURN_TYPE_END_PROCESS === $isEndProcess) {
-            $this->cancel_all_process();
+            // The run that ended cleared its own queue. Cancelling the shared
+            // process here would also wipe the queue of a run started since,
+            // so hand any remaining work to a new worker instead.
+            if (!$this->is_queue_empty()) {
+                $this->dispatch();
+            }
             wp_die();
         }
 

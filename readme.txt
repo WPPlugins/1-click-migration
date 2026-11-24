@@ -4,7 +4,7 @@ Tags: wordpress migration, migration plugin, wordpress backup, backup restore, s
 Requires at least: 5.3
 Tested up to: 7.1
 Requires PHP: 7.4
-Stable tag: 4.0.0
+Stable tag: 4.0.1
 Author URI: https://1clickmigration.com
 License: GPLv3 or later
 License URI: http://www.gnu.org/licenses/gpl-3.0.html
@@ -26,7 +26,7 @@ https://vimeo.com/1236211963
 * **Selective backup & restore.** Back up or restore any combination of your database, plugins, themes and uploads.
 * **Safe 1-click local restore.** Imports the database into temporary staging tables and verifies core options before replacing your live site.
 * **Automatic retention & disk-space guard.** Keep your last N backups (default 5, or unlimited) with automatic cleanup of old backups, plus a configurable minimum free-space guard so scheduled backups never fill your hosting disk.
-* **Private local storage & activity log.** Stored as plain ZIP archives in a web-blocked private folder outside your web root (protected by `.htaccess`, `web.config` and `index.php`), with a full activity history and log viewer.
+* **Private local storage & activity log.** Stored as plain ZIP archives in a private folder outside your website's public files where the server allows it, otherwise in a folder with an unguessable name, both protected by `.htaccess`, `web.config` and `index.php`. Includes a full activity history and log viewer.
 
 **Cloud Migration – Move, Clone & Transfer WordPress**
 
@@ -66,7 +66,7 @@ Questions before backing up, or running into a plugin issue? [Ask on the WordPre
 **Local Backups (Free)**
 
 1. Go to **Tools → One Click Migration** and switch to **Local Backups**.
-2. Click **Start local backup** for an immediate backup, or enable a schedule (hourly, daily, weekly or monthly) with retention and free-space guard settings.
+2. Click **Create Local Backup** for an immediate backup, or enable a schedule (hourly, daily, weekly or monthly) with retention and free-space guard settings.
 3. Click **Restore** next to any saved backup to restore the selected parts safely on the same site.
 
 **Cloud Migration – On the site you're moving from**
@@ -88,7 +88,7 @@ If a large site fails in one go, click **Stop & Reset** and use **Advanced optio
 == Installation ==
 1. Install 1-Click Migration from Plugins → Add New, or upload the `1-click-migration` folder to `/wp-content/plugins/`.
 2. Activate the migration plugin on the Plugins screen.
-3. Go to Tools → One Click Migration for free Local Backups or Cloud Migration.
+3. Go to Tools → One Click Migration for Cloud Migration, or switch to Local Backups for free backups on this server.
 
 == Frequently Asked Questions ==
 
@@ -99,7 +99,7 @@ Yes. Manual and scheduled local backups (hourly, daily, weekly or monthly) and s
 Yes. Under Local Backups, enable the schedule and choose hourly, daily, weekly or monthly backups, the time in your site's timezone, and which parts (database, plugins, themes, uploads) to include.
 
 = Where are local backups stored, and can they fill up my disk? =
-Local backups are saved as plain ZIP archives in a web-blocked private folder outside your web root (protected by `.htaccess`, `web.config` and `index.php`). Automatic retention pruning removes older backups past your "Keep last" limit, and a configurable free-space guard skips scheduled runs if hosting disk space gets low.
+Local backups are saved as plain ZIP archives in a private folder outside your website's public files where the server allows it, otherwise in a folder with an unguessable name, both protected by `.htaccess`, `web.config` and `index.php`. Automatic retention pruning removes older backups past your "Keep last" limit, and a configurable free-space guard skips scheduled runs if hosting disk space gets low.
 
 = How much does a WordPress migration cost, and how do I pay? =
 Local backups and same-site restores are free. A Cloud Migration costs $9.99, success guaranteed or a refund. Pay once via PayPal or card on PayPal's own page (from the plugin or restore-code email) before you restore; one payment covers retries and restoring the same backup on a second site for 48 hours. If you move many sites, [$15 a month covers unlimited migrations](https://1clickmigration.com/subscriptions/), cancel anytime.
@@ -141,12 +141,19 @@ Yes. Back up the local site, then restore it on the live server with the restore
 Any host that runs WordPress on PHP 7.4 or later, including Bluehost, SiteGround, Hostinger, GoDaddy, HostGator, DreamHost, Namecheap, IONOS, A2 Hosting, InMotion Hosting, GreenGeeks, ScalaHosting, Liquid Web, Cloudways, WP Engine, Flywheel, Kinsta, Pressable and Pantheon, plus cloud servers on DigitalOcean, AWS Lightsail, Vultr and Linode, and local development sites. It works with cPanel, Plesk or no control panel at all. It also works on hosts that block background requests or cut long PHP requests short. On Pantheon, restore onto the Dev environment in SFTP mode, because code folders on Test and Live are read-only.
 
 == Screenshots ==
-1. One-click WordPress migration plugin. Back up a live site; it stays up while you migrate.
-2. Selective WordPress migrate — choose database, plugins, themes, or uploads to back up.
-3. Restore finished on the destination site. WordPress migration complete.
-4. Enter the restore code on the destination site to finish your WordPress migration.
+1. Free local WordPress backups. Back up now, or schedule hourly, daily, weekly or monthly backups with retention and a free-space guard.
+2. Saved local backups and activity history. Restore, view the log of, or delete any backup.
+3. Restore a local backup in full, or choose the database, themes, plugins or uploads.
+4. One-click WordPress migration plugin. Back up a live site and get a restore code by email; the site stays up while you migrate.
+5. Enter the restore code on the destination site to finish your WordPress migration.
 
 == Changelog ==
+= 4.0.1 =
+* **Local backup fixes**: Starting a second backup or a restore no longer shows the previous run's result and stops updating. A restore that keeps getting cut off at the same step now stops and says so, instead of leaving the site in maintenance mode. Scheduled backups start again after the plugin is deactivated and reactivated.
+* **More reliable runs**: A backup that takes a while to finish is no longer reported as failed. Stopping a backup and starting a new one right away no longer cancels the new one. A start that was cut off no longer blocks later backups.
+* **Plugins stay active**: Stopping a local restore from the Cloud Migration tab, or deactivating the plugin during one, no longer leaves your other plugins switched off. A restore that resumes while it is putting plugins back no longer removes plugins it already restored.
+* **Private storage**: When WordPress is installed in a subfolder of the website, local backups now go to a folder with an unguessable name instead of one inside the website's public files. Backups saved by 4.0.0 are moved there automatically.
+
 = 4.0.0 =
 * **Free Local Backup & Restore**: Added free manual and scheduled local backups (hourly, daily, weekly or monthly in your site's timezone) with selective components (database, plugins, themes, uploads), automatic keep-last-N retention pruning, a configurable free-space guard, web-blocked private ZIP storage, safe staging-table restores, and an activity log viewer.
 * **Listing**: Updated plugin title, short description, tags, description and FAQ to cover Free Local Backup & Restore alongside Cloud Migration.
@@ -198,6 +205,9 @@ Any host that runs WordPress on PHP 7.4 or later, including Bluehost, SiteGround
 Older versions are listed in [changelog.txt](https://plugins.trac.wordpress.org/browser/1-click-migration/trunk/changelog.txt).
 
 == Upgrade Notice ==
+
+= 4.0.1 =
+Fixes for free Local Backups: reliable progress, restores that can't loop, schedules that survive reactivation, plugins kept active, and safer storage.
 
 = 4.0.0 =
 Adds free manual and scheduled Local Backups & Restores (hourly, daily, weekly or monthly) with retention pruning, disk-space guard, and safe staging-table restore. Cloud migrations remain $9.99 or $15/mo unlimited.

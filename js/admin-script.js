@@ -1066,6 +1066,13 @@
     var localPollTimerId = null;
     var localPollDelayId = null;
     var activeLocalRestoreId = '';
+    // True from the click until the start request answers. Until the server
+    // has written the new run to the log, a poll still reads the previous
+    // run's last line ("completed", or its failure).
+    var localStartPending = false;
+    // Bumped whenever a start request is sent or answers, so a poll sent
+    // before that is dropped when its answer arrives late.
+    var localPollEpoch = 0;
 
     function setPluginMode(mode, updateUrl) {
         var isLocal = mode === 'local';
@@ -1404,13 +1411,17 @@
 
     function pollLocalProgressOnce() {
         if (typeof siteData === 'undefined' || !siteData.localProgressUrl) return;
+        var epoch = localPollEpoch;
         $.ajax({
             url: siteData.localProgressUrl,
             method: 'GET',
             dataType: 'json',
             beforeSend: function (xhr) { xhr.setRequestHeader('X-WP-Nonce', siteData.restNonce); },
             success: function (res) {
-                if (!res) return;
+                if (!res || epoch !== localPollEpoch) return;
+                if (localStartPending && (!res.active || res.failed || res.completed || res.value === '100%')) {
+                    return;
+                }
                 $('#ocm-local-download-log').show();
                 if (res.failed) {
                     stopLocalProgressPolling();
@@ -1438,16 +1449,32 @@
         });
     }
 
-    function startLocalProgressPolling() {
+    function startLocalProgressPolling(immediately) {
         stopLocalProgressPolling();
         setLocalButtonsDisabled(true);
         localPollDelayId = setTimeout(function () {
             pollLocalProgressOnce();
             localPollTimerId = setInterval(pollLocalProgressOnce, 1500);
-        }, 1200);
+        }, immediately ? 0 : 1200);
+    }
+
+    function beginLocalStart() {
+        localStartPending = true;
+        localPollEpoch++;
+        startLocalProgressPolling();
+    }
+
+    // The start request answered (or failed without saying why): the new run
+    // is in the log now, so polls can be trusted again.
+    function endLocalStart() {
+        localStartPending = false;
+        localPollEpoch++;
+        startLocalProgressPolling(true);
     }
 
     function handleLocalStartError(msg) {
+        localStartPending = false;
+        localPollEpoch++;
         stopLocalProgressPolling();
         setLocalButtonsDisabled(false);
         setLocalProgress('0%', msg || '', 'failed');
@@ -1466,7 +1493,7 @@
         $('#ocm-local-part-warning').hide();
         setLocalButtonsDisabled(true);
         setLocalProgress('1%', t('localBackupStarted'), 'running');
-        startLocalProgressPolling();
+        beginLocalStart();
 
         $.post(siteData.ajaxurl, {
             action: 'ocm_local_start_backup',
@@ -1477,12 +1504,14 @@
             if (response && response.success === false) {
                 handleLocalStartError(response.data && response.data.message);
             } else {
-                pollLocalProgressOnce();
+                endLocalStart();
             }
         }).fail(function (xhr) {
             var msg = xhr && xhr.responseJSON && xhr.responseJSON.data && xhr.responseJSON.data.message;
             if (msg) {
                 handleLocalStartError(msg);
+            } else {
+                endLocalStart();
             }
         });
     }
@@ -1572,7 +1601,7 @@
         closeLocalRestoreModal();
         setLocalButtonsDisabled(true);
         setLocalProgress('1%', t('localRestoreStarted'), 'running');
-        startLocalProgressPolling();
+        beginLocalStart();
 
         $.post(siteData.ajaxurl, {
             action: 'ocm_local_start_restore',
@@ -1583,12 +1612,14 @@
             if (response && response.success === false) {
                 handleLocalStartError(response.data && response.data.message);
             } else {
-                pollLocalProgressOnce();
+                endLocalStart();
             }
         }).fail(function (xhr) {
             var msg = xhr && xhr.responseJSON && xhr.responseJSON.data && xhr.responseJSON.data.message;
             if (msg) {
                 handleLocalStartError(msg);
+            } else {
+                endLocalStart();
             }
         });
     }
@@ -1618,6 +1649,8 @@
             action: 'ocm_local_cancel',
             nonce: localNonce('cancel')
         }).done(function () {
+            localStartPending = false;
+            localPollEpoch++;
             stopLocalProgressPolling();
             setLocalButtonsDisabled(false);
             setLocalProgress('0%', t('localIdleText'), 'idle');

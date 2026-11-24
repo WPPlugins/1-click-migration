@@ -567,7 +567,7 @@ class OCM_Admin_Page
             'last_backup_id' => '',
         );
         $backups = $has_local ? OCM_Local_Storage::list_backups() : array();
-        $next_ts = $has_local ? OCM_Local_Scheduler::next_scheduled_timestamp() : 0;
+        $next_ts = $has_local ? OCM_Local_Scheduler::ensure_scheduled() : 0;
         $next_formatted = ($has_local && $next_ts > 0) ? OCM_Local_Scheduler::format_timestamp($next_ts) : '';
         $local_progress = $has_local ? OCM_Local_Backup::get_progress() : array(
             'text' => __('Idle — ready to run a local backup or restore.', '1-click-migration'),

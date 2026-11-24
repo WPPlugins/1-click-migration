@@ -15,18 +15,118 @@ class OCM_Local_Storage
     const BACKUP_ID_REGEX = '/^[0-9]{8}-[0-9]{6}-[0-9a-f]{8}$/';
     const STAGING_PREFIX = '.in-progress-';
 
+    /** @var bool Whether this request already tried moving backups out of the web root. */
+    private static $legacy_moved = false;
+
     /**
-     * Root directory where local backups are stored (inside OCM_Private_Dir).
+     * Root directory where local backups are stored.
+     *
+     * Normally inside the private dir beside the WordPress root. That folder
+     * can still sit inside the web server's document root (WordPress installed
+     * in a subfolder), where servers that ignore the deny files (nginx) would
+     * serve the plain archives to anyone who guesses the path. Then the
+     * backups go to the wp-content folder with an unguessable name instead,
+     * the one the log falls back to.
      *
      * @return string Without trailing slash.
      */
     public static function base_dir()
+    {
+        $preferred = self::preferred_base_dir();
+        $hidden = self::hidden_base_dir();
+        if ($hidden === '' || $hidden === $preferred) {
+            return $preferred;
+        }
+        // Once chosen, stay there: WP-CLI and some cron runners have no
+        // DOCUMENT_ROOT, so they couldn't repeat the check.
+        if (is_dir($hidden)) {
+            return $hidden;
+        }
+        if (class_exists(__NAMESPACE__ . '\\OCM_Backup')
+            && method_exists(OCM_Backup::class, 'is_inside_web_root')
+            && OCM_Backup::is_inside_web_root($preferred)
+        ) {
+            return $hidden;
+        }
+        return $preferred;
+    }
+
+    /**
+     * local-backups inside the private dir the log uses.
+     *
+     * @return string
+     */
+    public static function preferred_base_dir()
     {
         $root = defined('OCM_DEBUG_LOG_DIR') && is_string(OCM_DEBUG_LOG_DIR) && OCM_DEBUG_LOG_DIR !== ''
             ? OCM_DEBUG_LOG_DIR
             : WP_CONTENT_DIR;
 
         return rtrim($root, '/\\') . '/local-backups';
+    }
+
+    /**
+     * local-backups inside the unguessable wp-content folder, or '' when the
+     * site has no secrets to build its name from.
+     *
+     * @return string
+     */
+    public static function hidden_base_dir()
+    {
+        if (!class_exists(__NAMESPACE__ . '\\OCM_Private_Dir') || !defined('ABSPATH') || !defined('WP_CONTENT_DIR')) {
+            return '';
+        }
+        $dir = OCM_Private_Dir::fallback_site_dir_for(ABSPATH, WP_CONTENT_DIR, OCM_Private_Dir::site_secret());
+        return $dir === '' ? '' : rtrim($dir, '/\\') . '/local-backups';
+    }
+
+    /**
+     * Move backups 4.0.0 saved inside the web root to base_dir(). Skipped
+     * while a local backup or restore is running, so no run loses its files.
+     *
+     * @return void
+     */
+    public static function move_legacy_backups()
+    {
+        if (self::$legacy_moved) {
+            return;
+        }
+        $old = self::preferred_base_dir();
+        $new = self::base_dir();
+        if ($old === $new || !is_dir($old)) {
+            return;
+        }
+        if (class_exists(__NAMESPACE__ . '\\OCM_Local_Backup') && OCM_Local_Backup::is_running()) {
+            return;
+        }
+        self::$legacy_moved = true;
+        if (!is_dir($new)) {
+            $parent = dirname($new);
+            if (class_exists(__NAMESPACE__ . '\\OCM_Private_Dir')) {
+                OCM_Private_Dir::ensure($parent);
+            } elseif (!is_dir($parent)) {
+                @mkdir($parent, 0700, true);
+            }
+            if (@rename($old, $new)) {
+                self::write_deny_files($new);
+                return;
+            }
+            if (!self::ensure_dir_protected($new)) {
+                return;
+            }
+        }
+        foreach ((array) @scandir($old) as $entry) {
+            if (!is_string($entry) || !self::is_valid_backup_id($entry)) {
+                continue;
+            }
+            if (!is_dir($new . '/' . $entry)) {
+                @rename($old . '/' . $entry, $new . '/' . $entry);
+            }
+        }
+        $left = array_diff((array) @scandir($old), array('.', '..', '.htaccess', 'web.config', 'index.php'));
+        if (empty($left)) {
+            OCM_Backup::deleteDirectoryBestEffort($old);
+        }
     }
 
     /**
@@ -37,6 +137,7 @@ class OCM_Local_Storage
      */
     public static function ensure_base_dir()
     {
+        self::move_legacy_backups();
         $private_dir = dirname(self::base_dir());
         if (class_exists(__NAMESPACE__ . '\\OCM_Private_Dir')) {
             if (!OCM_Private_Dir::ensure($private_dir)) {
@@ -327,6 +428,7 @@ class OCM_Local_Storage
      */
     public static function list_backups()
     {
+        self::move_legacy_backups();
         $base = self::base_dir();
         if (!is_dir($base)) {
             return array();
