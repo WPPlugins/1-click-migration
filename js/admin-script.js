@@ -1062,6 +1062,569 @@
         window.location.href = url;
     }
 
+    // -------- Local Backups & Scheduler --------
+    var localPollTimerId = null;
+    var localPollDelayId = null;
+    var activeLocalRestoreId = '';
+
+    function setPluginMode(mode, updateUrl) {
+        var isLocal = mode === 'local';
+        $('.ocm-mode-btn').removeClass('active').attr('aria-selected', 'false');
+        $('.ocm-mode-btn[data-ocm-mode="' + (isLocal ? 'local' : 'cloud') + '"]').addClass('active').attr('aria-selected', 'true');
+        $('#ocm-mode-cloud').toggleClass('active', !isLocal).prop('hidden', isLocal);
+        $('#ocm-mode-local').toggleClass('active', isLocal).prop('hidden', !isLocal);
+        if (updateUrl && window.history && window.history.replaceState) {
+            try {
+                var u = new URL(window.location.href);
+                u.searchParams.set('mode', isLocal ? 'local' : 'cloud');
+                window.history.replaceState({}, '', u.pathname + u.search + u.hash);
+            } catch (e) { /* ignore */ }
+        }
+    }
+
+    function localNonce(key) {
+        return (typeof siteData !== 'undefined' && siteData.localNonces && siteData.localNonces[key]) ? siteData.localNonces[key] : '';
+    }
+
+    function stopLocalProgressPolling() {
+        clearTimeout(localPollDelayId);
+        clearInterval(localPollTimerId);
+        localPollDelayId = null;
+        localPollTimerId = null;
+    }
+
+    function setLocalButtonsDisabled(disabled) {
+        $('#ocm-local-btn-backup, #ocm-local-save-settings, .ocm-local-restore-open, .ocm-local-delete-btn').prop('disabled', !!disabled);
+    }
+
+    function setLocalProgress(pct, text, state) {
+        $('#ocm-local-pg-pct').text(pct);
+        $('#ocm-local-pg-fill')
+            .css('width', pct)
+            .toggleClass('running', state === 'running')
+            .toggleClass('ocm-pg-done', state === 'done')
+            .toggleClass('ocm-pg-failed', state === 'failed');
+        if (typeof text === 'string') {
+            $('#ocm-local-pg-status').text(text);
+        }
+        if (state === 'failed') {
+            $('#ocm-local-pg-error').text(text || '').addClass('show').show();
+        } else {
+            $('#ocm-local-pg-error').removeClass('show').hide().empty();
+        }
+    }
+
+    function syncLocalScheduleFields() {
+        var freq = $('#ocm-local-sched-freq').val() || 'daily';
+        $('#ocm-local-sched-dow-wrap').toggle(freq === 'weekly');
+        $('#ocm-local-sched-dom-wrap').toggle(freq === 'monthly');
+        $('#ocm-local-sched-time-hint').toggle(freq === 'hourly');
+    }
+
+    function renderLocalStorageSummary(storage) {
+        if (!storage) return;
+        $('#ocm-local-stat-count').text(storage.count != null ? String(storage.count) : '0');
+        var keep = parseInt(storage.keep_last, 10) || 0;
+        $('#ocm-local-stat-retention').text(keep > 0 ? fmt(t('localKeepLastLabel'), keep) : t('localUnlimited'));
+        $('#ocm-local-stat-used').text(storage.total_readable || '0 B');
+        $('#ocm-local-stat-free').text(storage.free_readable || '');
+        var minFree = parseInt(storage.min_free_space_mb, 10) || 0;
+        $('#ocm-local-stat-guard').text(minFree > 0 ? ('Min guard: ' + minFree + ' MB') : 'Space guard off');
+        if (storage.low_space) {
+            $('#ocm-local-stat-low').prop('hidden', false).text(t('localLowSpace'));
+        } else {
+            $('#ocm-local-stat-low').prop('hidden', true);
+        }
+        if (storage.base_dir) {
+            $('#ocm-local-stat-path').text(storage.base_dir);
+        }
+    }
+
+    function localPartLabel(part) {
+        var map = { db: 'Database', themes: 'Themes', plugins: 'Plugins', uploads: 'Uploads' };
+        return map[part] || String(part).toUpperCase();
+    }
+
+    function renderLocalPartPills(parts) {
+        var html = '<div class="ocm-part-pills">';
+        for (var p = 0; p < (parts ? parts.length : 0); p++) {
+            html += '<span class="ocm-part-pill">' + escHtml(localPartLabel(parts[p])) + '</span>';
+        }
+        return html + '</div>';
+    }
+
+    function localActivityStatusLabel(status) {
+        var map = {
+            completed: t('localStatusCompleted'),
+            failed: t('localStatusFailed'),
+            skipped: t('localStatusSkipped'),
+            cancelled: t('localStatusCancelled')
+        };
+        return map[status] || escHtml(status || '');
+    }
+
+    function renderLocalBackupsTable(backups) {
+        var $container = $('#ocm-local-backups-list');
+        if (!backups || !backups.length) {
+            $container.html('<p class="ocm-local-empty">' + escHtml(t('localNoBackups')) + '</p>');
+            return;
+        }
+        var html = '<div class="ocm-local-table-wrap"><table class="ocm-local-table"><thead><tr>'
+            + '<th>' + escHtml(t('localDateCol')) + '</th>'
+            + '<th>' + escHtml(t('localTypeCol')) + '</th>'
+            + '<th>' + escHtml(t('localPartsCol')) + '</th>'
+            + '<th>' + escHtml(t('localSizeCol')) + '</th>'
+            + '<th>' + escHtml(t('localActionsCol')) + '</th>'
+            + '</tr></thead><tbody>';
+        for (var i = 0; i < backups.length; i++) {
+            var b = backups[i] || {};
+            var parts = b.parts ? Object.keys(b.parts) : [];
+            var dateStr = b.created_at || b.id || '';
+            var trigger = b.trigger === 'scheduled' ? 'scheduled' : 'manual';
+            var triggerLabel = trigger === 'scheduled' ? t('localScheduled') : t('localManual');
+            html += '<tr data-backup-id="' + escHtml(b.id) + '">'
+                + '<td><strong>' + escHtml(dateStr) + '</strong><div class="ocm-local-id-sub"><code>' + escHtml(b.id) + '</code></div></td>'
+                + '<td><span class="ocm-trigger-badge ocm-trigger-' + escHtml(trigger) + '">' + escHtml(triggerLabel) + '</span>'
+                + (b.label ? ' <span class="ocm-local-row-label">' + escHtml(b.label) + '</span>' : '') + '</td>'
+                + '<td>' + renderLocalPartPills(parts) + '</td>'
+                + '<td>' + escHtml(b.total_readable || '') + '</td>'
+                + '<td class="ocm-local-row-actions">'
+                + '<button type="button" class="ocm-btn ocm-btn-primary ocm-btn-sm ocm-local-restore-open"'
+                + ' data-backup-id="' + escHtml(b.id) + '"'
+                + ' data-backup-date="' + escHtml(dateStr) + '"'
+                + ' data-backup-label="' + escHtml(b.label || '') + '"'
+                + ' data-backup-size="' + escHtml(b.total_readable || '') + '"'
+                + ' data-backup-parts="' + escHtml(JSON.stringify(parts)) + '">' + escHtml(t('localRestoreBtn')) + '</button> '
+                + (b.has_log ? ('<button type="button" class="ocm-btn ocm-btn-ghost ocm-btn-sm ocm-local-view-backup-log" data-backup-id="' + escHtml(b.id) + '">' + escHtml(t('localViewLogBtn')) + '</button> ') : '')
+                + '<button type="button" class="ocm-btn ocm-btn-ghost ocm-btn-sm ocm-local-delete-btn" data-backup-id="' + escHtml(b.id) + '">' + escHtml(t('localDeleteBtn')) + '</button>'
+                + '</td></tr>';
+        }
+        html += '</tbody></table></div>';
+        $container.html(html);
+    }
+
+    function renderLocalActivityTable(entries) {
+        var $container = $('#ocm-local-activity-list');
+        if (!$container.length) return;
+        if (!entries || !entries.length) {
+            $('#ocm-local-clear-activity').prop('hidden', true);
+            $container.html('<p class="ocm-local-empty">' + escHtml(t('localNoActivity')) + '</p>');
+            return;
+        }
+        $('#ocm-local-clear-activity').prop('hidden', false);
+        var html = '<div class="ocm-local-table-wrap"><table class="ocm-local-table ocm-local-activity-table"><thead><tr>'
+            + '<th>' + escHtml(t('localActivityDateCol')) + '</th>'
+            + '<th>' + escHtml(t('localActivityOpCol')) + '</th>'
+            + '<th>' + escHtml(t('localActivityPartsCol')) + '</th>'
+            + '<th>' + escHtml(t('localActivityStatusCol')) + '</th>'
+            + '<th>' + escHtml(t('localActivityDetailsCol')) + '</th>'
+            + '</tr></thead><tbody>';
+        for (var i = 0; i < entries.length; i++) {
+            var act = entries[i] || {};
+            var opType = act.type === 'restore' ? 'restore' : 'backup';
+            var opLabel = opType === 'restore' ? t('localOpRestore') : t('localOpBackup');
+            var trigger = act.trigger === 'scheduled' ? 'scheduled' : 'manual';
+            var triggerLabel = trigger === 'scheduled' ? t('localScheduled') : t('localManual');
+            var status = act.status || 'completed';
+            var subMeta = [];
+            if (act.size_readable) subMeta.push(act.size_readable);
+            if (act.duration_readable) subMeta.push(act.duration_readable);
+            html += '<tr>'
+                + '<td><strong>' + escHtml(act.time_formatted || '') + '</strong>'
+                + (subMeta.length ? '<div class="ocm-local-id-sub">' + escHtml(subMeta.join(' · ')) + '</div>' : '')
+                + '</td>'
+                + '<td><span class="ocm-op-badge ocm-op-' + escHtml(opType) + '">' + escHtml(opLabel) + '</span> '
+                + (opType === 'backup' ? '<span class="ocm-trigger-badge ocm-trigger-' + escHtml(trigger) + '">' + escHtml(triggerLabel) + '</span>' : '')
+                + (act.label ? ' <span class="ocm-local-row-label">' + escHtml(act.label) + '</span>' : '')
+                + '</td>'
+                + '<td>' + renderLocalPartPills(act.parts || []) + '</td>'
+                + '<td><span class="ocm-status-badge ocm-status-' + escHtml(status) + '">' + escHtml(localActivityStatusLabel(status)) + '</span></td>'
+                + '<td class="ocm-activity-details">'
+                + (act.message ? '<div>' + escHtml(act.message) + '</div>' : '')
+                + (act.backup_id ? '<div class="ocm-local-id-sub"><code>' + escHtml(act.backup_id) + '</code></div>' : '')
+                + '</td></tr>';
+        }
+        html += '</tbody></table></div>';
+        $container.html(html);
+    }
+
+    function applyGlobalLogPayload(logData) {
+        var hasLog = !!(logData && logData.exists && logData.content);
+        if (logData && logData.exists && logData.size_readable) {
+            $('#ocm-local-log-meta').text(logData.size_readable);
+        } else {
+            $('#ocm-local-log-meta').text(t('localLogEmpty'));
+        }
+        if (logData && logData.exists) {
+            $('#ocm-local-download-log, #ocm-local-log-download-btn').show().prop('hidden', false);
+        } else {
+            $('#ocm-local-log-download-btn').prop('hidden', true);
+        }
+        $('#ocm-local-log-content').text(hasLog ? logData.content : t('localLogEmpty'));
+        if (logData && logData.truncated && logData.line_count) {
+            $('#ocm-local-log-note').text(fmt(t('localLogTruncated'), logData.line_count));
+        } else {
+            $('#ocm-local-log-note').text('');
+        }
+    }
+
+    function loadLocalLog() {
+        if (typeof siteData === 'undefined' || !siteData.ajaxurl) return;
+        $.post(siteData.ajaxurl, {
+            action: 'ocm_local_get_log',
+            nonce: localNonce('getLog')
+        }).done(function (response) {
+            if (!response || !response.success || !response.data) return;
+            applyGlobalLogPayload(response.data.log);
+            if (response.data.activity !== undefined) {
+                renderLocalActivityTable(response.data.activity);
+            }
+        }).fail(function () {
+            $('#ocm-local-log-content').text(t('localLogLoadFailed'));
+        });
+    }
+
+    function toggleLocalLogViewer() {
+        var $btn = $('#ocm-local-log-toggle');
+        var $body = $('#ocm-local-log-body');
+        var willOpen = $body.prop('hidden');
+        $body.prop('hidden', !willOpen);
+        $btn.toggleClass('open', willOpen).attr('aria-expanded', willOpen ? 'true' : 'false');
+        if (willOpen) {
+            $('#ocm-local-log-content').text(t('localLogLoading'));
+            loadLocalLog();
+        }
+    }
+
+    function clearLocalLog() {
+        if (typeof window.confirm === 'function' && !window.confirm(t('localClearLogConfirm'))) {
+            return;
+        }
+        $.post(siteData.ajaxurl, {
+            action: 'ocm_local_clear_log',
+            nonce: localNonce('clearLog')
+        }).done(function (response) {
+            if (response && response.success && response.data) {
+                applyGlobalLogPayload(response.data.log);
+            }
+        });
+    }
+
+    function clearLocalActivity() {
+        if (typeof window.confirm === 'function' && !window.confirm(t('localClearActivityConfirm'))) {
+            return;
+        }
+        $.post(siteData.ajaxurl, {
+            action: 'ocm_local_clear_activity',
+            nonce: localNonce('clearActivity')
+        }).done(function (response) {
+            if (response && response.success && response.data) {
+                renderLocalActivityTable(response.data.activity || []);
+            }
+        });
+    }
+
+    function openBackupLogModal(backupId) {
+        if (!backupId || typeof siteData === 'undefined' || !siteData.ajaxurl) return;
+        $('#ocm-local-log-modal-title').text(t('localBackupLogTitle') + ' ' + backupId);
+        $('#ocm-local-log-modal-content').text(t('localLogLoading'));
+        $('#ocm-local-log-modal').prop('hidden', false).attr('aria-hidden', 'false').addClass('open');
+        $.post(siteData.ajaxurl, {
+            action: 'ocm_local_get_log',
+            nonce: localNonce('getLog'),
+            backup_id: backupId
+        }).done(function (response) {
+            var logData = response && response.success && response.data && response.data.log;
+            var txt = (logData && logData.exists && logData.content) ? logData.content : t('localLogEmpty');
+            $('#ocm-local-log-modal-content').text(txt);
+        }).fail(function () {
+            $('#ocm-local-log-modal-content').text(t('localLogLoadFailed'));
+        });
+    }
+
+    function closeBackupLogModal() {
+        $('#ocm-local-log-modal').prop('hidden', true).attr('aria-hidden', 'true').removeClass('open');
+    }
+
+    function copyLogElement($pre, $btn) {
+        var text = $pre.text() || '';
+        if (!text) return;
+        var markCopied = function () {
+            if (!$btn || !$btn.length) return;
+            var prev = $btn.text();
+            $btn.text(t('localLogCopied'));
+            setTimeout(function () { $btn.text(prev); }, 1500);
+        };
+        if (typeof navigator !== 'undefined' && navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+            navigator.clipboard.writeText(text).then(markCopied, function () {});
+            return;
+        }
+        var ta = document.createElement('textarea');
+        ta.value = text;
+        ta.setAttribute('readonly', '');
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.select();
+        try {
+            if (document.execCommand('copy')) {
+                markCopied();
+            }
+        } catch (e) { /* ignore */ }
+        document.body.removeChild(ta);
+    }
+
+    function refreshLocalBackups() {
+        if (typeof siteData === 'undefined' || !siteData.ajaxurl) return;
+        $.post(siteData.ajaxurl, {
+            action: 'ocm_local_list_backups',
+            nonce: localNonce('listBackups')
+        }).done(function (response) {
+            if (!response || !response.success || !response.data) return;
+            var d = response.data;
+            renderLocalStorageSummary(d.storage);
+            renderLocalBackupsTable(d.backups);
+            if (d.activity !== undefined) {
+                renderLocalActivityTable(d.activity);
+            }
+            if (d.log_exists) {
+                $('#ocm-local-download-log').show();
+                $('#ocm-local-log-download-btn').prop('hidden', false);
+            }
+            if (d.schedule && d.schedule.enabled && d.next_run_formatted) {
+                $('#ocm-local-next-run').text(t('localNextRun') + ' ' + d.next_run_formatted);
+            } else {
+                $('#ocm-local-next-run').text(t('localScheduleDisabled'));
+            }
+            if ($('#ocm-local-log-body').length && !$('#ocm-local-log-body').prop('hidden')) {
+                loadLocalLog();
+            }
+        });
+    }
+
+    function pollLocalProgressOnce() {
+        if (typeof siteData === 'undefined' || !siteData.localProgressUrl) return;
+        $.ajax({
+            url: siteData.localProgressUrl,
+            method: 'GET',
+            dataType: 'json',
+            beforeSend: function (xhr) { xhr.setRequestHeader('X-WP-Nonce', siteData.restNonce); },
+            success: function (res) {
+                if (!res) return;
+                $('#ocm-local-download-log').show();
+                if (res.failed) {
+                    stopLocalProgressPolling();
+                    setLocalProgress(res.value || '0%', res.text || '', 'failed');
+                    setLocalButtonsDisabled(false);
+                    refreshLocalBackups();
+                    return;
+                }
+                if (res.completed || res.value === '100%') {
+                    stopLocalProgressPolling();
+                    setLocalProgress('100%', res.text || '', 'done');
+                    setLocalButtonsDisabled(false);
+                    refreshLocalBackups();
+                    return;
+                }
+                if (res.isStopped && !res.active) {
+                    stopLocalProgressPolling();
+                    setLocalProgress(res.value || '0%', res.text || '', 'idle');
+                    setLocalButtonsDisabled(false);
+                    refreshLocalBackups();
+                    return;
+                }
+                setLocalProgress(res.value || '1%', res.text || '', 'running');
+            }
+        });
+    }
+
+    function startLocalProgressPolling() {
+        stopLocalProgressPolling();
+        setLocalButtonsDisabled(true);
+        localPollDelayId = setTimeout(function () {
+            pollLocalProgressOnce();
+            localPollTimerId = setInterval(pollLocalProgressOnce, 1500);
+        }, 1200);
+    }
+
+    function handleLocalStartError(msg) {
+        stopLocalProgressPolling();
+        setLocalButtonsDisabled(false);
+        setLocalProgress('0%', msg || '', 'failed');
+        refreshLocalBackups();
+    }
+
+    function submitLocalBackup() {
+        var parts = [];
+        $('input[data-ocm-local-part]:checked').each(function () {
+            parts.push($(this).attr('data-ocm-local-part'));
+        });
+        if (!parts.length) {
+            $('#ocm-local-part-warning').show();
+            return;
+        }
+        $('#ocm-local-part-warning').hide();
+        setLocalButtonsDisabled(true);
+        setLocalProgress('1%', t('localBackupStarted'), 'running');
+        startLocalProgressPolling();
+
+        $.post(siteData.ajaxurl, {
+            action: 'ocm_local_start_backup',
+            nonce: localNonce('startBackup'),
+            label: $('#ocm-local-label').val() || '',
+            parts: parts
+        }).done(function (response) {
+            if (response && response.success === false) {
+                handleLocalStartError(response.data && response.data.message);
+            } else {
+                pollLocalProgressOnce();
+            }
+        }).fail(function (xhr) {
+            var msg = xhr && xhr.responseJSON && xhr.responseJSON.data && xhr.responseJSON.data.message;
+            if (msg) {
+                handleLocalStartError(msg);
+            }
+        });
+    }
+
+    function saveLocalSettings() {
+        var parts = [];
+        $('input[data-ocm-local-sched-part]:checked').each(function () {
+            parts.push($(this).attr('data-ocm-local-sched-part'));
+        });
+        var $msg = $('#ocm-local-settings-msg').removeClass('ocm-err ocm-ok').text('');
+        if (!parts.length) {
+            $msg.addClass('ocm-err').text(t('localSelectPart'));
+            return;
+        }
+        $('#ocm-local-save-settings').prop('disabled', true);
+        $.post(siteData.ajaxurl, {
+            action: 'ocm_local_save_settings',
+            nonce: localNonce('saveSettings'),
+            enabled: $('#ocm-local-sched-enabled').is(':checked') ? 1 : 0,
+            frequency: $('#ocm-local-sched-freq').val() || 'daily',
+            time: $('#ocm-local-sched-time').val() || '02:00',
+            day_of_week: $('#ocm-local-sched-dow').val() || '0',
+            day_of_month: $('#ocm-local-sched-dom').val() || '1',
+            parts: parts,
+            keep_last: $('#ocm-local-keep-last').val(),
+            min_free_space_mb: $('#ocm-local-min-free').val()
+        }).done(function (response) {
+            $('#ocm-local-save-settings').prop('disabled', false);
+            if (!response || !response.success) {
+                $msg.addClass('ocm-err').text((response && response.data && response.data.message) || t('localSettingsFailed'));
+                return;
+            }
+            var d = response.data || {};
+            $msg.addClass('ocm-ok').text(t('localSettingsSaved'));
+            if (d.storage) renderLocalStorageSummary(d.storage);
+            if (d.backups) renderLocalBackupsTable(d.backups);
+            if (d.schedule && d.schedule.enabled && d.next_run_formatted) {
+                $('#ocm-local-next-run').text(t('localNextRun') + ' ' + d.next_run_formatted);
+            } else {
+                $('#ocm-local-next-run').text(t('localScheduleDisabled'));
+            }
+        }).fail(function (xhr) {
+            $('#ocm-local-save-settings').prop('disabled', false);
+            var errMsg = (xhr && xhr.responseJSON && xhr.responseJSON.data && xhr.responseJSON.data.message) || t('localSettingsFailed');
+            $msg.addClass('ocm-err').text(errMsg);
+        });
+    }
+
+    function openLocalRestoreModal($btn) {
+        activeLocalRestoreId = String($btn.attr('data-backup-id') || '');
+        var date = String($btn.attr('data-backup-date') || '');
+        var label = String($btn.attr('data-backup-label') || '');
+        var size = String($btn.attr('data-backup-size') || '');
+        var parts = [];
+        try {
+            parts = JSON.parse(String($btn.attr('data-backup-parts') || '[]'));
+        } catch (e) {
+            parts = [];
+        }
+        var summary = date + (label ? ' — ' + label : '') + (size ? ' (' + size + ')' : '');
+        $('#ocm-local-restore-summary').text(summary);
+        var html = '';
+        for (var i = 0; i < parts.length; i++) {
+            var p = parts[i];
+            html += '<label class="ocm-check"><input type="checkbox" data-ocm-local-restore-part="' + escHtml(p) + '" checked><span>' + escHtml(localPartLabel(p)) + '</span></label>';
+        }
+        $('#ocm-local-restore-parts').html(html);
+        $('#ocm-local-restore-warning').hide();
+        $('#ocm-local-restore-modal').prop('hidden', false).attr('aria-hidden', 'false').addClass('open');
+    }
+
+    function closeLocalRestoreModal() {
+        $('#ocm-local-restore-modal').prop('hidden', true).attr('aria-hidden', 'true').removeClass('open');
+    }
+
+    function confirmLocalRestore() {
+        if (!activeLocalRestoreId) return;
+        var parts = [];
+        $('#ocm-local-restore-parts input[data-ocm-local-restore-part]:checked').each(function () {
+            parts.push($(this).attr('data-ocm-local-restore-part'));
+        });
+        if (!parts.length) {
+            $('#ocm-local-restore-warning').show();
+            return;
+        }
+        $('#ocm-local-restore-warning').hide();
+        closeLocalRestoreModal();
+        setLocalButtonsDisabled(true);
+        setLocalProgress('1%', t('localRestoreStarted'), 'running');
+        startLocalProgressPolling();
+
+        $.post(siteData.ajaxurl, {
+            action: 'ocm_local_start_restore',
+            nonce: localNonce('startRestore'),
+            backup_id: activeLocalRestoreId,
+            parts: parts
+        }).done(function (response) {
+            if (response && response.success === false) {
+                handleLocalStartError(response.data && response.data.message);
+            } else {
+                pollLocalProgressOnce();
+            }
+        }).fail(function (xhr) {
+            var msg = xhr && xhr.responseJSON && xhr.responseJSON.data && xhr.responseJSON.data.message;
+            if (msg) {
+                handleLocalStartError(msg);
+            }
+        });
+    }
+
+    function deleteLocalBackup(backupId) {
+        if (!backupId) return;
+        if (typeof window.confirm === 'function' && !window.confirm(t('localDeleteConfirm'))) {
+            return;
+        }
+        $.post(siteData.ajaxurl, {
+            action: 'ocm_local_delete_backup',
+            nonce: localNonce('deleteBackup'),
+            backup_id: backupId
+        }).done(function (response) {
+            if (response && response.success && response.data) {
+                renderLocalStorageSummary(response.data.storage);
+                renderLocalBackupsTable(response.data.backups);
+            }
+        });
+    }
+
+    function cancelLocalOperation() {
+        if (typeof window.confirm === 'function' && !window.confirm(t('localCancelConfirm'))) {
+            return;
+        }
+        $.post(siteData.ajaxurl, {
+            action: 'ocm_local_cancel',
+            nonce: localNonce('cancel')
+        }).done(function () {
+            stopLocalProgressPolling();
+            setLocalButtonsDisabled(false);
+            setLocalProgress('0%', t('localIdleText'), 'idle');
+            refreshLocalBackups();
+        });
+    }
+
     // -------- DOMReady --------
     $(function () {
         var startAction = $('#ocmStartAction').val();
@@ -1145,6 +1708,66 @@
                     }
                 } catch (e) { /* ignore */ }
             }
+        }
+        // Mode switcher & Local Backups wiring
+        $('.ocm-mode-btn').on('click', function () {
+            setPluginMode($(this).attr('data-ocm-mode'), true);
+        });
+        syncLocalScheduleFields();
+        $('#ocm-local-sched-freq').on('change', syncLocalScheduleFields);
+        $('#ocm-local-btn-backup').on('click', function (e) {
+            e.preventDefault();
+            submitLocalBackup();
+        });
+        $('#ocm-local-save-settings').on('click', function (e) {
+            e.preventDefault();
+            saveLocalSettings();
+        });
+        $(document).on('click', '.ocm-local-restore-open', function () {
+            openLocalRestoreModal($(this));
+        });
+        $(document).on('click', '[data-ocm-local-modal-close]', closeLocalRestoreModal);
+        $('#ocm-local-restore-confirm').on('click', confirmLocalRestore);
+        $(document).on('click', '.ocm-local-delete-btn', function () {
+            deleteLocalBackup($(this).attr('data-backup-id'));
+        });
+        $('#ocm-local-btn-stop').on('click', function (e) {
+            e.preventDefault();
+            cancelLocalOperation();
+        });
+        $('#ocm-local-log-toggle').on('click', function (e) {
+            e.preventDefault();
+            toggleLocalLogViewer();
+        });
+        $('#ocm-local-log-refresh').on('click', function (e) {
+            e.preventDefault();
+            loadLocalLog();
+        });
+        $('#ocm-local-log-copy').on('click', function (e) {
+            e.preventDefault();
+            copyLogElement($('#ocm-local-log-content'), $(this));
+        });
+        $('#ocm-local-log-clear').on('click', function (e) {
+            e.preventDefault();
+            clearLocalLog();
+        });
+        $('#ocm-local-clear-activity').on('click', function (e) {
+            e.preventDefault();
+            clearLocalActivity();
+        });
+        $(document).on('click', '.ocm-local-view-backup-log', function () {
+            openBackupLogModal($(this).attr('data-backup-id'));
+        });
+        $(document).on('click', '[data-ocm-local-log-modal-close]', closeBackupLogModal);
+        $('#ocm-local-log-modal-copy').on('click', function (e) {
+            e.preventDefault();
+            copyLogElement($('#ocm-local-log-modal-content'), $(this));
+        });
+        if (typeof siteData !== 'undefined' && (siteData.localActiveAction === 'backup' || siteData.localActiveAction === 'restore')) {
+            if (startAction !== 'backup' && startAction !== 'restore') {
+                setPluginMode('local', false);
+            }
+            startLocalProgressPolling();
         }
     });
 })(jQuery);

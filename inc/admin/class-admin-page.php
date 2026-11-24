@@ -171,6 +171,53 @@ class OCM_Admin_Page
             'leaveReview'           => __('Leave a review', '1-click-migration'),
             'dontAskAgain'          => __('Don\'t ask again', '1-click-migration'),
             'close'                 => __('Close', '1-click-migration'),
+            'localSelectPart'       => __('Please select at least one component.', '1-click-migration'),
+            'localBackupStarted'    => __('Local backup started', '1-click-migration'),
+            'localRestoreStarted'   => __('Local restore started', '1-click-migration'),
+            'localSettingsSaved'    => __('Schedule and storage settings saved.', '1-click-migration'),
+            'localSettingsFailed'   => __('Could not save settings. Please try again.', '1-click-migration'),
+            'localDeleteConfirm'    => __('Delete this local backup permanently? This cannot be undone.', '1-click-migration'),
+            'localCancelConfirm'    => __('Stop and reset the running local operation?', '1-click-migration'),
+            'localNoBackups'        => __('No local backups saved yet. Create one above or enable the schedule.', '1-click-migration'),
+            'localNextRun'          => __('Next run:', '1-click-migration'),
+            'localScheduleDisabled' => __('Schedule is disabled.', '1-click-migration'),
+            'localUnlimited'        => __('Unlimited', '1-click-migration'),
+            /* translators: %d: retention count */
+            'localKeepLastLabel'    => __('Keep last %d', '1-click-migration'),
+            'localLowSpace'         => __('Low space', '1-click-migration'),
+            'localManual'           => __('Manual', '1-click-migration'),
+            'localScheduled'        => __('Scheduled', '1-click-migration'),
+            'localRestoreBtn'       => __('Restore', '1-click-migration'),
+            'localDeleteBtn'        => __('Delete', '1-click-migration'),
+            'localDateCol'          => __('Date & Time', '1-click-migration'),
+            'localTypeCol'          => __('Type / Label', '1-click-migration'),
+            'localPartsCol'         => __('Included Parts', '1-click-migration'),
+            'localSizeCol'          => __('Size', '1-click-migration'),
+            'localActionsCol'       => __('Actions', '1-click-migration'),
+            'localViewLogBtn'       => __('Log', '1-click-migration'),
+            'localNoActivity'       => __('No local backup or restore activity recorded yet.', '1-click-migration'),
+            'localClearActivityConfirm' => __('Clear the visible local activity history? Saved backup archives will not be deleted.', '1-click-migration'),
+            'localClearLogConfirm'  => __('Clear the local backup and restore log file?', '1-click-migration'),
+            'localLogEmpty'         => __('No local log entries yet.', '1-click-migration'),
+            'localLogLoading'       => __('Loading log…', '1-click-migration'),
+            /* translators: %d: number of lines shown */
+            'localLogTruncated'     => __('Showing the most recent %d lines. Download the full log to view earlier entries.', '1-click-migration'),
+            'localLogCopied'        => __('Copied', '1-click-migration'),
+            'localLogCopyBtn'       => __('Copy', '1-click-migration'),
+            'localLogLoadFailed'    => __('Could not load local log.', '1-click-migration'),
+            'localOpBackup'         => __('Backup', '1-click-migration'),
+            'localOpRestore'        => __('Restore', '1-click-migration'),
+            'localStatusCompleted'  => __('Completed', '1-click-migration'),
+            'localStatusFailed'     => __('Failed', '1-click-migration'),
+            'localStatusSkipped'    => __('Skipped', '1-click-migration'),
+            'localStatusCancelled'  => __('Cancelled', '1-click-migration'),
+            'localActivityDateCol'  => __('Date & Time', '1-click-migration'),
+            'localActivityOpCol'    => __('Operation', '1-click-migration'),
+            'localActivityPartsCol' => __('Parts', '1-click-migration'),
+            'localActivityStatusCol' => __('Status', '1-click-migration'),
+            'localActivityDetailsCol' => __('Details', '1-click-migration'),
+            'localBackupLogTitle'   => __('Backup log:', '1-click-migration'),
+            'localIdleText'         => __('Idle — ready to run a local backup or restore.', '1-click-migration'),
         );
     }
 
@@ -220,6 +267,9 @@ class OCM_Admin_Page
         $cancel_url  = wp_nonce_url(admin_url('admin-post.php?action=cancel_actions'), 'one_click_migration_cancel_action');
         $version     = One_Click_Migration::get_version();
         $support_url = OCM_Backup::SUPPORT_FORUM_URL;
+        $local_active = class_exists(__NAMESPACE__ . '\\OCM_Local_Backup') && OCM_Local_Backup::is_running();
+        $requested_mode = isset($_GET['mode']) ? sanitize_text_field($_GET['mode']) : '';
+        $active_mode = ($requested_mode === 'local' || ($requested_mode !== 'cloud' && $local_active && !$action_active)) ? 'local' : 'cloud';
         ?>
         <div class="ocm-app">
 
@@ -248,6 +298,12 @@ class OCM_Admin_Page
             </header>
 
             <main class="ocm-main">
+                <div class="ocm-mode-bar" role="tablist" aria-label="<?php esc_attr_e('Plugin mode', '1-click-migration'); ?>">
+                    <button type="button" class="ocm-mode-btn<?php echo $active_mode === 'cloud' ? ' active' : ''; ?>" data-ocm-mode="cloud" role="tab" aria-selected="<?php echo $active_mode === 'cloud' ? 'true' : 'false'; ?>"><?php esc_html_e('Cloud Migration', '1-click-migration'); ?></button>
+                    <button type="button" class="ocm-mode-btn<?php echo $active_mode === 'local' ? ' active' : ''; ?>" data-ocm-mode="local" role="tab" aria-selected="<?php echo $active_mode === 'local' ? 'true' : 'false'; ?>"><?php esc_html_e('Local Backups', '1-click-migration'); ?></button>
+                </div>
+
+                <div id="ocm-mode-cloud" class="ocm-mode-panel<?php echo $active_mode === 'cloud' ? ' active' : ''; ?>"<?php echo $active_mode === 'cloud' ? '' : ' hidden'; ?>>
                 <?php // The restore-code banner after "Backup completed." stays after a reload. ?>
                 <div class="ocm-banner ocm-banner-warning" id="ocm-top-banner"<?php echo empty($progress['topBanner']) ? ' style="display:none;"' : ''; ?>><?php if (!empty($progress['topBanner'])) { echo wp_kses_post($progress['topBanner']); } ?></div>
 
@@ -460,6 +516,9 @@ class OCM_Admin_Page
                 <div class="ocm-footnote">
                     <span><?php esc_html_e('AES-256 encrypted before upload · Backups expire 48 hours after creation', '1-click-migration'); ?></span>
                 </div>
+                </div><!-- /#ocm-mode-cloud -->
+
+                <?php self::render_local_backups_panel($active_mode); ?>
             </main>
 
             <!-- Hidden values consumed by admin-script.js -->
@@ -467,6 +526,472 @@ class OCM_Admin_Page
             <a href="<?php echo esc_url(admin_url('admin-post.php?action=start_backup')); ?>" id="ocm-backup-href" hidden></a>
             <a href="<?php echo esc_url(admin_url('admin-post.php?action=start_restore')); ?>" id="ocm-restore-href" hidden></a>
         </div>
+        <?php
+    }
+
+    /**
+     * Render the Local Backups, Scheduler & Storage Management panel.
+     *
+     * @param string $active_mode 'cloud'|'local'
+     * @return void
+     */
+    private static function render_local_backups_panel($active_mode)
+    {
+        $has_local = class_exists(__NAMESPACE__ . '\\OCM_Local_Storage')
+            && class_exists(__NAMESPACE__ . '\\OCM_Local_Scheduler')
+            && class_exists(__NAMESPACE__ . '\\OCM_Local_Backup');
+
+        $storage = $has_local ? OCM_Local_Storage::storage_summary() : array(
+            'count' => 0,
+            'total_bytes' => 0,
+            'total_readable' => '0 B',
+            'free_bytes' => 0,
+            'free_readable' => 'Unknown',
+            'keep_last' => 5,
+            'min_free_space_mb' => 500,
+            'base_dir' => '',
+            'low_space' => false,
+        );
+        $schedule = $has_local ? OCM_Local_Scheduler::get_schedule() : array(
+            'enabled' => false,
+            'frequency' => 'daily',
+            'time' => '02:00',
+            'day_of_week' => 0,
+            'day_of_month' => 1,
+            'parts' => array('db', 'themes', 'plugins', 'uploads'),
+        );
+        $status = $has_local ? OCM_Local_Scheduler::get_status() : array(
+            'last_run_at' => 0,
+            'last_outcome' => '',
+            'last_message' => '',
+            'last_backup_id' => '',
+        );
+        $backups = $has_local ? OCM_Local_Storage::list_backups() : array();
+        $next_ts = $has_local ? OCM_Local_Scheduler::next_scheduled_timestamp() : 0;
+        $next_formatted = ($has_local && $next_ts > 0) ? OCM_Local_Scheduler::format_timestamp($next_ts) : '';
+        $local_progress = $has_local ? OCM_Local_Backup::get_progress() : array(
+            'text' => __('Idle — ready to run a local backup or restore.', '1-click-migration'),
+            'value' => '0%',
+            'active' => false,
+            'isStopped' => false,
+            'failed' => false,
+            'completed' => false,
+        );
+        $local_log_exists = defined('OCM_LOCAL_LOG_FILE') && is_file(OCM_LOCAL_LOG_FILE);
+        $local_log_size = ($local_log_exists && class_exists(__NAMESPACE__ . '\\OCM_Backup'))
+            ? OCM_Backup::readable_bytes((int) @filesize(OCM_LOCAL_LOG_FILE))
+            : '';
+        $activity = $has_local ? OCM_Local_Backup::get_activity_log() : array();
+        $status_labels = array(
+            'completed' => __('Completed', '1-click-migration'),
+            'failed'    => __('Failed', '1-click-migration'),
+            'skipped'   => __('Skipped', '1-click-migration'),
+            'cancelled' => __('Cancelled', '1-click-migration'),
+        );
+        $local_log_url = wp_nonce_url(admin_url('admin-post.php?action=ocm_download_local_log'), 'ocm_download_local_log');
+        $tz_label = $has_local ? OCM_Local_Scheduler::site_timezone()->getName() : 'UTC';
+        $part_labels = array(
+            'db' => __('Database', '1-click-migration'),
+            'themes' => __('Themes', '1-click-migration'),
+            'plugins' => __('Plugins', '1-click-migration'),
+            'uploads' => __('Uploads', '1-click-migration'),
+        );
+        $weekdays = array(
+            0 => __('Sunday', '1-click-migration'),
+            1 => __('Monday', '1-click-migration'),
+            2 => __('Tuesday', '1-click-migration'),
+            3 => __('Wednesday', '1-click-migration'),
+            4 => __('Thursday', '1-click-migration'),
+            5 => __('Friday', '1-click-migration'),
+            6 => __('Saturday', '1-click-migration'),
+        );
+        $keep_label = ((int) $storage['keep_last']) > 0
+            ? sprintf(__('Keep last %d', '1-click-migration'), (int) $storage['keep_last'])
+            : __('Unlimited', '1-click-migration');
+        $show_local_progress = $local_log_exists && (!empty($local_progress['active']) || !empty($local_progress['completed']) || !empty($local_progress['failed']));
+        ?>
+        <div id="ocm-mode-local" class="ocm-mode-panel<?php echo $active_mode === 'local' ? ' active' : ''; ?>"<?php echo $active_mode === 'local' ? '' : ' hidden'; ?>>
+            <div class="ocm-local-head">
+                <div>
+                    <h1 class="ocm-h1"><?php esc_html_e('Local Backups', '1-click-migration'); ?></h1>
+                    <p class="ocm-lede"><?php esc_html_e('Create, schedule, and restore full or partial local backups directly on this server. No email or cloud upload required.', '1-click-migration'); ?></p>
+                </div>
+                <a class="ocm-btn-link" id="ocm-local-download-log" href="<?php echo esc_url($local_log_url); ?>" target="_blank"<?php echo $local_log_exists ? '' : ' style="display:none;"'; ?>>
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                    <?php esc_html_e('Download local log', '1-click-migration'); ?>
+                </a>
+            </div>
+
+            <!-- Storage summary strip -->
+            <section class="ocm-card ocm-card-pad ocm-local-stats" id="ocm-local-stats" aria-label="<?php esc_attr_e('Local storage summary', '1-click-migration'); ?>">
+                <div class="ocm-local-stat">
+                    <span class="ocm-local-stat-label"><?php esc_html_e('Stored Backups', '1-click-migration'); ?></span>
+                    <strong class="ocm-local-stat-val" id="ocm-local-stat-count"><?php echo (int) $storage['count']; ?></strong>
+                    <small class="ocm-local-stat-sub" id="ocm-local-stat-retention"><?php echo esc_html($keep_label); ?></small>
+                </div>
+                <div class="ocm-local-stat">
+                    <span class="ocm-local-stat-label"><?php esc_html_e('Storage Used', '1-click-migration'); ?></span>
+                    <strong class="ocm-local-stat-val" id="ocm-local-stat-used"><?php echo esc_html($storage['total_readable']); ?></strong>
+                    <small class="ocm-local-stat-sub"><?php esc_html_e('Plain ZIP archives', '1-click-migration'); ?></small>
+                </div>
+                <div class="ocm-local-stat">
+                    <span class="ocm-local-stat-label"><?php esc_html_e('Host Free Space', '1-click-migration'); ?></span>
+                    <strong class="ocm-local-stat-val" id="ocm-local-stat-free"><?php echo esc_html($storage['free_readable']); ?></strong>
+                    <small class="ocm-local-stat-sub">
+                        <span id="ocm-local-stat-guard"><?php echo (int) $storage['min_free_space_mb'] > 0 ? esc_html(sprintf(__('Min guard: %d MB', '1-click-migration'), (int) $storage['min_free_space_mb'])) : esc_html__('Space guard off', '1-click-migration'); ?></span>
+                        <span class="ocm-local-low-badge" id="ocm-local-stat-low"<?php echo !empty($storage['low_space']) ? '' : ' hidden'; ?>><?php esc_html_e('Low space', '1-click-migration'); ?></span>
+                    </small>
+                </div>
+                <div class="ocm-local-stat ocm-local-stat-path">
+                    <span class="ocm-local-stat-label"><?php esc_html_e('Private Folder', '1-click-migration'); ?></span>
+                    <code class="ocm-local-path-code" id="ocm-local-stat-path"><?php echo esc_html($storage['base_dir']); ?></code>
+                </div>
+            </section>
+
+            <div class="ocm-grid">
+                <!-- Create Local Backup -->
+                <section class="ocm-card ocm-card-pad" aria-label="<?php esc_attr_e('Create Local Backup', '1-click-migration'); ?>">
+                    <div class="ocm-h-stack ocm-card-headstrip">
+                        <span class="ocm-card-title"><?php esc_html_e('Create Local Backup', '1-click-migration'); ?></span>
+                        <span class="ocm-mini-hint"><?php esc_html_e('On-demand', '1-click-migration'); ?></span>
+                    </div>
+
+                    <div class="ocm-field" style="margin-bottom:12px;">
+                        <label class="ocm-label" for="ocm-local-label"><?php esc_html_e('Label', '1-click-migration'); ?> <span class="ocm-hint">&mdash; <?php esc_html_e('optional note', '1-click-migration'); ?></span></label>
+                        <input id="ocm-local-label" class="ocm-input ocm-local-input-plain" type="text" maxlength="80" placeholder="<?php esc_attr_e('e.g. Before plugin update', '1-click-migration'); ?>"/>
+                    </div>
+
+                    <div class="ocm-label" style="margin-bottom:6px;"><?php esc_html_e('Include components', '1-click-migration'); ?></div>
+                    <div class="ocm-adv-grid open ocm-local-parts-grid">
+                        <label class="ocm-check"><input type="checkbox" data-ocm-local-part="db" checked><span><?php esc_html_e('Database', '1-click-migration'); ?><small><?php esc_html_e('All DB tables', '1-click-migration'); ?></small></span></label>
+                        <label class="ocm-check"><input type="checkbox" data-ocm-local-part="themes" checked><span><?php esc_html_e('Themes', '1-click-migration'); ?><small><?php esc_html_e('Theme files', '1-click-migration'); ?></small></span></label>
+                        <label class="ocm-check"><input type="checkbox" data-ocm-local-part="plugins" checked><span><?php esc_html_e('Plugins', '1-click-migration'); ?><small><?php esc_html_e('Plugin files', '1-click-migration'); ?></small></span></label>
+                        <label class="ocm-check"><input type="checkbox" data-ocm-local-part="uploads" checked><span><?php esc_html_e('Uploads', '1-click-migration'); ?><small><?php esc_html_e('Media library', '1-click-migration'); ?></small></span></label>
+                    </div>
+                    <p class="ocm-exclusion-warning" id="ocm-local-part-warning" style="display:none;"><?php esc_html_e('Please select at least one component.', '1-click-migration'); ?></p>
+
+                    <div class="ocm-local-form-actions">
+                        <button type="button" class="ocm-btn ocm-btn-primary ocm-submit" id="ocm-local-btn-backup">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>
+                            <?php esc_html_e('Create Local Backup', '1-click-migration'); ?>
+                        </button>
+                    </div>
+                </section>
+
+                <!-- Schedule & Storage Management -->
+                <section class="ocm-card ocm-card-pad" aria-label="<?php esc_attr_e('Schedule & Storage', '1-click-migration'); ?>">
+                    <div class="ocm-h-stack ocm-card-headstrip">
+                        <span class="ocm-card-title"><?php esc_html_e('Schedule & Storage', '1-click-migration'); ?></span>
+                        <span class="ocm-mini-hint"><?php echo esc_html($tz_label); ?></span>
+                    </div>
+
+                    <label class="ocm-local-toggle">
+                        <input type="checkbox" id="ocm-local-sched-enabled"<?php echo !empty($schedule['enabled']) ? ' checked' : ''; ?>>
+                        <span><?php esc_html_e('Enable automated scheduled local backups', '1-click-migration'); ?></span>
+                    </label>
+
+                    <div class="ocm-local-form-grid">
+                        <div class="ocm-field">
+                            <label class="ocm-label" for="ocm-local-sched-freq"><?php esc_html_e('Frequency', '1-click-migration'); ?></label>
+                            <select id="ocm-local-sched-freq" class="ocm-local-select">
+                                <option value="hourly"<?php echo $schedule['frequency'] === 'hourly' ? ' selected' : ''; ?>><?php esc_html_e('Hourly', '1-click-migration'); ?></option>
+                                <option value="daily"<?php echo $schedule['frequency'] === 'daily' ? ' selected' : ''; ?>><?php esc_html_e('Daily', '1-click-migration'); ?></option>
+                                <option value="weekly"<?php echo $schedule['frequency'] === 'weekly' ? ' selected' : ''; ?>><?php esc_html_e('Weekly', '1-click-migration'); ?></option>
+                                <option value="monthly"<?php echo $schedule['frequency'] === 'monthly' ? ' selected' : ''; ?>><?php esc_html_e('Monthly', '1-click-migration'); ?></option>
+                            </select>
+                        </div>
+
+                        <div class="ocm-field" id="ocm-local-sched-dow-wrap"<?php echo $schedule['frequency'] === 'weekly' ? '' : ' style="display:none;"'; ?>>
+                            <label class="ocm-label" for="ocm-local-sched-dow"><?php esc_html_e('Day of week', '1-click-migration'); ?></label>
+                            <select id="ocm-local-sched-dow" class="ocm-local-select">
+                                <?php foreach ($weekdays as $num => $name): ?>
+                                    <option value="<?php echo (int) $num; ?>"<?php echo (int) $schedule['day_of_week'] === (int) $num ? ' selected' : ''; ?>><?php echo esc_html($name); ?></option>
+                                <?php endforeach; ?>
+                            </select>
+                        </div>
+
+                        <div class="ocm-field" id="ocm-local-sched-dom-wrap"<?php echo $schedule['frequency'] === 'monthly' ? '' : ' style="display:none;"'; ?>>
+                            <label class="ocm-label" for="ocm-local-sched-dom"><?php esc_html_e('Day of month', '1-click-migration'); ?></label>
+                            <select id="ocm-local-sched-dom" class="ocm-local-select">
+                                <?php for ($d = 1; $d <= 28; $d++): ?>
+                                    <option value="<?php echo (int) $d; ?>"<?php echo (int) $schedule['day_of_month'] === $d ? ' selected' : ''; ?>><?php echo (int) $d; ?></option>
+                                <?php endfor; ?>
+                            </select>
+                        </div>
+
+                        <div class="ocm-field" id="ocm-local-sched-time-wrap">
+                            <label class="ocm-label" for="ocm-local-sched-time"><?php esc_html_e('Time', '1-click-migration'); ?> <span class="ocm-hint" id="ocm-local-sched-time-hint"<?php echo $schedule['frequency'] === 'hourly' ? '' : ' style="display:none;"'; ?>>&mdash; <?php esc_html_e('minute past each hour', '1-click-migration'); ?></span></label>
+                            <input id="ocm-local-sched-time" class="ocm-input ocm-local-input-plain" type="time" value="<?php echo esc_attr($schedule['time']); ?>"/>
+                        </div>
+                    </div>
+
+                    <div class="ocm-label" style="margin:10px 0 6px;"><?php esc_html_e('Scheduled backup parts', '1-click-migration'); ?></div>
+                    <div class="ocm-local-inline-parts">
+                        <?php foreach ($part_labels as $pkey => $plabel): ?>
+                            <label class="ocm-check"><input type="checkbox" data-ocm-local-sched-part="<?php echo esc_attr($pkey); ?>"<?php echo in_array($pkey, $schedule['parts'], true) ? ' checked' : ''; ?>><span><?php echo esc_html($plabel); ?></span></label>
+                        <?php endforeach; ?>
+                    </div>
+
+                    <div class="ocm-local-form-grid" style="margin-top:10px;">
+                        <div class="ocm-field">
+                            <label class="ocm-label" for="ocm-local-keep-last"><?php esc_html_e('Keep last N backups', '1-click-migration'); ?></label>
+                            <input id="ocm-local-keep-last" class="ocm-input ocm-local-input-plain" type="number" min="0" max="500" value="<?php echo (int) $storage['keep_last']; ?>"/>
+                            <div class="ocm-field-help"><?php esc_html_e('0 = unlimited (oldest auto-pruned after completion)', '1-click-migration'); ?></div>
+                        </div>
+                        <div class="ocm-field">
+                            <label class="ocm-label" for="ocm-local-min-free"><?php esc_html_e('Minimum free space guard (MB)', '1-click-migration'); ?></label>
+                            <input id="ocm-local-min-free" class="ocm-input ocm-local-input-plain" type="number" min="0" max="1048576" value="<?php echo (int) $storage['min_free_space_mb']; ?>"/>
+                            <div class="ocm-field-help"><?php esc_html_e('0 = disabled (blocks backup if disk falls below floor)', '1-click-migration'); ?></div>
+                        </div>
+                    </div>
+
+                    <div class="ocm-local-sched-meta" id="ocm-local-sched-meta">
+                        <span id="ocm-local-next-run">
+                            <?php echo !empty($schedule['enabled']) && $next_formatted !== ''
+                                ? esc_html__('Next run:', '1-click-migration') . ' ' . esc_html($next_formatted)
+                                : esc_html__('Schedule is disabled.', '1-click-migration'); ?>
+                        </span>
+                        <?php if (!empty($status['last_run_at'])): ?>
+                            <span id="ocm-local-last-run">
+                                &middot; <?php echo esc_html(sprintf(__('Last run (%1$s): %2$s', '1-click-migration'), $status['last_outcome'], $has_local ? OCM_Local_Scheduler::format_timestamp($status['last_run_at']) : '')); ?>
+                            </span>
+                        <?php endif; ?>
+                    </div>
+
+                    <div class="ocm-local-form-actions ocm-local-settings-actions">
+                        <button type="button" class="ocm-btn ocm-btn-dark" id="ocm-local-save-settings"><?php esc_html_e('Save settings', '1-click-migration'); ?></button>
+                        <span class="ocm-local-settings-msg" id="ocm-local-settings-msg" role="status"></span>
+                    </div>
+                </section>
+            </div>
+
+            <!-- Local progress strip -->
+            <section class="ocm-card ocm-progress-card" id="ocm-local-progress-card" aria-label="<?php esc_attr_e('Local Progress', '1-click-migration'); ?>">
+                <div class="ocm-pg-label">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><polyline points="12 7 12 12 15 14"/></svg>
+                    <span><?php esc_html_e('Local Progress', '1-click-migration'); ?></span>
+                    <span class="ocm-pg-pct" id="ocm-local-pg-pct"><?php echo esc_html($local_progress['value']); ?></span>
+                </div>
+                <div>
+                    <div class="ocm-pg-bar"><div class="ocm-pg-fill<?php echo !empty($local_progress['active']) ? ' running' : (!empty($local_progress['completed']) ? ' ocm-pg-done' : (!empty($local_progress['failed']) ? ' ocm-pg-failed' : '')); ?>" id="ocm-local-pg-fill" style="width:<?php echo esc_attr($local_progress['value']); ?>"></div></div>
+                    <div class="ocm-pg-status" id="ocm-local-pg-status">
+                        <?php echo $show_local_progress ? esc_html($local_progress['text']) : esc_html__('Idle — ready to run a local backup or restore.', '1-click-migration'); ?>
+                    </div>
+                    <div class="ocm-pg-extras">
+                        <span class="ocm-info error<?php echo !empty($local_progress['failed']) ? ' show' : ''; ?>" id="ocm-local-pg-error"><?php if (!empty($local_progress['failed'])) { echo esc_html($local_progress['text']); } ?></span>
+                    </div>
+                </div>
+                <div class="ocm-pg-actions">
+                    <button type="button" class="ocm-btn ocm-btn-ghost" id="ocm-local-btn-stop">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 3-6.7"/><polyline points="3 4 3 10 9 10"/></svg>
+                        <?php esc_html_e('Stop & Reset', '1-click-migration'); ?>
+                    </button>
+                </div>
+            </section>
+
+            <!-- Saved local backups -->
+            <section class="ocm-card ocm-card-pad ocm-local-backups-card" id="ocm-local-backups-card" aria-label="<?php esc_attr_e('Saved Local Backups', '1-click-migration'); ?>">
+                <div class="ocm-h-stack ocm-card-headstrip">
+                    <span class="ocm-card-title"><?php esc_html_e('Saved Local Backups', '1-click-migration'); ?></span>
+                    <span class="ocm-mini-hint"><?php esc_html_e('Restore full backup or choose specific parts', '1-click-migration'); ?></span>
+                </div>
+                <div id="ocm-local-backups-list">
+                    <?php if (empty($backups)): ?>
+                        <p class="ocm-local-empty"><?php esc_html_e('No local backups saved yet. Create one above or enable the schedule.', '1-click-migration'); ?></p>
+                    <?php else: ?>
+                        <div class="ocm-local-table-wrap">
+                            <table class="ocm-local-table">
+                                <thead>
+                                    <tr>
+                                        <th><?php esc_html_e('Date & Time', '1-click-migration'); ?></th>
+                                        <th><?php esc_html_e('Type / Label', '1-click-migration'); ?></th>
+                                        <th><?php esc_html_e('Included Parts', '1-click-migration'); ?></th>
+                                        <th><?php esc_html_e('Size', '1-click-migration'); ?></th>
+                                        <th><?php esc_html_e('Actions', '1-click-migration'); ?></th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <?php foreach ($backups as $b):
+                                        $b_parts = isset($b['parts']) && is_array($b['parts']) ? array_keys($b['parts']) : array();
+                                        $b_json = function_exists('wp_json_encode') ? wp_json_encode($b_parts) : json_encode($b_parts);
+                                        $b_date = !empty($b['created_gmt']) && $has_local ? OCM_Local_Scheduler::format_timestamp($b['created_gmt']) : (isset($b['created_at']) ? $b['created_at'] : $b['id']);
+                                        ?>
+                                        <tr data-backup-id="<?php echo esc_attr($b['id']); ?>">
+                                            <td>
+                                                <strong><?php echo esc_html($b_date); ?></strong>
+                                                <div class="ocm-local-id-sub"><code><?php echo esc_html($b['id']); ?></code></div>
+                                            </td>
+                                            <td>
+                                                <span class="ocm-trigger-badge ocm-trigger-<?php echo esc_attr($b['trigger']); ?>"><?php echo $b['trigger'] === 'scheduled' ? esc_html__('Scheduled', '1-click-migration') : esc_html__('Manual', '1-click-migration'); ?></span>
+                                                <?php if (!empty($b['label'])): ?>
+                                                    <span class="ocm-local-row-label"><?php echo esc_html($b['label']); ?></span>
+                                                <?php endif; ?>
+                                            </td>
+                                            <td>
+                                                <div class="ocm-part-pills">
+                                                    <?php foreach ($b_parts as $bp): ?>
+                                                        <span class="ocm-part-pill"><?php echo esc_html(isset($part_labels[$bp]) ? $part_labels[$bp] : strtoupper($bp)); ?></span>
+                                                    <?php endforeach; ?>
+                                                </div>
+                                            </td>
+                                            <td><?php echo esc_html($b['total_readable']); ?></td>
+                                            <td class="ocm-local-row-actions">
+                                                <button type="button" class="ocm-btn ocm-btn-primary ocm-btn-sm ocm-local-restore-open"
+                                                    data-backup-id="<?php echo esc_attr($b['id']); ?>"
+                                                    data-backup-date="<?php echo esc_attr($b_date); ?>"
+                                                    data-backup-label="<?php echo esc_attr($b['label']); ?>"
+                                                    data-backup-size="<?php echo esc_attr($b['total_readable']); ?>"
+                                                    data-backup-parts="<?php echo esc_attr((string) $b_json); ?>"><?php esc_html_e('Restore', '1-click-migration'); ?></button>
+                                                <?php if (!empty($b['has_log'])): ?>
+                                                    <button type="button" class="ocm-btn ocm-btn-ghost ocm-btn-sm ocm-local-view-backup-log"
+                                                        data-backup-id="<?php echo esc_attr($b['id']); ?>"><?php esc_html_e('Log', '1-click-migration'); ?></button>
+                                                <?php endif; ?>
+                                                <button type="button" class="ocm-btn ocm-btn-ghost ocm-btn-sm ocm-local-delete-btn"
+                                                    data-backup-id="<?php echo esc_attr($b['id']); ?>"><?php esc_html_e('Delete', '1-click-migration'); ?></button>
+                                            </td>
+                                        </tr>
+                                    <?php endforeach; ?>
+                                </tbody>
+                            </table>
+                        </div>
+                    <?php endif; ?>
+                </div>
+            </section>
+
+            <!-- Activity History (backups + restores) -->
+            <section class="ocm-card ocm-card-pad ocm-local-activity-card" id="ocm-local-activity-card" aria-label="<?php esc_attr_e('Activity History', '1-click-migration'); ?>">
+                <div class="ocm-h-stack ocm-card-headstrip">
+                    <span class="ocm-card-title"><?php esc_html_e('Activity History', '1-click-migration'); ?></span>
+                    <button type="button" class="ocm-btn ocm-btn-ghost ocm-btn-sm" id="ocm-local-clear-activity"<?php echo empty($activity) ? ' hidden' : ''; ?>><?php esc_html_e('Clear history', '1-click-migration'); ?></button>
+                </div>
+                <div id="ocm-local-activity-list">
+                    <?php if (empty($activity)): ?>
+                        <p class="ocm-local-empty"><?php esc_html_e('No local backup or restore activity recorded yet.', '1-click-migration'); ?></p>
+                    <?php else: ?>
+                        <div class="ocm-local-table-wrap">
+                            <table class="ocm-local-table ocm-local-activity-table">
+                                <thead>
+                                    <tr>
+                                        <th><?php esc_html_e('Date & Time', '1-click-migration'); ?></th>
+                                        <th><?php esc_html_e('Operation', '1-click-migration'); ?></th>
+                                        <th><?php esc_html_e('Parts', '1-click-migration'); ?></th>
+                                        <th><?php esc_html_e('Status', '1-click-migration'); ?></th>
+                                        <th><?php esc_html_e('Details', '1-click-migration'); ?></th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <?php foreach ($activity as $act):
+                                        $act_type = isset($act['type']) && $act['type'] === 'restore' ? 'restore' : 'backup';
+                                        $act_trigger = isset($act['trigger']) && $act['trigger'] === 'scheduled' ? 'scheduled' : 'manual';
+                                        $act_status = isset($act['status']) ? (string) $act['status'] : 'completed';
+                                        $act_status_label = isset($status_labels[$act_status]) ? $status_labels[$act_status] : ucfirst($act_status);
+                                        $act_parts = isset($act['parts']) && is_array($act['parts']) ? $act['parts'] : array();
+                                        $act_meta_bits = array();
+                                        if (!empty($act['size_readable'])) {
+                                            $act_meta_bits[] = $act['size_readable'];
+                                        }
+                                        if (!empty($act['duration_readable'])) {
+                                            $act_meta_bits[] = $act['duration_readable'];
+                                        }
+                                        if (!empty($act['backup_id'])) {
+                                            $act_meta_bits[] = $act['backup_id'];
+                                        }
+                                        ?>
+                                        <tr>
+                                            <td>
+                                                <strong><?php echo esc_html(isset($act['time_formatted']) ? $act['time_formatted'] : ''); ?></strong>
+                                                <?php if (!empty($act['duration_readable']) || !empty($act['size_readable'])): ?>
+                                                    <div class="ocm-local-id-sub"><?php echo esc_html(implode(' · ', array_filter(array(isset($act['size_readable']) ? $act['size_readable'] : '', isset($act['duration_readable']) ? $act['duration_readable'] : '')))); ?></div>
+                                                <?php endif; ?>
+                                            </td>
+                                            <td>
+                                                <span class="ocm-op-badge ocm-op-<?php echo esc_attr($act_type); ?>"><?php echo $act_type === 'restore' ? esc_html__('Restore', '1-click-migration') : esc_html__('Backup', '1-click-migration'); ?></span>
+                                                <?php if ($act_type === 'backup'): ?>
+                                                    <span class="ocm-trigger-badge ocm-trigger-<?php echo esc_attr($act_trigger); ?>"><?php echo $act_trigger === 'scheduled' ? esc_html__('Scheduled', '1-click-migration') : esc_html__('Manual', '1-click-migration'); ?></span>
+                                                <?php endif; ?>
+                                                <?php if (!empty($act['label'])): ?>
+                                                    <span class="ocm-local-row-label"><?php echo esc_html($act['label']); ?></span>
+                                                <?php endif; ?>
+                                            </td>
+                                            <td>
+                                                <div class="ocm-part-pills">
+                                                    <?php foreach ($act_parts as $ap): ?>
+                                                        <span class="ocm-part-pill"><?php echo esc_html(isset($part_labels[$ap]) ? $part_labels[$ap] : strtoupper($ap)); ?></span>
+                                                    <?php endforeach; ?>
+                                                </div>
+                                            </td>
+                                            <td><span class="ocm-status-badge ocm-status-<?php echo esc_attr($act_status); ?>"><?php echo esc_html($act_status_label); ?></span></td>
+                                            <td class="ocm-activity-details">
+                                                <?php if (!empty($act['message'])): ?>
+                                                    <div><?php echo esc_html($act['message']); ?></div>
+                                                <?php endif; ?>
+                                                <?php if (!empty($act['backup_id'])): ?>
+                                                    <div class="ocm-local-id-sub"><code><?php echo esc_html($act['backup_id']); ?></code></div>
+                                                <?php endif; ?>
+                                            </td>
+                                        </tr>
+                                    <?php endforeach; ?>
+                                </tbody>
+                            </table>
+                        </div>
+                    <?php endif; ?>
+                </div>
+            </section>
+
+            <!-- Collapsible In-Page Local Log Viewer -->
+            <section class="ocm-card ocm-card-pad ocm-local-log-card" id="ocm-local-log-card" aria-label="<?php esc_attr_e('Local Backup & Restore Log', '1-click-migration'); ?>">
+                <button type="button" class="ocm-local-log-toggle" id="ocm-local-log-toggle" aria-expanded="false" aria-controls="ocm-local-log-body">
+                    <span class="ocm-h-stack">
+                        <span class="ocm-card-title"><?php esc_html_e('Local Backup & Restore Log', '1-click-migration'); ?></span>
+                        <span class="ocm-mini-hint" id="ocm-local-log-meta"><?php echo $local_log_exists && $local_log_size !== '' ? esc_html($local_log_size) : esc_html__('Idle', '1-click-migration'); ?></span>
+                    </span>
+                    <svg class="ocm-chev" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+                </button>
+                <div class="ocm-local-log-body" id="ocm-local-log-body" hidden>
+                    <div class="ocm-local-log-toolbar">
+                        <div class="ocm-local-log-actions">
+                            <button type="button" class="ocm-btn ocm-btn-ghost ocm-btn-sm" id="ocm-local-log-refresh"><?php esc_html_e('Refresh', '1-click-migration'); ?></button>
+                            <button type="button" class="ocm-btn ocm-btn-ghost ocm-btn-sm" id="ocm-local-log-copy"><?php esc_html_e('Copy', '1-click-migration'); ?></button>
+                            <button type="button" class="ocm-btn ocm-btn-ghost ocm-btn-sm" id="ocm-local-log-clear"><?php esc_html_e('Clear log', '1-click-migration'); ?></button>
+                            <a class="ocm-btn ocm-btn-ghost ocm-btn-sm" id="ocm-local-log-download-btn" href="<?php echo esc_url($local_log_url); ?>" target="_blank"<?php echo $local_log_exists ? '' : ' hidden'; ?>><?php esc_html_e('Download full log', '1-click-migration'); ?></a>
+                        </div>
+                        <span class="ocm-mini-hint" id="ocm-local-log-note"></span>
+                    </div>
+                    <pre class="ocm-local-log-pre" id="ocm-local-log-content"><?php esc_html_e('No local log entries yet.', '1-click-migration'); ?></pre>
+                </div>
+            </section>
+
+            <!-- Local Restore Modal -->
+            <div id="ocm-local-restore-modal" class="ocm-modal" role="dialog" aria-modal="true" aria-labelledby="ocm-local-restore-title" hidden>
+                <div class="ocm-modal-backdrop" data-ocm-local-modal-close></div>
+                <div class="ocm-modal-card ocm-local-modal-card">
+                    <button type="button" class="ocm-modal-close" data-ocm-local-modal-close aria-label="<?php esc_attr_e('Close', '1-click-migration'); ?>">&times;</button>
+                    <h2 id="ocm-local-restore-title" class="ocm-modal-title"><?php esc_html_e('Restore Local Backup', '1-click-migration'); ?></h2>
+                    <p class="ocm-modal-body" id="ocm-local-restore-summary"></p>
+                    <p class="ocm-modal-body"><?php esc_html_e('Select which components from this backup to restore. The database restores safely through temporary staging tables.', '1-click-migration'); ?></p>
+                    <div class="ocm-local-restore-parts" id="ocm-local-restore-parts"></div>
+                    <p class="ocm-exclusion-warning" id="ocm-local-restore-warning" style="display:none;"><?php esc_html_e('Please select at least one component.', '1-click-migration'); ?></p>
+                    <div class="ocm-modal-actions">
+                        <button type="button" class="ocm-btn ocm-btn-primary" id="ocm-local-restore-confirm"><?php esc_html_e('Start restore', '1-click-migration'); ?></button>
+                        <button type="button" class="ocm-btn ocm-btn-ghost" data-ocm-local-modal-close><?php esc_html_e('Cancel', '1-click-migration'); ?></button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Per-Backup Log Modal -->
+            <div id="ocm-local-log-modal" class="ocm-modal" role="dialog" aria-modal="true" aria-labelledby="ocm-local-log-modal-title" hidden>
+                <div class="ocm-modal-backdrop" data-ocm-local-log-modal-close></div>
+                <div class="ocm-modal-card ocm-local-modal-card ocm-local-log-modal-card">
+                    <button type="button" class="ocm-modal-close" data-ocm-local-log-modal-close aria-label="<?php esc_attr_e('Close', '1-click-migration'); ?>">&times;</button>
+                    <h2 id="ocm-local-log-modal-title" class="ocm-modal-title"><?php esc_html_e('Backup Log', '1-click-migration'); ?></h2>
+                    <pre class="ocm-local-log-pre ocm-local-log-pre-modal" id="ocm-local-log-modal-content"></pre>
+                    <div class="ocm-modal-actions">
+                        <button type="button" class="ocm-btn ocm-btn-primary" id="ocm-local-log-modal-copy"><?php esc_html_e('Copy', '1-click-migration'); ?></button>
+                        <button type="button" class="ocm-btn ocm-btn-ghost" data-ocm-local-log-modal-close><?php esc_html_e('Close', '1-click-migration'); ?></button>
+                    </div>
+                </div>
+            </div>
+        </div><!-- /#ocm-mode-local -->
         <?php
     }
 

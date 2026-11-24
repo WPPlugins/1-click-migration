@@ -3,8 +3,8 @@
 /**
  * Plugin Name: 1 Click Migration
  * Plugin URI: https://wordpress.org/plugins/1-click-migration/
- * Description: Migrate, copy, or clone your entire site with 1 click. <strong>Any host, no size limitation.</strong> $9.99 per migration, success guaranteed or a refund.
- * Version: 3.3.12
+ * Description: FREE local backup & restore (scheduled or manual), plus 1-click cloud migration with no size cap. Cloud migrations: $9.99, success guaranteed or a refund.
+ * Version: 4.0.0
  * Requires at least: 5.3
  * Requires PHP: 7.4
  * Author: 1ClickMigration
@@ -37,6 +37,8 @@ define('OCM_DEBUG_LOG_FILENAME', 'ocm_debug.log');
 // the folder above the WordPress root can't be written.
 define('OCM_DEBUG_LOG_DIR', OCM_Private_Dir::resolve(ABSPATH, defined('WP_CONTENT_DIR') ? WP_CONTENT_DIR : '', OCM_Private_Dir::site_secret()));
 define('OCM_DEBUG_LOG_FILE', OCM_DEBUG_LOG_DIR . '/' . OCM_DEBUG_LOG_FILENAME);
+define('OCM_LOCAL_LOG_FILENAME', 'ocm_local_backup.log');
+define('OCM_LOCAL_LOG_FILE', OCM_DEBUG_LOG_DIR . '/' . OCM_LOCAL_LOG_FILENAME);
 define('OCM_DEBUG_LOG_FILE_URL', '');
 define('OCM_WP_CONFIG_FILE', ABSPATH . 'wp-config.php');
 define('OCM_API_ENDPOINT', 'https://1clickmigration.com/api/');
@@ -53,6 +55,9 @@ require_once __DIR__ . '/inc/db/class-ocm-url-manifest.php';
 require_once __DIR__ . '/inc/backup/class-ocm-restore-precheck.php';
 require_once __DIR__ . '/inc/handler/class-error-handler.php';
 require_once __DIR__ . '/inc/handler/class-ocm-debug-mode.php';
+require_once __DIR__ . '/inc/local/class-ocm-local-storage.php';
+require_once __DIR__ . '/inc/local/class-ocm-local-scheduler.php';
+require_once __DIR__ . '/inc/local/class-ocm-local-backup.php';
 
 // If the function it's not available, require it.
 if ( ! function_exists( 'download_url' ) ) {
@@ -93,6 +98,15 @@ class One_Click_Migration
 
     /**@var OCM_BackgroundRestore */
     public static $process_restore_single;
+
+    /** @var OCM_BackgroundLocalBackup */
+    public static $process_local_backup;
+
+    /** @var OCM_BackgroundLocalRestore */
+    public static $process_local_restore;
+
+    /** @var string Active log channel ('cloud' or 'local'). */
+    private static $active_log_channel = 'cloud';
 
     /** @var int Last transfer_heartbeat() write, for its 10-second throttle. */
     private static $last_transfer_heartbeat = 0;
@@ -164,12 +178,31 @@ class One_Click_Migration
         add_action(OCM_Backup::RESTORE_WATCHDOG_HOOK, array(OCM_Backup::class, 'run_worker_watchdog'));
         add_action('admin_post_cancel_actions', array(OCM_Backup::class, 'cancel_actions'));
         add_action('admin_post_ocm_download_log', array(__CLASS__, 'download_log'));
+        add_action('admin_post_ocm_download_local_log', array(__CLASS__, 'download_local_log'));
+        add_action(OCM_Local_Scheduler::CRON_HOOK, array(OCM_Local_Scheduler::class, 'handle_cron_event'));
+        add_action(OCM_Local_Backup::WATCHDOG_HOOK, array(OCM_Local_Backup::class, 'run_worker_watchdog'));
+        add_action('wp_ajax_ocm_local_start_backup', array(OCM_Local_Backup::class, 'ajax_start_backup'));
+        add_action('wp_ajax_ocm_local_start_restore', array(OCM_Local_Backup::class, 'ajax_start_restore'));
+        add_action('wp_ajax_ocm_local_delete_backup', array(OCM_Local_Backup::class, 'ajax_delete_backup'));
+        add_action('wp_ajax_ocm_local_save_settings', array(OCM_Local_Backup::class, 'ajax_save_settings'));
+        add_action('wp_ajax_ocm_local_list_backups', array(OCM_Local_Backup::class, 'ajax_list_backups'));
+        add_action('wp_ajax_ocm_local_get_log', array(OCM_Local_Backup::class, 'ajax_get_log'));
+        add_action('wp_ajax_ocm_local_clear_log', array(OCM_Local_Backup::class, 'ajax_clear_log'));
+        add_action('wp_ajax_ocm_local_clear_activity', array(OCM_Local_Backup::class, 'ajax_clear_activity'));
+        add_action('wp_ajax_ocm_local_cancel', array(OCM_Local_Backup::class, 'ajax_cancel'));
         add_action('plugins_loaded', array(__CLASS__, 'init_background_jobs'));
         add_action('plugins_loaded', array(__CLASS__, 'init_handler'));
         add_action('rest_api_init', static function () {
             register_rest_route('ocm/v1', '/progress/', array(
                 'methods' => 'GET',
                 'callback' => array(One_Click_Migration::class, 'progress_endpoint'),
+                'permission_callback' => function() {
+                    return is_user_logged_in() && current_user_can('manage_options');
+                },
+            ));
+            register_rest_route('ocm/v1', '/local/progress/', array(
+                'methods' => 'GET',
+                'callback' => array(OCM_Local_Backup::class, 'get_progress'),
                 'permission_callback' => function() {
                     return is_user_logged_in() && current_user_can('manage_options');
                 },
@@ -210,10 +243,14 @@ class One_Click_Migration
     {
         require_once __DIR__ . '/inc/background/class-background-backup.php';
         require_once __DIR__ . '/inc/background/class-background-restore.php';
+        require_once __DIR__ . '/inc/background/class-background-local-backup.php';
+        require_once __DIR__ . '/inc/background/class-background-local-restore.php';
         require_once __DIR__ . '/inc/background/class-background-helper.php';
 
         self::$process_backup_single = new OCM_BackgroundBackup();
         self::$process_restore_single = new OCM_BackgroundRestore();
+        self::$process_local_backup = new OCM_BackgroundLocalBackup();
+        self::$process_local_restore = new OCM_BackgroundLocalRestore();
     }
 
     public static function init_handler(){
@@ -300,6 +337,20 @@ class One_Click_Migration
             'supportUrl' => OCM_Backup::SUPPORT_FORUM_URL,
             'extraDomains' => $extra_domains,
             'extraDomainsNonce' => wp_create_nonce('ocm_apply_extra_domains'),
+            'localProgressUrl' => add_query_arg('_locale', 'user', get_rest_url(null, 'ocm/v1/local/progress')),
+            'localDownloadLogUrl' => wp_nonce_url(admin_url('admin-post.php?action=ocm_download_local_log'), 'ocm_download_local_log'),
+            'localActiveAction' => OCM_Local_Backup::active_action(),
+            'localNonces' => array(
+                'startBackup' => wp_create_nonce('ocm_local_start_backup'),
+                'startRestore' => wp_create_nonce('ocm_local_start_restore'),
+                'deleteBackup' => wp_create_nonce('ocm_local_delete_backup'),
+                'saveSettings' => wp_create_nonce('ocm_local_save_settings'),
+                'listBackups' => wp_create_nonce('ocm_local_list_backups'),
+                'getLog' => wp_create_nonce('ocm_local_get_log'),
+                'clearLog' => wp_create_nonce('ocm_local_clear_log'),
+                'clearActivity' => wp_create_nonce('ocm_local_clear_activity'),
+                'cancel' => wp_create_nonce('ocm_local_cancel'),
+            ),
             'i18n' => OCM_Admin_Page::script_strings(),
         ));
     }
@@ -602,6 +653,10 @@ class One_Click_Migration
       delete_option('ocm_backup_excluded_parts');
       delete_option('ocm_backup_parts_known');
 
+      if (class_exists(__NAMESPACE__ . '\\OCM_Local_Backup')) {
+          OCM_Local_Backup::delete_runtime_options();
+      }
+
     }
 
 
@@ -610,6 +665,12 @@ class One_Click_Migration
         // Use stop_and_reset for complete cleanup on deactivation
         self::stop_and_reset();
         self::remove_mu_plugin_isolation_shim();
+        if (class_exists(__NAMESPACE__ . '\\OCM_Local_Scheduler')) {
+            OCM_Local_Scheduler::unschedule();
+        }
+        if (function_exists('wp_clear_scheduled_hook') && class_exists(__NAMESPACE__ . '\\OCM_Local_Backup')) {
+            wp_clear_scheduled_hook(OCM_Local_Backup::WATCHDOG_HOOK);
+        }
     }
     
     /**
@@ -683,8 +744,120 @@ class One_Click_Migration
         return $string;
     }
 
+    public static function set_log_channel($channel)
+    {
+        self::$active_log_channel = ($channel === 'local') ? 'local' : 'cloud';
+    }
+
+    public static function get_log_channel()
+    {
+        return self::$active_log_channel;
+    }
+
+    /**
+     * Run a callback with write_to_log() and worker_heartbeat() routed to the
+     * separate local backup/restore log channel, restoring the prior channel
+     * afterwards.
+     *
+     * @param callable $callback
+     * @return mixed
+     */
+    public static function run_in_local_log($callback)
+    {
+        $previous = self::$active_log_channel;
+        self::$active_log_channel = 'local';
+        try {
+            return call_user_func($callback);
+        } finally {
+            self::$active_log_channel = $previous;
+        }
+    }
+
+    public static function write_to_local_log($string)
+    {
+        $string = self::sanitize_log_message($string);
+        if (!self::ensure_private_log_directory()) {
+            error_log('[1-Click Migration Local] Could not create private log directory.');
+            return;
+        }
+
+        if (defined('WP_DEBUG_LOG') && WP_DEBUG_LOG) {
+            $local_essential_patterns = array(
+                'Local backup started',
+                'Local backup completed',
+                'Local backup failed:',
+                'Local restore started',
+                'Local restore completed',
+                'Local restore stopped',
+                'Local restore failed:',
+                'Database has been restored',
+                'Themes have been restored',
+                'Uploads have been restored',
+                'Plugins have been restored',
+                'Error:',
+            );
+            foreach ($local_essential_patterns as $pattern) {
+                if (strpos($string, $pattern) !== false) {
+                    error_log('[1-Click Migration Local] ' . $string);
+                    break;
+                }
+            }
+        }
+
+        $timestamp = date('m/d/YTH:i:sa');
+        $line = $timestamp . ' - ' . $string;
+        self::append_log_line(OCM_LOCAL_LOG_FILE, $line);
+    }
+
+    /**
+     * Keep ocm_local_backup.log bounded across scheduled/manual runs without
+     * truncating mid-run: call at the start of a new local run.
+     *
+     * @param int $max_bytes
+     * @param int $keep_bytes
+     * @return void
+     */
+    public static function rotate_local_log_if_needed($max_bytes = 2097152, $keep_bytes = 1048576)
+    {
+        $file = OCM_LOCAL_LOG_FILE;
+        clearstatcache(true, $file);
+        if (!is_file($file) || !is_readable($file)) {
+            return;
+        }
+        $size = (int) @filesize($file);
+        if ($size <= (int) $max_bytes) {
+            return;
+        }
+        $keep_bytes = max(4096, min((int) $keep_bytes, $size));
+        $fh = @fopen($file, 'rb');
+        if (!$fh) {
+            return;
+        }
+        if (0 !== @fseek($fh, -$keep_bytes, SEEK_END)) {
+            fclose($fh);
+            return;
+        }
+        $tail = (string) stream_get_contents($fh);
+        fclose($fh);
+        $nl = strpos($tail, "\n");
+        if ($nl !== false) {
+            $tail = substr($tail, $nl + 1);
+        }
+        $tmp = $file . '.rotate.tmp';
+        if (@file_put_contents($tmp, $tail) !== false) {
+            @rename($tmp, $file);
+        } else {
+            @unlink($tmp);
+        }
+    }
+
     public static function write_to_log($string)
     {
+      if (self::$active_log_channel === 'local') {
+          self::write_to_local_log($string);
+          return;
+      }
+
       // sleep(1);
       $string = self::sanitize_log_message($string);
       $file = OCM_DEBUG_LOG_FILE;
@@ -992,6 +1165,26 @@ class One_Click_Migration
         exit;
     }
 
+    public static function download_local_log()
+    {
+        if (!current_user_can('manage_options')) {
+            wp_die(esc_html__('You do not have sufficient permissions to access this log.', '1-click-migration'));
+        }
+        check_admin_referer('ocm_download_local_log');
+        self::ensure_private_log_directory();
+        if (!is_file(OCM_LOCAL_LOG_FILE) || !is_readable(OCM_LOCAL_LOG_FILE)) {
+            wp_die(esc_html__('Local backup log not found.', '1-click-migration'));
+        }
+
+        nocache_headers();
+        header('Content-Type: text/plain; charset=UTF-8');
+        header('Content-Disposition: attachment; filename="' . OCM_LOCAL_LOG_FILENAME . '"');
+        header('X-Content-Type-Options: nosniff');
+        echo '# ' . __('1-Click Migration local backup & restore log.', '1-click-migration') . "\n#\n";
+        readfile(OCM_LOCAL_LOG_FILE);
+        exit;
+    }
+
     public static function set_default_max_execution_time($v)
     {
         self::$default_max_execution_time = (int) $v;
@@ -1221,7 +1414,12 @@ PHP;
      */
     public static function clear_background_cancel_status()
     {
-        foreach (array(self::$process_backup_single, self::$process_restore_single) as $process) {
+        foreach (array(
+            self::$process_backup_single,
+            self::$process_restore_single,
+            self::$process_local_backup,
+            self::$process_local_restore,
+        ) as $process) {
             if (is_object($process) && method_exists($process, 'clear_cancel_status')) {
                 $process->clear_cancel_status();
             }
@@ -1244,6 +1442,12 @@ PHP;
         if (self::$process_restore_single) {
             self::$process_restore_single->unlock_process();
         }
+        if (self::$process_local_backup) {
+            self::$process_local_backup->unlock_process();
+        }
+        if (self::$process_local_restore) {
+            self::$process_local_restore->unlock_process();
+        }
 
         // Clear all queues and batches
         if (self::$process_backup_single) {
@@ -1253,6 +1457,14 @@ PHP;
         if (self::$process_restore_single) {
             self::$process_restore_single->cancel_all_process();
             self::$process_restore_single->cancel_scheduled_event();
+        }
+        if (self::$process_local_backup) {
+            self::$process_local_backup->cancel_all_process();
+            self::$process_local_backup->cancel_scheduled_event();
+        }
+        if (self::$process_local_restore) {
+            self::$process_local_restore->cancel_all_process();
+            self::$process_local_restore->cancel_scheduled_event();
         }
 
         // A backup's system zip can outlive its worker and would keep writing
@@ -1271,8 +1483,16 @@ PHP;
         // Clear specific process status options that might be stuck
         delete_option('wp_ocm_background_backup_status');
         delete_option('wp_ocm_background_restore_status');
+        delete_option('wp_ocm_background_local_backup_status');
+        delete_option('wp_ocm_background_local_restore_status');
         delete_site_transient('wp_ocm_background_backup_process_lock');
         delete_site_transient('wp_ocm_background_restore_process_lock');
+        delete_site_transient('wp_ocm_background_local_backup_process_lock');
+        delete_site_transient('wp_ocm_background_local_restore_process_lock');
+
+        if (class_exists(__NAMESPACE__ . '\\OCM_Local_Storage')) {
+            OCM_Local_Storage::cleanup_stale_staging_dirs();
+        }
 
         // Drop leftover staging tables from an interrupted restore.
         if (class_exists('OCM\\OCM_SQL_Utils')) {
@@ -1416,6 +1636,10 @@ PHP;
      */
     public static function worker_heartbeat()
     {
+        if (self::$active_log_channel === 'local' && class_exists(__NAMESPACE__ . '\\OCM_Local_Backup')) {
+            update_option(OCM_Local_Backup::OPTION_WORKER_HEARTBEAT, time(), false);
+            return;
+        }
         update_option('ocm_worker_heartbeat', time(), false);
     }
 
