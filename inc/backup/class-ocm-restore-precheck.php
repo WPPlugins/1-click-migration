@@ -116,20 +116,20 @@ class OCM_Restore_Precheck {
             if ('' !== $price) {
                 return sprintf(
                     /* translators: %s: price of the migration, e.g. $9.99 */
-                    __('This backup is ready. Restoring it costs %s, one time. Pay here and the restore starts by itself as soon as the payment goes through. If the migration doesn\'t work, reply to your restore-code email and we\'ll fix it or refund you in full.', '1-click-migration'),
+                    __('This backup is ready. Restoring it costs %s, one time. Pay here and the restore starts by itself as soon as the payment goes through. If the migration doesn\'t work, we\'ll fix it or refund you in full.', '1-click-migration'),
                     $price
                 );
             }
-            return __('This backup is ready. Pay here and the restore starts by itself as soon as the payment goes through. If the migration doesn\'t work, reply to your restore-code email and we\'ll fix it or refund you in full.', '1-click-migration');
+            return __('This backup is ready. Pay here and the restore starts by itself as soon as the payment goes through. If the migration doesn\'t work, we\'ll fix it or refund you in full.', '1-click-migration');
         }
         if ('' !== $price) {
             return sprintf(
                 /* translators: %s: price of the migration, e.g. $9.99 */
-                __('This backup hasn\'t been paid for yet. Restoring it costs %s, one time. Pay from the link in your restore-code email, then click Check backup & restore again. If the migration doesn\'t work, reply to that email and we\'ll fix it or refund you in full.', '1-click-migration'),
+                __('This backup hasn\'t been paid for yet. Restoring it costs %s, one time. Pay from the link in your restore-code email, then click Check backup & restore again. If the migration doesn\'t work, we\'ll fix it or refund you in full.', '1-click-migration'),
                 $price
             );
         }
-        return __('This backup hasn\'t been paid for yet. Pay from the link in your restore-code email, then click Check backup & restore again. If the migration doesn\'t work, reply to that email and we\'ll fix it or refund you in full.', '1-click-migration');
+        return __('This backup hasn\'t been paid for yet. Pay from the link in your restore-code email, then click Check backup & restore again. If the migration doesn\'t work, we\'ll fix it or refund you in full.', '1-click-migration');
     }
 
     public static function prepare() {

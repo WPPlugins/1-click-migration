@@ -4,7 +4,7 @@ Tags: wordpress migration, migration plugin, migration, migrate, backup
 Requires at least: 5.3
 Tested up to: 7.1
 Requires PHP: 7.4
-Stable tag: 3.3.11
+Stable tag: 3.3.12
 Author URI: https://1clickmigration.com
 License: GPLv3 or later
 License URI: http://www.gnu.org/licenses/gpl-3.0.html
@@ -34,7 +34,7 @@ Use this WordPress migration plugin for any WordPress migration, WP migration or
 
 * **$9.99, success guaranteed or a refund.** One PayPal payment per backup before you restore — covers retries and restoring on a second site.
 * **$15 a month for unlimited migrations.** [Subscribe](https://1clickmigration.com/subscriptions/) with the email you use in the plugin; cancel anytime.
-* **Fix or refund guarantee.** Reply to your restore-code email and we'll fix it or refund you.
+* **Fix or refund guarantee.** If the migration doesn't work, we'll fix it or refund you.
 
 **Built to fail safely**
 
@@ -80,7 +80,7 @@ If a large site fails in one go, click **Stop & Reset** and use **Advanced optio
 $9.99, success guaranteed or a refund. Pay once via PayPal or card on PayPal's own page (from the plugin or restore-code email) before you restore; one payment covers retries and restoring the same backup on a second site for 48 hours. If you move many sites, [$15 a month covers unlimited migrations](https://1clickmigration.com/subscriptions/), cancel anytime.
 
 = What if my WordPress migration doesn't work? =
-Reply to the restore-code email and we'll fix it or refund you in full, no questions asked. For general plugin questions or backup errors, [ask on the support forum](https://wordpress.org/support/plugin/1-click-migration/) with your site's domain (never post your restore code).
+We'll fix it or refund you in full, no questions asked. For general plugin questions or backup errors, [ask on the support forum](https://wordpress.org/support/plugin/1-click-migration/) with your site's domain (never post your restore code).
 
 = How long does a WordPress migration take? =
 Most backups and restores finish in 10–30 minutes. Large sites and slow hosts take longer.
@@ -122,6 +122,9 @@ Any host that runs WordPress on PHP 7.4 or later, including Bluehost, SiteGround
 4. Enter the restore code on the destination site to finish your WordPress migration.
 
 == Changelog ==
+= 3.3.12 =
+* **Clearer guarantee wording**: The payment messages in the plugin now say it plainly: if the migration doesn't work, we'll fix it or refund you in full. For help, post in the support forum and we'll answer you there.
+
 = 3.3.11 =
 * **Faster help when a backup or restore stops**: The progress card now has a "Copy details for the forum" button. It copies your site's domain, the plugin, WordPress and PHP versions, and what the card says happened, so a support forum post starts with what we need to answer it. It never copies your restore code or email address.
 * **Listing**: Shorter plugin title on WordPress.org.
@@ -160,12 +163,15 @@ Any host that runs WordPress on PHP 7.4 or later, including Bluehost, SiteGround
 * **Listing**: A shorter description. No change to the plugin itself.
 
 = 3.3.0 =
-* **Pricing**: A migration now costs $9.99, with success guaranteed or a refund. You pay through PayPal from the link in the restore-code email, before you restore. $15 a month covers unlimited migrations. If a migration doesn't work, reply to that email and we'll fix it or refund you in full.
+* **Pricing**: A migration now costs $9.99, with success guaranteed or a refund. You pay through PayPal from the link in the restore-code email, before you restore. $15 a month covers unlimited migrations. If a migration doesn't work, we'll fix it or refund you in full.
 * **Paying is part of the restore check**: When a backup hasn't been paid for yet, the restore check says so and shows the payment link, and the backup-completed notice names the price.
 
 Older versions are listed in [changelog.txt](https://plugins.trac.wordpress.org/browser/1-click-migration/trunk/changelog.txt).
 
 == Upgrade Notice ==
+
+= 3.3.12 =
+Clearer wording for the fix-it-or-refund guarantee. Backups and restores work the same.
 
 = 3.3.11 =
 Adds a "Copy details for the forum" button when a backup or restore stops. Backups and restores work the same.

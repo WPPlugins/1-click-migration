@@ -4532,7 +4532,7 @@ class OCM_Backup
         }
         return '<br>' . sprintf(
             /* translators: %s: price of the migration, e.g. $9.99 */
-            self::ui_html(__('Restoring this backup costs %s, one time. Pay now, or later from the link in your email. If the migration doesn\'t work, reply to that email and we\'ll fix it or refund you in full.', '1-click-migration')),
+            self::ui_html(__('Restoring this backup costs %s, one time. Pay now, or later from the link in your email. If the migration doesn\'t work, we\'ll fix it or refund you in full.', '1-click-migration')),
             '<strong>' . esc_html($price) . '</strong>'
         ) . self::backup_pay_button_html($price, (string) get_option('ocm_bucket_id', ''));
     }

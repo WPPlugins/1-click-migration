@@ -134,7 +134,7 @@ class OCM_Admin_Page
             'payAndRestorePrice'    => __('Pay %s and restore', '1-click-migration'),
             'payAndRestore'         => __('Pay and restore', '1-click-migration'),
             'payPayPalNote'         => __('You pay on PayPal\'s own page, with a card or a PayPal account. It opens in a small window.', '1-click-migration'),
-            'payGuarantee'          => __('If the migration doesn\'t work, reply to your restore-code email and we\'ll fix it or refund you in full.', '1-click-migration'),
+            'payGuarantee'          => __('If the migration doesn\'t work, we\'ll fix it or refund you in full.', '1-click-migration'),
             'payWaitingTitle'       => __('Waiting for your payment…', '1-click-migration'),
             'payWaitingBody'        => __('Finish paying in the PayPal window. Your restore starts here by itself as soon as it goes through.', '1-click-migration'),
             'payPendingBody'        => __('PayPal is still processing your payment. Your restore starts here by itself when it clears. You don\'t need to pay again.', '1-click-migration'),
