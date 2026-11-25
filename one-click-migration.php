@@ -4,7 +4,7 @@
  * Plugin Name: 1 Click Migration
  * Plugin URI: https://wordpress.org/plugins/1-click-migration/
  * Description: FREE local backup & restore (scheduled or manual), plus 1-click cloud migration with no size cap. Cloud migrations: $9.99, success guaranteed or a refund.
- * Version: 4.0.1
+ * Version: 4.0.2
  * Requires at least: 5.3
  * Requires PHP: 7.4
  * Author: 1ClickMigration
@@ -57,6 +57,7 @@ require_once __DIR__ . '/inc/handler/class-error-handler.php';
 require_once __DIR__ . '/inc/handler/class-ocm-debug-mode.php';
 require_once __DIR__ . '/inc/local/class-ocm-local-storage.php';
 require_once __DIR__ . '/inc/local/class-ocm-local-scheduler.php';
+require_once __DIR__ . '/inc/local/class-ocm-local-telemetry.php';
 require_once __DIR__ . '/inc/local/class-ocm-local-backup.php';
 
 // If the function it's not available, require it.
@@ -189,6 +190,7 @@ class One_Click_Migration
         add_action('wp_ajax_ocm_local_get_log', array(OCM_Local_Backup::class, 'ajax_get_log'));
         add_action('wp_ajax_ocm_local_clear_log', array(OCM_Local_Backup::class, 'ajax_clear_log'));
         add_action('wp_ajax_ocm_local_clear_activity', array(OCM_Local_Backup::class, 'ajax_clear_activity'));
+        add_action('wp_ajax_ocm_local_save_telemetry', array(OCM_Local_Telemetry::class, 'ajax_save_consent'));
         add_action('wp_ajax_ocm_local_cancel', array(OCM_Local_Backup::class, 'ajax_cancel'));
         add_action('plugins_loaded', array(__CLASS__, 'init_background_jobs'));
         add_action('plugins_loaded', array(__CLASS__, 'init_handler'));
@@ -340,6 +342,8 @@ class One_Click_Migration
             'localProgressUrl' => add_query_arg('_locale', 'user', get_rest_url(null, 'ocm/v1/local/progress')),
             'localDownloadLogUrl' => wp_nonce_url(admin_url('admin-post.php?action=ocm_download_local_log'), 'ocm_download_local_log'),
             'localActiveAction' => OCM_Local_Backup::active_action(),
+            'localTelemetryPrompt' => OCM_Local_Telemetry::should_prompt() ? 1 : 0,
+            'localTelemetryOptedIn' => OCM_Local_Telemetry::is_opted_in() ? 1 : 0,
             'localNonces' => array(
                 'startBackup' => wp_create_nonce('ocm_local_start_backup'),
                 'startRestore' => wp_create_nonce('ocm_local_start_restore'),
@@ -349,6 +353,7 @@ class One_Click_Migration
                 'getLog' => wp_create_nonce('ocm_local_get_log'),
                 'clearLog' => wp_create_nonce('ocm_local_clear_log'),
                 'clearActivity' => wp_create_nonce('ocm_local_clear_activity'),
+                'saveTelemetry' => wp_create_nonce('ocm_local_save_telemetry'),
                 'cancel' => wp_create_nonce('ocm_local_cancel'),
             ),
             'i18n' => OCM_Admin_Page::script_strings(),

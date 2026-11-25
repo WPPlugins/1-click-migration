@@ -1013,6 +1013,12 @@ body.ocm-modal-open { overflow: hidden; }
 .ocm-local-settings-msg { font-size: 12.5px; font-weight: 600; }
 .ocm-local-settings-msg.ocm-ok { color: var(--ocm-ok); }
 .ocm-local-settings-msg.ocm-err { color: var(--ocm-err); }
+/* A failed delete / clear, shown in the card it belongs to. */
+.ocm-local-action-msg { color: var(--ocm-err); font-size: 12.5px; font-weight: 600; margin: 0 0 10px; }
+.ocm-local-action-msg[hidden] { display: none; }
+/* Local progress notice (a refused Stop, logged out). Not ".notice": the cloud screen writes into every .ocm-info.notice. */
+.ocm-pg-extras .ocm-info.ocm-local-pg-notice { color: #8a6d18; }
+.ocm-app .ocm-pg-extras .ocm-info.ocm-local-pg-notice { color: #FFD98A; }
 
 #ocm-local-progress-card { margin-top: 16px; }
 .ocm-local-backups-card { margin-top: 16px; }
@@ -1169,6 +1175,40 @@ body.ocm-modal-open { overflow: hidden; }
     border-color: #20264a;
 }
 
+.ocm-local-telemetry-toggle {
+    margin: 12px 0 4px;
+    font-size: 13px;
+}
+.ocm-local-telemetry-note {
+    margin-bottom: 10px;
+}
+.ocm-local-telemetry-list {
+    margin: 10px 0 14px;
+    padding-left: 18px;
+    color: #2a2f3a;
+    font-size: 13px;
+    line-height: 1.55;
+}
+.ocm-local-telemetry-list li {
+    margin-bottom: 5px;
+}
+.ocm-local-telemetry-details {
+    margin: 14px 0 0;
+    font-size: 13px;
+    text-align: center;
+}
+.ocm-local-telemetry-details[open] {
+    text-align: left;
+}
+.ocm-local-telemetry-details summary {
+    cursor: pointer;
+    color: #1d4ed8;
+    font-weight: 500;
+}
+.ocm-local-telemetry-details .ocm-local-telemetry-list {
+    margin: 8px 0 0;
+}
+
 .ocm-local-modal-card {
     background: #ffffff;
     color: #0f1115;
@@ -1177,6 +1217,11 @@ body.ocm-modal-open { overflow: hidden; }
 }
 .ocm-local-modal-card .ocm-modal-title { color: #0f1115; }
 .ocm-local-modal-card .ocm-modal-body { color: #2a2f3a; }
+.ocm-local-modal-card .ocm-local-restore-caution {
+    margin: 0 0 12px; padding: 10px 12px;
+    background: #fff6e5; border: 1px solid #f0d9a8; border-radius: 8px;
+    color: #5c4508; font-size: 13px;
+}
 .ocm-local-restore-parts {
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));

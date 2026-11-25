@@ -1073,6 +1073,17 @@
     // Bumped whenever a start request is sent or answers, so a poll sent
     // before that is dropped when its answer arrives late.
     var localPollEpoch = 0;
+    // The start request got no answer (timeout, dropped connection), so the
+    // server may or may not have started the run. Until a poll shows a run in
+    // progress, a "completed" or "failed" in the log is the previous run's.
+    var localStartUnconfirmed = false;
+    var localSawActive = false;
+    // 'backup' or 'restore' while one runs: the Stop question differs.
+    var localCurrentAction = '';
+    // Progress polls in a row that failed with something other than 401/403.
+    var localPollErrors = 0;
+    var LOCAL_POLL_MAX_ERRORS = 8;
+    var localReloadId = null;
 
     function setPluginMode(mode, updateUrl) {
         var isLocal = mode === 'local';
@@ -1087,10 +1098,75 @@
                 window.history.replaceState({}, '', u.pathname + u.search + u.hash);
             } catch (e) { /* ignore */ }
         }
+        if (isLocal) {
+            maybeShowLocalTelemetryModal();
+        }
+    }
+
+    function maybeShowLocalTelemetryModal() {
+        if (typeof siteData === 'undefined' || !ocmFlagOn(siteData.localTelemetryPrompt)) {
+            return;
+        }
+        var $modal = $('#ocm-local-telemetry-modal');
+        if (!$modal.length) return;
+        $modal.prop('hidden', false).attr('aria-hidden', 'false').addClass('open');
+    }
+
+    function closeLocalTelemetryModal() {
+        $('#ocm-local-telemetry-modal').prop('hidden', true).attr('aria-hidden', 'true').removeClass('open');
+    }
+
+    function saveLocalTelemetryConsent(consent) {
+        var choice = consent === 'opted_in' ? 'opted_in' : 'declined';
+        if (typeof siteData !== 'undefined') {
+            siteData.localTelemetryPrompt = 0;
+            siteData.localTelemetryOptedIn = choice === 'opted_in' ? 1 : 0;
+        }
+        closeLocalTelemetryModal();
+        $('#ocm-local-telemetry-enabled').prop('checked', choice === 'opted_in');
+        if (typeof siteData === 'undefined' || !siteData.ajaxurl) return;
+        $.post(siteData.ajaxurl, {
+            action: 'ocm_local_save_telemetry',
+            nonce: localNonce('saveTelemetry'),
+            consent: choice
+        });
     }
 
     function localNonce(key) {
         return (typeof siteData !== 'undefined' && siteData.localNonces && siteData.localNonces[key]) ? siteData.localNonces[key] : '';
+    }
+
+    // The server's own message from a wp_send_json_error() answer, given the
+    // parsed response or the failed request. Empty when there is none: an
+    // expired nonce answers "-1", a logged-out admin "0", a crash an HTML page.
+    function localAjaxMessage(source) {
+        var body = (source && source.responseJSON !== undefined) ? source.responseJSON : source;
+        return (body && body.data && typeof body.data.message === 'string') ? body.data.message : '';
+    }
+
+    function localAjaxCode(source) {
+        var body = (source && source.responseJSON !== undefined) ? source.responseJSON : source;
+        return (body && body.data && typeof body.data.code === 'string') ? body.data.code : '';
+    }
+
+    // A failed delete / clear, in the card the button is in. Empty text hides it.
+    function setLocalActionMsg(id, text) {
+        var $msg = $('#' + id);
+        $msg.text(text || '').prop('hidden', !text);
+    }
+
+    // A note under the local progress bar that polling doesn't overwrite.
+    function setLocalNotice(text) {
+        var $notice = $('#ocm-local-pg-notice');
+        if (text) {
+            $notice.text(text).addClass('show').show();
+        } else {
+            $notice.removeClass('show').hide().empty();
+        }
+    }
+
+    function localPollingIsOn() {
+        return localPollTimerId !== null || localPollDelayId !== null;
     }
 
     function stopLocalProgressPolling() {
@@ -1114,7 +1190,9 @@
         if (typeof text === 'string') {
             $('#ocm-local-pg-status').text(text);
         }
-        if (state === 'failed') {
+        // 'stalled': the page lost the server. The error shows, but the bar
+        // doesn't turn red, because the run itself may be fine.
+        if (state === 'failed' || state === 'stalled') {
             $('#ocm-local-pg-error').text(text || '').addClass('show').show();
         } else {
             $('#ocm-local-pg-error').removeClass('show').hide().empty();
@@ -1136,7 +1214,7 @@
         $('#ocm-local-stat-used').text(storage.total_readable || '0 B');
         $('#ocm-local-stat-free').text(storage.free_readable || '');
         var minFree = parseInt(storage.min_free_space_mb, 10) || 0;
-        $('#ocm-local-stat-guard').text(minFree > 0 ? ('Min guard: ' + minFree + ' MB') : 'Space guard off');
+        $('#ocm-local-stat-guard').text(minFree > 0 ? fmt(t('localMinGuard'), minFree) : t('localGuardOff'));
         if (storage.low_space) {
             $('#ocm-local-stat-low').prop('hidden', false).text(t('localLowSpace'));
         } else {
@@ -1148,8 +1226,8 @@
     }
 
     function localPartLabel(part) {
-        var map = { db: 'Database', themes: 'Themes', plugins: 'Plugins', uploads: 'Uploads' };
-        return map[part] || String(part).toUpperCase();
+        var keys = { db: 'localPartDb', themes: 'localPartThemes', plugins: 'localPartPlugins', uploads: 'localPartUploads' };
+        return Object.prototype.hasOwnProperty.call(keys, part) ? t(keys[part]) : String(part).toUpperCase();
     }
 
     function renderLocalPartPills(parts) {
@@ -1160,14 +1238,19 @@
         return html + '</div>';
     }
 
+    // Plain text: the caller escapes it once.
     function localActivityStatusLabel(status) {
-        var map = {
-            completed: t('localStatusCompleted'),
-            failed: t('localStatusFailed'),
-            skipped: t('localStatusSkipped'),
-            cancelled: t('localStatusCancelled')
+        var keys = {
+            completed: 'localStatusCompleted',
+            failed: 'localStatusFailed',
+            skipped: 'localStatusSkipped',
+            cancelled: 'localStatusCancelled'
         };
-        return map[status] || escHtml(status || '');
+        if (Object.prototype.hasOwnProperty.call(keys, status)) {
+            return t(keys[status]);
+        }
+        var raw = String(status || '');
+        return raw.charAt(0).toUpperCase() + raw.slice(1);
     }
 
     function renderLocalBackupsTable(backups) {
@@ -1307,13 +1390,20 @@
         if (typeof window.confirm === 'function' && !window.confirm(t('localClearLogConfirm'))) {
             return;
         }
+        setLocalActionMsg('ocm-local-log-msg', '');
         $.post(siteData.ajaxurl, {
             action: 'ocm_local_clear_log',
             nonce: localNonce('clearLog')
         }).done(function (response) {
-            if (response && response.success && response.data) {
-                applyGlobalLogPayload(response.data.log);
+            if (response && response.success === true) {
+                if (response.data) {
+                    applyGlobalLogPayload(response.data.log);
+                }
+            } else {
+                setLocalActionMsg('ocm-local-log-msg', localAjaxMessage(response) || t('localClearLogFailed'));
             }
+        }).fail(function (xhr) {
+            setLocalActionMsg('ocm-local-log-msg', localAjaxMessage(xhr) || t('localClearLogFailed'));
         });
     }
 
@@ -1321,13 +1411,20 @@
         if (typeof window.confirm === 'function' && !window.confirm(t('localClearActivityConfirm'))) {
             return;
         }
+        setLocalActionMsg('ocm-local-activity-msg', '');
         $.post(siteData.ajaxurl, {
             action: 'ocm_local_clear_activity',
             nonce: localNonce('clearActivity')
         }).done(function (response) {
-            if (response && response.success && response.data) {
-                renderLocalActivityTable(response.data.activity || []);
+            if (response && response.success === true) {
+                if (response.data) {
+                    renderLocalActivityTable(response.data.activity || []);
+                }
+            } else {
+                setLocalActionMsg('ocm-local-activity-msg', localAjaxMessage(response) || t('localClearActivityFailed'));
             }
+        }).fail(function (xhr) {
+            setLocalActionMsg('ocm-local-activity-msg', localAjaxMessage(xhr) || t('localClearActivityFailed'));
         });
     }
 
@@ -1409,6 +1506,17 @@
         });
     }
 
+    // The run is over (or there never was one): unlock the screen.
+    function endLocalRun(pct, text, state) {
+        stopLocalProgressPolling();
+        localStartUnconfirmed = false;
+        localCurrentAction = '';
+        setLocalNotice('');
+        setLocalProgress(pct, text, state);
+        setLocalButtonsDisabled(false);
+        refreshLocalBackups();
+    }
+
     function pollLocalProgressOnce() {
         if (typeof siteData === 'undefined' || !siteData.localProgressUrl) return;
         var epoch = localPollEpoch;
@@ -1419,66 +1527,159 @@
             beforeSend: function (xhr) { xhr.setRequestHeader('X-WP-Nonce', siteData.restNonce); },
             success: function (res) {
                 if (!res || epoch !== localPollEpoch) return;
+                localPollErrors = 0;
+                if (res.active) {
+                    localSawActive = true;
+                    if (res.action) localCurrentAction = String(res.action);
+                }
                 if (localStartPending && (!res.active || res.failed || res.completed || res.value === '100%')) {
+                    return;
+                }
+                if (localStartUnconfirmed && !localSawActive && !res.active) {
+                    // The start request never answered and no run has shown
+                    // up: whatever the log says belongs to the previous run.
+                    handleLocalStartError(t('localStartUnconfirmed'));
                     return;
                 }
                 $('#ocm-local-download-log').show();
                 if (res.failed) {
-                    stopLocalProgressPolling();
-                    setLocalProgress(res.value || '0%', res.text || '', 'failed');
-                    setLocalButtonsDisabled(false);
-                    refreshLocalBackups();
+                    endLocalRun(res.value || '0%', res.text || '', 'failed');
                     return;
                 }
                 if (res.completed || res.value === '100%') {
-                    stopLocalProgressPolling();
-                    setLocalProgress('100%', res.text || '', 'done');
-                    setLocalButtonsDisabled(false);
-                    refreshLocalBackups();
+                    endLocalRun('100%', res.text || '', 'done');
                     return;
                 }
-                if (res.isStopped && !res.active) {
-                    stopLocalProgressPolling();
-                    setLocalProgress(res.value || '0%', res.text || '', 'idle');
-                    setLocalButtonsDisabled(false);
-                    refreshLocalBackups();
+                if (!res.active) {
+                    // Nothing is running and nothing finished: stopped, or
+                    // reset from another tab. Don't animate forever.
+                    endLocalRun(res.value || '0%', res.text || t('localIdleText'), 'idle');
                     return;
                 }
                 setLocalProgress(res.value || '1%', res.text || '', 'running');
+            },
+            error: function (xhr) {
+                if (epoch !== localPollEpoch) return;
+                var status = xhr ? (parseInt(xhr.status, 10) || 0) : 0;
+                if (status === 401 || status === 403) {
+                    // Logged out (a database restore replaces the site's users)
+                    // or the page expired. Say so before reloading, which leads
+                    // to the login screen. The restore keeps going on the server.
+                    stopLocalProgressPolling();
+                    $('#ocm-local-pg-fill').removeClass('running');
+                    setLocalNotice(t('localLoggedOut'));
+                    clearTimeout(localReloadId);
+                    localReloadId = setTimeout(function () { window.location.reload(); }, 8000);
+                    return;
+                }
+                // A 5xx or a dropped connection is normal for a moment while a
+                // restore swaps files; give up only when it keeps happening.
+                localPollErrors++;
+                if (localPollErrors < LOCAL_POLL_MAX_ERRORS) return;
+                localPollErrors = 0;
+                localStartPending = false;
+                localStartUnconfirmed = false;
+                localPollEpoch++;
+                stopLocalProgressPolling();
+                setLocalProgress($('#ocm-local-pg-pct').text() || '0%', t('localProgressLost'), 'stalled');
+                setLocalButtonsDisabled(false);
             }
         });
     }
 
     function startLocalProgressPolling(immediately) {
         stopLocalProgressPolling();
+        localPollErrors = 0;
         setLocalButtonsDisabled(true);
         localPollDelayId = setTimeout(function () {
-            pollLocalProgressOnce();
+            localPollDelayId = null;
+            // Interval first: a first poll that ends the run then clears it.
             localPollTimerId = setInterval(pollLocalProgressOnce, 1500);
+            pollLocalProgressOnce();
         }, immediately ? 0 : 1200);
     }
 
-    function beginLocalStart() {
+    function beginLocalStart(action) {
         localStartPending = true;
+        localStartUnconfirmed = false;
+        localSawActive = false;
+        localCurrentAction = action || '';
         localPollEpoch++;
+        setLocalNotice('');
         startLocalProgressPolling();
     }
 
-    // The start request answered (or failed without saying why): the new run
-    // is in the log now, so polls can be trusted again.
-    function endLocalStart() {
+    // The start request answered: the new run is in the log now, so polls can
+    // be trusted again. With unconfirmed, it didn't answer at all (see
+    // localStartUnconfirmed).
+    function endLocalStart(unconfirmed) {
         localStartPending = false;
+        localStartUnconfirmed = !!unconfirmed;
         localPollEpoch++;
         startLocalProgressPolling(true);
     }
 
     function handleLocalStartError(msg) {
         localStartPending = false;
+        localStartUnconfirmed = false;
+        localCurrentAction = '';
         localPollEpoch++;
         stopLocalProgressPolling();
         setLocalButtonsDisabled(false);
-        setLocalProgress('0%', msg || '', 'failed');
+        setLocalProgress('0%', msg || t('localStartFailed'), 'failed');
         refreshLocalBackups();
+    }
+
+    // A start request that got an HTTP answer without a JSON body: an expired
+    // nonce ("-1", 403), a logged-out admin ("0", 400) or a crash page. The
+    // run did not start.
+    function localStartFailureText(xhr) {
+        var status = xhr ? (parseInt(xhr.status, 10) || 0) : 0;
+        return (status === 400 || status === 401 || status === 403) ? t('localStartExpired') : t('localStartFailed');
+    }
+
+    // No answer (timeout, dropped connection) or a proxy that gave up waiting
+    // for PHP: the server may have started the run all the same.
+    function localStartMayHaveRun(xhr) {
+        var status = xhr ? (parseInt(xhr.status, 10) || 0) : 0;
+        return status === 0 || status === 502 || status === 504 || status === 524;
+    }
+
+    // PHP warnings printed in front of the JSON (display_errors on) reach us
+    // as a string, or as a parse error: read the answer out of the text.
+    function localJsonInText(text) {
+        if (typeof text !== 'string') return null;
+        var at = text.lastIndexOf('{"success":');
+        if (at === -1) return null;
+        try {
+            return JSON.parse(text.slice(at));
+        } catch (e) {
+            return null;
+        }
+    }
+
+    function localStartDone(response) {
+        var answer = (typeof response === 'string') ? localJsonInText(response) : response;
+        if (answer && answer.success === true) {
+            endLocalStart(false);
+        } else {
+            // success:false, or a 200 that isn't our JSON (a login page, "0").
+            handleLocalStartError(localAjaxMessage(answer) || t('localStartFailed'));
+        }
+    }
+
+    function localStartFail(xhr) {
+        var msg = localAjaxMessage(xhr);
+        var inText = (xhr && xhr.responseJSON === undefined) ? localJsonInText(xhr.responseText) : null;
+        if (msg) {
+            handleLocalStartError(msg);
+        } else if (inText) {
+            localStartDone(inText);
+        } else if (localStartMayHaveRun(xhr)) {
+            endLocalStart(true);
+        } else {
+            handleLocalStartError(localStartFailureText(xhr));
+        }
     }
 
     function submitLocalBackup() {
@@ -1493,27 +1694,14 @@
         $('#ocm-local-part-warning').hide();
         setLocalButtonsDisabled(true);
         setLocalProgress('1%', t('localBackupStarted'), 'running');
-        beginLocalStart();
+        beginLocalStart('backup');
 
         $.post(siteData.ajaxurl, {
             action: 'ocm_local_start_backup',
             nonce: localNonce('startBackup'),
             label: $('#ocm-local-label').val() || '',
             parts: parts
-        }).done(function (response) {
-            if (response && response.success === false) {
-                handleLocalStartError(response.data && response.data.message);
-            } else {
-                endLocalStart();
-            }
-        }).fail(function (xhr) {
-            var msg = xhr && xhr.responseJSON && xhr.responseJSON.data && xhr.responseJSON.data.message;
-            if (msg) {
-                handleLocalStartError(msg);
-            } else {
-                endLocalStart();
-            }
-        });
+        }).done(localStartDone).fail(localStartFail);
     }
 
     function saveLocalSettings() {
@@ -1526,6 +1714,16 @@
             $msg.addClass('ocm-err').text(t('localSelectPart'));
             return;
         }
+        // A lower "keep last" deletes the oldest backups as soon as it is saved.
+        var keepLast = parseInt($('#ocm-local-keep-last').val(), 10);
+        var listed = $('#ocm-local-backups-list tr[data-backup-id]').length;
+        if (keepLast > 0 && keepLast < listed && typeof window.confirm === 'function'
+            && !window.confirm(fmt(t('localPruneConfirm'), keepLast, listed - keepLast))) {
+            return;
+        }
+        if (typeof siteData !== 'undefined') {
+            siteData.localTelemetryPrompt = 0;
+        }
         $('#ocm-local-save-settings').prop('disabled', true);
         $.post(siteData.ajaxurl, {
             action: 'ocm_local_save_settings',
@@ -1537,7 +1735,8 @@
             day_of_month: $('#ocm-local-sched-dom').val() || '1',
             parts: parts,
             keep_last: $('#ocm-local-keep-last').val(),
-            min_free_space_mb: $('#ocm-local-min-free').val()
+            min_free_space_mb: $('#ocm-local-min-free').val(),
+            telemetry_enabled: $('#ocm-local-telemetry-enabled').is(':checked') ? 1 : 0
         }).done(function (response) {
             $('#ocm-local-save-settings').prop('disabled', false);
             if (!response || !response.success) {
@@ -1601,27 +1800,14 @@
         closeLocalRestoreModal();
         setLocalButtonsDisabled(true);
         setLocalProgress('1%', t('localRestoreStarted'), 'running');
-        beginLocalStart();
+        beginLocalStart('restore');
 
         $.post(siteData.ajaxurl, {
             action: 'ocm_local_start_restore',
             nonce: localNonce('startRestore'),
             backup_id: activeLocalRestoreId,
             parts: parts
-        }).done(function (response) {
-            if (response && response.success === false) {
-                handleLocalStartError(response.data && response.data.message);
-            } else {
-                endLocalStart();
-            }
-        }).fail(function (xhr) {
-            var msg = xhr && xhr.responseJSON && xhr.responseJSON.data && xhr.responseJSON.data.message;
-            if (msg) {
-                handleLocalStartError(msg);
-            } else {
-                endLocalStart();
-            }
-        });
+        }).done(localStartDone).fail(localStartFail);
     }
 
     function deleteLocalBackup(backupId) {
@@ -1629,33 +1815,62 @@
         if (typeof window.confirm === 'function' && !window.confirm(t('localDeleteConfirm'))) {
             return;
         }
+        setLocalActionMsg('ocm-local-backups-msg', '');
         $.post(siteData.ajaxurl, {
             action: 'ocm_local_delete_backup',
             nonce: localNonce('deleteBackup'),
             backup_id: backupId
         }).done(function (response) {
-            if (response && response.success && response.data) {
-                renderLocalStorageSummary(response.data.storage);
-                renderLocalBackupsTable(response.data.backups);
+            if (response && response.success === true) {
+                if (response.data) {
+                    renderLocalStorageSummary(response.data.storage);
+                    renderLocalBackupsTable(response.data.backups);
+                }
+            } else {
+                setLocalActionMsg('ocm-local-backups-msg', localAjaxMessage(response) || t('localDeleteFailed'));
             }
+        }).fail(function (xhr) {
+            // Expired page, an operation in progress (409), a backup in use, a failed delete.
+            setLocalActionMsg('ocm-local-backups-msg', localAjaxMessage(xhr) || t('localDeleteFailed'));
         });
     }
 
+    // The server did not stop the run: say why and leave the screen as it is.
+    // A restore that has already replaced part of the live site refuses to
+    // stop (409 restore_cannot_stop) and keeps running, so keep watching it.
+    function localCancelRefused(source) {
+        setLocalNotice(localAjaxMessage(source) || t('localCancelFailed'));
+        if (localAjaxCode(source) === 'restore_cannot_stop') {
+            localCurrentAction = 'restore';
+            if (!localPollingIsOn()) {
+                startLocalProgressPolling(true);
+            }
+        }
+    }
+
     function cancelLocalOperation() {
-        if (typeof window.confirm === 'function' && !window.confirm(t('localCancelConfirm'))) {
+        var question = t(localCurrentAction === 'restore' ? 'localCancelRestoreConfirm' : 'localCancelConfirm');
+        if (typeof window.confirm === 'function' && !window.confirm(question)) {
             return;
         }
         $.post(siteData.ajaxurl, {
             action: 'ocm_local_cancel',
             nonce: localNonce('cancel')
-        }).done(function () {
+        }).done(function (response) {
+            if (!response || response.success !== true) {
+                localCancelRefused(response);
+                return;
+            }
             localStartPending = false;
+            localStartUnconfirmed = false;
+            localCurrentAction = '';
             localPollEpoch++;
             stopLocalProgressPolling();
+            setLocalNotice('');
             setLocalButtonsDisabled(false);
             setLocalProgress('0%', t('localIdleText'), 'idle');
             refreshLocalBackups();
-        });
+        }).fail(localCancelRefused);
     }
 
     // -------- DOMReady --------
@@ -1796,10 +2011,31 @@
             e.preventDefault();
             copyLogElement($('#ocm-local-log-modal-content'), $(this));
         });
+        $('#ocm-local-telemetry-allow').on('click', function (e) {
+            e.preventDefault();
+            saveLocalTelemetryConsent('opted_in');
+        });
+        $('#ocm-local-telemetry-decline').on('click', function (e) {
+            e.preventDefault();
+            saveLocalTelemetryConsent('declined');
+        });
+        $(document).on('click', '[data-ocm-local-telemetry-decline]', function (e) {
+            e.preventDefault();
+            saveLocalTelemetryConsent('declined');
+        });
+        $(document).on('keydown.ocmLocalTelemetryModal', function (e) {
+            if (e.key === 'Escape' && !$('#ocm-local-telemetry-modal').prop('hidden')) {
+                saveLocalTelemetryConsent('declined');
+            }
+        });
+        if (!$('#ocm-mode-local').prop('hidden')) {
+            maybeShowLocalTelemetryModal();
+        }
         if (typeof siteData !== 'undefined' && (siteData.localActiveAction === 'backup' || siteData.localActiveAction === 'restore')) {
             if (startAction !== 'backup' && startAction !== 'restore') {
                 setPluginMode('local', false);
             }
+            localCurrentAction = siteData.localActiveAction;
             startLocalProgressPolling();
         }
     });

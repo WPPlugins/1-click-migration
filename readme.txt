@@ -2,9 +2,9 @@
 Contributors: 1clickmigration
 Tags: wordpress migration, migration plugin, wordpress backup, backup restore, scheduled backup
 Requires at least: 5.3
-Tested up to: 7.1
+Tested up to: 7.2
 Requires PHP: 7.4
-Stable tag: 4.0.1
+Stable tag: 4.0.2
 Author URI: https://1clickmigration.com
 License: GPLv3 or later
 License URI: http://www.gnu.org/licenses/gpl-3.0.html
@@ -58,6 +58,7 @@ Use this WordPress migration plugin for any WordPress migration, WP migration or
 * Cloud backup parts are AES-256 encrypted on your server before upload, stored on Amazon S3, and deleted after 48 hours.
 * Only someone with the restore code can restore a cloud backup, and we email the code only to the address you enter.
 * Payments happen on PayPal's own page; the plugin never asks for card or payment details.
+* **Optional anonymous Local Backups reports (off by default):** If you allow it on the Local Backups screen, the plugin sends a short anonymous report to `https://1clickmigration.com/api/local_telemetry.php`: once when you turn it on, each time a local backup or restore finishes or fails, when you change the backup schedule, and if the plugin crashes during a local backup or restore. Each report holds an anonymous, hashed install ID, whether the backup or restore worked, the selected parts, a size range, how long it took, whether a schedule is on and how often it runs, your WordPress, PHP and plugin versions, a short error code and, for crashes, the plugin file and line number. It does not hold your site address, email addresses, error messages or backup contents. Your site's IP address reaches our server, as it does with any web request, and is not stored with the reports. You can turn it off anytime under Schedule & Storage settings on the Local Backups screen.
 
 Questions before backing up, or running into a plugin issue? [Ask on the WordPress.org support forum](https://wordpress.org/support/plugin/1-click-migration/) and share your site's domain (never your restore code). Learn more at [1clickmigration.com](https://1clickmigration.com).
 
@@ -93,7 +94,7 @@ If a large site fails in one go, click **Stop & Reset** and use **Advanced optio
 == Frequently Asked Questions ==
 
 = Are local backups and restores free? =
-Yes. Manual and scheduled local backups (hourly, daily, weekly or monthly) and same-site restores are completely free, with no account or cloud upload required. You only pay for Cloud Migration to move a site to another host or domain ($9.99, or $15 a month unlimited).
+Yes. Manual and scheduled local backups (hourly, daily, weekly or monthly) and same-site restores are completely free, with no account or cloud upload required. You only pay for Cloud Migration to move a site to another host or domain ($9.99, success guaranteed or a refund, or $15 a month unlimited).
 
 = Can I schedule automatic daily or weekly WordPress backups? =
 Yes. Under Local Backups, enable the schedule and choose hourly, daily, weekly or monthly backups, the time in your site's timezone, and which parts (database, plugins, themes, uploads) to include.
@@ -148,6 +149,14 @@ Any host that runs WordPress on PHP 7.4 or later, including Bluehost, SiteGround
 5. Enter the restore code on the destination site to finish your WordPress migration.
 
 == Changelog ==
+= 4.0.2 =
+* **Restoring after your site address changed**: A local restore on a site that has since moved to https or to a new domain now updates the old address everywhere in the database. Before, only the main site address was updated and links inside posts and settings kept the old one.
+* **Safer Stop**: Stop can no longer leave a site half restored. Once a restore has started replacing your database or files it finishes on its own, and Stop tells you so. If a restore gets stuck there, Stop works again after a few minutes and says that part of the backup is already in place.
+* **More reliable restores**: Stopping a restore and starting a new one right away no longer ends the new one. A restore that was cut off right after replacing the database carries on from there instead of reporting that nothing was changed. A restore that stops unexpectedly no longer leaves its temporary files and tables behind.
+* **Clearer Local Backups screen**: The screen now tells you when you were logged out by a database restore, when a backup or restore did not start, and when deleting a backup or clearing the log did not work. Lowering "Keep last" asks before it deletes older backups. The restore window says plainly what will be replaced. Progress messages no longer show stray `&quot;` characters.
+* **Custom plugin folder**: A restore no longer removes this plugin's own files when it is installed in a folder with a different name.
+* **Optional anonymous reports (off by default)**: The Local Backups screen asks once whether you want to send anonymous reports when a local backup or restore finishes, fails or crashes, to help us fix problems faster. Nothing is sent unless you allow it. Click "What is sent" in that window for the full list, and turn it off anytime under Schedule & Storage settings.
+
 = 4.0.1 =
 * **Local backup fixes**: Starting a second backup or a restore no longer shows the previous run's result and stops updating. A restore that keeps getting cut off at the same step now stops and says so, instead of leaving the site in maintenance mode. Scheduled backups start again after the plugin is deactivated and reactivated.
 * **More reliable runs**: A backup that takes a while to finish is no longer reported as failed. Stopping a backup and starting a new one right away no longer cancels the new one. A start that was cut off no longer blocks later backups.
@@ -206,11 +215,14 @@ Older versions are listed in [changelog.txt](https://plugins.trac.wordpress.org/
 
 == Upgrade Notice ==
 
+= 4.0.2 =
+Local restore fixes: the site address is updated everywhere after a move to https or a new domain, Stop can no longer leave a site half restored, and the Local Backups screen explains failures. Adds optional anonymous Local Backups reports, off unless you allow them.
+
 = 4.0.1 =
 Fixes for free Local Backups: reliable progress, restores that can't loop, schedules that survive reactivation, plugins kept active, and safer storage.
 
 = 4.0.0 =
-Adds free manual and scheduled Local Backups & Restores (hourly, daily, weekly or monthly) with retention pruning, disk-space guard, and safe staging-table restore. Cloud migrations remain $9.99 or $15/mo unlimited.
+Adds free manual and scheduled Local Backups & Restores (hourly, daily, weekly or monthly) with retention pruning, disk-space guard, and safe staging-table restore. Cloud migrations remain $9.99, success guaranteed or a refund, or $15 a month unlimited.
 
 = 3.3.12 =
 Clearer wording for the fix-it-or-refund guarantee. Backups and restores work the same.

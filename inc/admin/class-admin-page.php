@@ -178,6 +178,25 @@ class OCM_Admin_Page
             'localSettingsFailed'   => __('Could not save settings. Please try again.', '1-click-migration'),
             'localDeleteConfirm'    => __('Delete this local backup permanently? This cannot be undone.', '1-click-migration'),
             'localCancelConfirm'    => __('Stop and reset the running local operation?', '1-click-migration'),
+            'localCancelRestoreConfirm' => __('Stop the running restore? A restore can only be stopped before the site\'s files or database have been replaced.', '1-click-migration'),
+            'localCancelFailed'     => __('Could not stop the operation. Reload the page and try again.', '1-click-migration'),
+            'localStartExpired'     => __('Nothing was started: this page has expired or you were logged out. Reload the page and try again.', '1-click-migration'),
+            'localStartFailed'      => __('Nothing was started: the server answered with an error. Please try again.', '1-click-migration'),
+            'localStartUnconfirmed' => __('The server did not confirm the start, and nothing is running now. Check Activity History below, then try again.', '1-click-migration'),
+            'localLoggedOut'        => __('You were logged out, which is normal when a restore replaces the database. Log back in with the username and password this site had when the backup was made; the restore keeps going.', '1-click-migration'),
+            'localProgressLost'     => __('Lost contact with the server, so progress stopped updating. The operation may still be running. Reload the page to check.', '1-click-migration'),
+            /* translators: 1: number of newest backups that are kept, 2: number of older backups that will be deleted */
+            'localPruneConfirm'     => __('Only the newest %1$d backups will be kept. Older backups deleted permanently when you save: %2$d. This cannot be undone. Save anyway?', '1-click-migration'),
+            'localDeleteFailed'     => __('Could not delete this backup. Reload the page and try again.', '1-click-migration'),
+            'localClearLogFailed'   => __('Could not clear the log. Reload the page and try again.', '1-click-migration'),
+            'localClearActivityFailed' => __('Could not clear the history. Reload the page and try again.', '1-click-migration'),
+            /* translators: %d: free disk space, in megabytes, below which local backups are not made */
+            'localMinGuard'         => __('Min guard: %d MB', '1-click-migration'),
+            'localGuardOff'         => __('Space guard off', '1-click-migration'),
+            'localPartDb'           => __('Database', '1-click-migration'),
+            'localPartThemes'       => __('Themes', '1-click-migration'),
+            'localPartPlugins'      => __('Plugins', '1-click-migration'),
+            'localPartUploads'      => __('Uploads', '1-click-migration'),
             'localNoBackups'        => __('No local backups saved yet. Create one above or enable the schedule.', '1-click-migration'),
             'localNextRun'          => __('Next run:', '1-click-migration'),
             'localScheduleDisabled' => __('Schedule is disabled.', '1-click-migration'),
@@ -582,11 +601,27 @@ class OCM_Admin_Page
             ? OCM_Backup::readable_bytes((int) @filesize(OCM_LOCAL_LOG_FILE))
             : '';
         $activity = $has_local ? OCM_Local_Backup::get_activity_log() : array();
+        $has_telemetry = class_exists(__NAMESPACE__ . '\\OCM_Local_Telemetry');
+        $telemetry_opted_in = $has_telemetry && OCM_Local_Telemetry::is_opted_in();
+        // Shown in the consent wording, so it is the address reports really go to.
+        $telemetry_url = $has_telemetry ? OCM_Local_Telemetry::endpoint_url() : '';
+        if ($telemetry_url === '') {
+            $telemetry_url = 'https://1clickmigration.com/api/local_telemetry.php';
+        }
         $status_labels = array(
             'completed' => __('Completed', '1-click-migration'),
             'failed'    => __('Failed', '1-click-migration'),
             'skipped'   => __('Skipped', '1-click-migration'),
             'cancelled' => __('Cancelled', '1-click-migration'),
+        );
+        // What OCM_Local_Scheduler::record_status() stores for the last scheduled run.
+        $outcome_labels = array(
+            'success'   => $status_labels['completed'],
+            'completed' => $status_labels['completed'],
+            'failed'    => $status_labels['failed'],
+            'skipped'   => $status_labels['skipped'],
+            'cancelled' => $status_labels['cancelled'],
+            'started'   => __('In progress', '1-click-migration'),
         );
         $local_log_url = wp_nonce_url(admin_url('admin-post.php?action=ocm_download_local_log'), 'ocm_download_local_log');
         $tz_label = $has_local ? OCM_Local_Scheduler::site_timezone()->getName() : 'UTC';
@@ -736,7 +771,7 @@ class OCM_Admin_Page
                         <div class="ocm-field">
                             <label class="ocm-label" for="ocm-local-keep-last"><?php esc_html_e('Keep last N backups', '1-click-migration'); ?></label>
                             <input id="ocm-local-keep-last" class="ocm-input ocm-local-input-plain" type="number" min="0" max="500" value="<?php echo (int) $storage['keep_last']; ?>"/>
-                            <div class="ocm-field-help"><?php esc_html_e('0 = unlimited (oldest auto-pruned after completion)', '1-click-migration'); ?></div>
+                            <div class="ocm-field-help"><?php esc_html_e('Keeps the newest N backups and deletes older ones automatically. Manual and scheduled backups both count. 0 keeps all of them.', '1-click-migration'); ?></div>
                         </div>
                         <div class="ocm-field">
                             <label class="ocm-label" for="ocm-local-min-free"><?php esc_html_e('Minimum free space guard (MB)', '1-click-migration'); ?></label>
@@ -745,15 +780,41 @@ class OCM_Admin_Page
                         </div>
                     </div>
 
+                    <label class="ocm-local-toggle ocm-local-telemetry-toggle">
+                        <input type="checkbox" id="ocm-local-telemetry-enabled"<?php echo $telemetry_opted_in ? ' checked' : ''; ?>>
+                        <span><?php esc_html_e('Share anonymous Local Backups usage & crash reports to help improve the plugin', '1-click-migration'); ?></span>
+                    </label>
+                    <div class="ocm-field-help ocm-local-telemetry-note"><?php
+                        /* translators: %s: the web address the reports are sent to */
+                        echo esc_html(sprintf(__('Optional and off by default. When this is on, the plugin sends a short anonymous report to %s: once when you turn it on, each time a local backup or restore finishes or fails, when you change the schedule, and if the plugin crashes during a local backup or restore.', '1-click-migration'), $telemetry_url));
+                        echo ' ';
+                        esc_html_e('Sent: an anonymous, hashed install ID, whether the backup or restore worked, the selected parts, a size range, how long it took, whether a schedule is on and how often it runs, your WordPress, PHP and plugin versions, a short error code, and for crashes the plugin file and line number.', '1-click-migration');
+                        echo ' ';
+                        esc_html_e('Not sent: your site address, email addresses, error messages or backup contents. Your site\'s IP address reaches our server, as it does with any web request, and is not stored with the reports.', '1-click-migration');
+                        echo ' ';
+                        esc_html_e('To stop, untick this box and click Save settings.', '1-click-migration');
+                    ?></div>
+
                     <div class="ocm-local-sched-meta" id="ocm-local-sched-meta">
                         <span id="ocm-local-next-run">
                             <?php echo !empty($schedule['enabled']) && $next_formatted !== ''
                                 ? esc_html__('Next run:', '1-click-migration') . ' ' . esc_html($next_formatted)
                                 : esc_html__('Schedule is disabled.', '1-click-migration'); ?>
                         </span>
-                        <?php if (!empty($status['last_run_at'])): ?>
+                        <?php if (!empty($status['last_run_at'])):
+                            $last_run_when = $has_local ? OCM_Local_Scheduler::format_timestamp($status['last_run_at']) : '';
+                            $last_run_label = isset($outcome_labels[$status['last_outcome']]) ? $outcome_labels[$status['last_outcome']] : '';
+                            ?>
                             <span id="ocm-local-last-run">
-                                &middot; <?php echo esc_html(sprintf(__('Last run (%1$s): %2$s', '1-click-migration'), $status['last_outcome'], $has_local ? OCM_Local_Scheduler::format_timestamp($status['last_run_at']) : '')); ?>
+                                &middot; <?php
+                                if ($last_run_label !== '') {
+                                    /* translators: 1: how the last scheduled backup ended, e.g. Completed, 2: date and time */
+                                    echo esc_html(sprintf(__('Last run (%1$s): %2$s', '1-click-migration'), $last_run_label, $last_run_when));
+                                } else {
+                                    /* translators: %s: date and time of the last scheduled backup */
+                                    echo esc_html(sprintf(__('Last run: %s', '1-click-migration'), $last_run_when));
+                                }
+                                ?>
                             </span>
                         <?php endif; ?>
                     </div>
@@ -779,6 +840,7 @@ class OCM_Admin_Page
                     </div>
                     <div class="ocm-pg-extras">
                         <span class="ocm-info error<?php echo !empty($local_progress['failed']) ? ' show' : ''; ?>" id="ocm-local-pg-error"><?php if (!empty($local_progress['failed'])) { echo esc_html($local_progress['text']); } ?></span>
+                        <span class="ocm-info ocm-local-pg-notice" id="ocm-local-pg-notice" role="status"></span>
                     </div>
                 </div>
                 <div class="ocm-pg-actions">
@@ -795,6 +857,7 @@ class OCM_Admin_Page
                     <span class="ocm-card-title"><?php esc_html_e('Saved Local Backups', '1-click-migration'); ?></span>
                     <span class="ocm-mini-hint"><?php esc_html_e('Restore full backup or choose specific parts', '1-click-migration'); ?></span>
                 </div>
+                <p class="ocm-local-action-msg" id="ocm-local-backups-msg" role="alert" hidden></p>
                 <div id="ocm-local-backups-list">
                     <?php if (empty($backups)): ?>
                         <p class="ocm-local-empty"><?php esc_html_e('No local backups saved yet. Create one above or enable the schedule.', '1-click-migration'); ?></p>
@@ -864,6 +927,7 @@ class OCM_Admin_Page
                     <span class="ocm-card-title"><?php esc_html_e('Activity History', '1-click-migration'); ?></span>
                     <button type="button" class="ocm-btn ocm-btn-ghost ocm-btn-sm" id="ocm-local-clear-activity"<?php echo empty($activity) ? ' hidden' : ''; ?>><?php esc_html_e('Clear history', '1-click-migration'); ?></button>
                 </div>
+                <p class="ocm-local-action-msg" id="ocm-local-activity-msg" role="alert" hidden></p>
                 <div id="ocm-local-activity-list">
                     <?php if (empty($activity)): ?>
                         <p class="ocm-local-empty"><?php esc_html_e('No local backup or restore activity recorded yet.', '1-click-migration'); ?></p>
@@ -957,6 +1021,7 @@ class OCM_Admin_Page
                         </div>
                         <span class="ocm-mini-hint" id="ocm-local-log-note"></span>
                     </div>
+                    <p class="ocm-local-action-msg" id="ocm-local-log-msg" role="alert" hidden></p>
                     <pre class="ocm-local-log-pre" id="ocm-local-log-content"><?php esc_html_e('No local log entries yet.', '1-click-migration'); ?></pre>
                 </div>
             </section>
@@ -970,6 +1035,7 @@ class OCM_Admin_Page
                     <p class="ocm-modal-body" id="ocm-local-restore-summary"></p>
                     <p class="ocm-modal-body"><?php esc_html_e('Select which components from this backup to restore. The database restores safely through temporary staging tables.', '1-click-migration'); ?></p>
                     <div class="ocm-local-restore-parts" id="ocm-local-restore-parts"></div>
+                    <p class="ocm-modal-body ocm-local-restore-caution" id="ocm-local-restore-caution"><?php esc_html_e('The parts you select on your live site are replaced with the copy from this backup. Anything changed since the backup was made will be lost. If you restore the database, you may have to log in again.', '1-click-migration'); ?></p>
                     <p class="ocm-exclusion-warning" id="ocm-local-restore-warning" style="display:none;"><?php esc_html_e('Please select at least one component.', '1-click-migration'); ?></p>
                     <div class="ocm-modal-actions">
                         <button type="button" class="ocm-btn ocm-btn-primary" id="ocm-local-restore-confirm"><?php esc_html_e('Start restore', '1-click-migration'); ?></button>
@@ -989,6 +1055,31 @@ class OCM_Admin_Page
                         <button type="button" class="ocm-btn ocm-btn-primary" id="ocm-local-log-modal-copy"><?php esc_html_e('Copy', '1-click-migration'); ?></button>
                         <button type="button" class="ocm-btn ocm-btn-ghost" data-ocm-local-log-modal-close><?php esc_html_e('Close', '1-click-migration'); ?></button>
                     </div>
+                </div>
+            </div>
+            <!-- One-Time Telemetry Opt-In Modal -->
+            <div id="ocm-local-telemetry-modal" class="ocm-modal" role="dialog" aria-modal="true" aria-labelledby="ocm-local-telemetry-title" hidden>
+                <div class="ocm-modal-backdrop" data-ocm-local-telemetry-decline></div>
+                <div class="ocm-modal-card ocm-local-modal-card">
+                    <button type="button" class="ocm-modal-close" data-ocm-local-telemetry-decline aria-label="<?php esc_attr_e('Close', '1-click-migration'); ?>">&times;</button>
+                    <h2 id="ocm-local-telemetry-title" class="ocm-modal-title"><?php esc_html_e('Help improve Local Backups?', '1-click-migration'); ?></h2>
+                    <p class="ocm-modal-body"><?php esc_html_e('Send an anonymous report when a local backup or restore finishes, fails or crashes. Never your site address, emails or backup contents. Off unless you allow it.', '1-click-migration'); ?></p>
+                    <p class="ocm-modal-body"><?php esc_html_e('You can turn this off anytime under Schedule & Storage settings.', '1-click-migration'); ?></p>
+                    <div class="ocm-modal-actions">
+                        <button type="button" class="ocm-btn ocm-btn-primary" id="ocm-local-telemetry-allow"><?php esc_html_e('Allow & Continue', '1-click-migration'); ?></button>
+                        <button type="button" class="ocm-btn ocm-btn-ghost" id="ocm-local-telemetry-decline"><?php esc_html_e('No thanks', '1-click-migration'); ?></button>
+                    </div>
+                    <details class="ocm-local-telemetry-details">
+                        <summary><?php esc_html_e('What is sent', '1-click-migration'); ?></summary>
+                        <ul class="ocm-local-telemetry-list">
+                            <li><?php esc_html_e('When: once when you turn this on, each time a local backup or restore finishes or fails, when you change the backup schedule, and if the plugin crashes during a local backup or restore.', '1-click-migration'); ?></li>
+                            <li><?php esc_html_e('What: a hashed install ID, whether the backup or restore worked, the parts, a size range, how long it took, whether a schedule is on and how often it runs, your WordPress, PHP and plugin versions, a short error code, and for crashes the plugin file and line.', '1-click-migration'); ?></li>
+                            <li><?php
+                                /* translators: %s: the web address the reports are sent to */
+                                echo esc_html(sprintf(__('Where: %s. Your site\'s IP address reaches our server, as it does with any web request, and is not stored with the reports.', '1-click-migration'), $telemetry_url));
+                            ?></li>
+                        </ul>
+                    </details>
                 </div>
             </div>
         </div><!-- /#ocm-mode-local -->

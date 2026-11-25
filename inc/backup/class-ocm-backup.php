@@ -9009,9 +9009,19 @@ class OCM_Backup
         // index.php aren't treated as plugin directories.
         $plugins = glob(WP_CONTENT_DIR . '/plugins/*', GLOB_ONLYDIR) ?: array();
 
-        // Loop through the list and delete every plugin directory except 1-click-migration
+        // The folder this plugin runs from, whatever it is called (a zip from
+        // GitHub installs as "1-click-migration-master"), plus the standard one.
+        $own_folders = array('1-click-migration');
+        if (defined('OCM_MAIN_FILE')) {
+            $own_folder = dirname(plugin_basename(OCM_MAIN_FILE));
+            if ($own_folder !== '' && $own_folder !== '.' && !in_array($own_folder, $own_folders, true)) {
+                $own_folders[] = $own_folder;
+            }
+        }
+
+        // Loop through the list and delete every plugin directory except this plugin's
         foreach ($plugins as $plugin) {
-            if ($plugin === WP_CONTENT_DIR . '/plugins/1-click-migration') {
+            if (in_array(basename($plugin), $own_folders, true)) {
                 continue;
             }
 
@@ -9028,7 +9038,7 @@ class OCM_Backup
         $restore_plugins_dir = self::get_restore_work_path() . '/plugins';
         $restore_plugins = glob($restore_plugins_dir . '/*', GLOB_ONLYDIR) ?: array();
         foreach ($restore_plugins as $plugin) {
-            if ($plugin === $restore_plugins_dir . '/1-click-migration') {
+            if (in_array(basename($plugin), $own_folders, true)) {
                 continue;
             }
 

@@ -32,6 +32,9 @@ class OCM_Local_Backup
     /** A run record with no action flag older than this is a start that died. */
     const STALE_START_LOCK_AGE = 300;
     const MAX_STEP_RETRIES = 4;
+    // Stop is refused for a restore that already changed the live site while
+    // its worker holds its lock or was heard from within this many seconds.
+    const STOP_FORCE_AFTER = 300;
     const PRISTINE_DUMP_SUFFIX = '.ocm-pristine';
     const MAX_ACTIVITY_ENTRIES = 50;
     const LOG_VIEWER_MAX_BYTES = 262144;
@@ -342,6 +345,10 @@ class OCM_Local_Backup
             $entries = array_slice($entries, 0, self::MAX_ACTIVITY_ENTRIES);
         }
         update_option(self::OPTION_ACTIVITY_LOG, $entries, false);
+
+        if (class_exists(__NAMESPACE__ . '\\OCM_Local_Telemetry')) {
+            OCM_Local_Telemetry::record_operation($clean, isset($entry['error_code']) ? (string) $entry['error_code'] : '');
+        }
     }
 
     /**
@@ -390,6 +397,7 @@ class OCM_Local_Backup
             'started_gmt' => isset($run['started_at']) ? (int) $run['started_at'] : 0,
             'finished_gmt' => time(),
             'message' => $message,
+            'error_code' => isset($extra['error_code']) ? (string) $extra['error_code'] : '',
         ));
     }
 
@@ -599,7 +607,7 @@ class OCM_Local_Backup
                     'label' => $label,
                     'parts' => $included,
                     'started_at' => time(),
-                ), $msg);
+                ), $msg, array('error_code' => 'operation_in_progress'));
             }
             return new WP_Error('operation_in_progress', $msg);
         }
@@ -615,7 +623,7 @@ class OCM_Local_Backup
                 'label' => $label,
                 'parts' => $included,
                 'started_at' => time(),
-            ), $msg);
+            ), $msg, array('error_code' => 'storage_unwritable'));
             return new WP_Error('storage_unwritable', $msg);
         }
 
@@ -676,7 +684,7 @@ class OCM_Local_Backup
             if ($trigger === 'scheduled') {
                 One_Click_Migration::write_to_local_log('Notice: Scheduled local backup skipped — another local backup is starting.');
                 OCM_Local_Scheduler::record_status('skipped', $msg);
-                self::record_run_activity('backup', 'skipped', $run_record, $msg);
+                self::record_run_activity('backup', 'skipped', $run_record, $msg, array('error_code' => 'operation_in_progress'));
             }
             return new WP_Error('operation_in_progress', $msg);
         }
@@ -690,7 +698,7 @@ class OCM_Local_Backup
                 One_Click_Migration::write_to_local_log('Local backup failed: ' . $msg);
                 OCM_Local_Scheduler::record_status('failed', $msg);
             }
-            self::record_run_activity('backup', 'failed', $run_record, $msg);
+            self::record_run_activity('backup', 'failed', $run_record, $msg, array('error_code' => 'storage_unwritable'));
             return new WP_Error('storage_unwritable', $msg);
         }
 
@@ -1453,11 +1461,11 @@ class OCM_Local_Backup
         if (get_option(self::OPTION_RESTORE_PLUGINS_ISOLATED)) {
             return true;
         }
-        if (!empty($steps['db']['promoted'])) {
+        if (!empty($steps['db']['promoted']) || self::db_promote_finished_unrecorded($steps)) {
             return true;
         }
         foreach (array('themes', 'uploads', 'plugins') as $part) {
-            if (!empty($steps[$part]['swapped']) || !empty($steps[$part]['live_cleared'])) {
+            if (!empty($steps[$part]['swapped']) || !empty($steps[$part]['swapping']) || !empty($steps[$part]['live_cleared'])) {
                 return true;
             }
         }
@@ -1588,6 +1596,15 @@ class OCM_Local_Backup
     private static function restore_db_from_workspace($workspace, $backup_id, array $manifest, $worker = null)
     {
         global $wpdb;
+        // A worker that died after the table swap but before it was recorded:
+        // the staging tables are gone because they are the live tables now.
+        if (self::db_promote_finished_unrecorded(get_option(self::OPTION_RESTORE_STEPS, array()))) {
+            One_Click_Migration::write_to_local_log('SYSLOG: The database swap had finished before the previous worker stopped; continuing after it.');
+            delete_option(OCM_SQL_Utils::OPTION_STAGING_PREFIX);
+            One_Click_Migration::write_to_local_log('Database has been restored');
+            return true;
+        }
+
         $dbfiles = rtrim($workspace, '/\\') . '/db/';
         if (!is_dir($dbfiles)) {
             self::fail_restore('Extracted database directory does not exist.');
@@ -1677,6 +1694,9 @@ class OCM_Local_Backup
 
         // Prepare (rewrite prefix inside dumps)
         foreach ($sorted_tables as $filepath) {
+            if (self::restore_run_ended()) {
+                return false;
+            }
             $dump = basename($filepath);
             if (!empty($state['prepared'][$dump])) {
                 if (is_file($filepath . self::PRISTINE_DUMP_SUFFIX)) {
@@ -1710,6 +1730,9 @@ class OCM_Local_Backup
             $dump = basename($filepath);
             if (!empty($state['imported'][$dump])) {
                 continue;
+            }
+            if (self::restore_run_ended()) {
+                return false;
             }
             if (!OCM_SQL_Utils::import($filepath, $source_prefix, $staging_prefix)) {
                 OCM_SQL_Utils::drop_tables_with_prefix($staging_prefix);
@@ -1753,35 +1776,32 @@ class OCM_Local_Backup
         // URL rewrite only when the site's primary URL changed since backup.
         if (empty($state['url_done'])) {
             $old_url = isset($state['site_url']) ? (string) $state['site_url'] : '';
-            if ($old_url === '' || $old_url === $current_url) {
-                One_Click_Migration::write_to_local_log('SYSLOG: Source and destination site URLs match; skipping URL rewrite.');
-            } else {
-                $db_tool = new OCM_DB();
-                $all_tables = OCM_DB::get_tables();
-                $staging_tables = array();
-                foreach (is_array($all_tables) ? $all_tables : array() as $t) {
-                    if (is_string($t) && strpos($t, $staging_prefix) === 0) {
-                        $staging_tables[] = $t;
-                    }
-                }
-                if (!empty($staging_tables)) {
-                    $result = $db_tool->search_replace_db($staging_tables, array(
-                        'search' => $old_url,
-                        'replace' => $current_url,
-                        'log_summary' => false,
-                    ));
-                    if (!empty($result['errors']) || !empty($result['unpageable_table']) || !empty($result['oversized_table']) || !empty($result['paging_stuck_table'])) {
-                        OCM_SQL_Utils::drop_tables_with_prefix($staging_prefix);
-                        self::stop_restore_no_change('Local restore stopped while updating URLs on staging tables. No changes were made.');
-                        return false;
-                    }
-                }
-                One_Click_Migration::write_to_local_log('SYSLOG: Finished updating URLs in the database');
+            $url_result = self::rewrite_urls_on_staging($staging_prefix, $old_url, $current_url, $sorted_tables, $state, $steps, $worker);
+            if ($url_result === 'yield') {
+                return 'yield';
+            }
+            if ($url_result === 'ended') {
+                return false;
+            }
+            if ($url_result !== true) {
+                OCM_SQL_Utils::drop_tables_with_prefix($staging_prefix);
+                self::stop_restore_no_change('Local restore stopped while updating URLs on staging tables. No changes were made.');
+                return false;
             }
             $state['url_done'] = true;
             $steps['db']['dbImport'] = $state;
             update_option(self::OPTION_RESTORE_STEPS, $steps, false);
         }
+
+        // The swap below is the point of no return for the database. Record
+        // that it is starting: a worker that dies inside it must not be
+        // reported later as "No changes were made", and Stop is refused from
+        // here on.
+        if (self::restore_run_ended()) {
+            return false;
+        }
+        $steps['db']['promoting'] = true;
+        update_option(self::OPTION_RESTORE_STEPS, $steps, false);
 
         // Promote staging tables atomically (preserves all ocm_* / ocm_local_* options and cron).
         $review_options = OCM_Backup::snapshot_destination_review_options($wpdb);
@@ -1796,8 +1816,247 @@ class OCM_Local_Backup
         return true;
     }
 
+    /**
+     * Whether the atomic table swap completed without being recorded: it was
+     * started ('promoting'), is not marked done, and no staging table is left.
+     *
+     * @param mixed $steps OPTION_RESTORE_STEPS.
+     * @return bool
+     */
+    private static function db_promote_finished_unrecorded($steps)
+    {
+        if (!is_array($steps) || empty($steps['db']['promoting']) || !empty($steps['db']['promoted'])) {
+            return false;
+        }
+        $prefix = isset($steps['db']['dbImport']['prefix']) ? (string) $steps['db']['dbImport']['prefix'] : '';
+        if ($prefix === '') {
+            return false;
+        }
+        $tables = OCM_DB::get_tables();
+        if (!is_array($tables) || !$tables) {
+            // Unknown: never claim the swap happened without seeing the tables.
+            return false;
+        }
+        foreach ($tables as $table) {
+            if (is_string($table) && strpos($table, $prefix) === 0) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * Rewrite the backup's site address to this site's on the staging tables.
+     * One table at a time, with a checkpoint after each and a keyset position
+     * when the worker runs out of time inside one, so a large database is
+     * spread over several workers. A table a worker died in is imported again
+     * from its dump first: a second pass over rows that were already
+     * rewritten is not always safe (a new address can contain the old one).
+     *
+     * @param string      $staging_prefix
+     * @param string      $old_url
+     * @param string      $current_url
+     * @param string[]    $dump_files Full paths of the staged dumps.
+     * @param array       $state      dbImport state; url_progress is updated.
+     * @param array       $steps      OPTION_RESTORE_STEPS; saved at checkpoints.
+     * @param object|null $worker
+     * @return bool|string True when done, false on error, 'yield' to hand over,
+     *                     'ended' when the run was stopped from outside.
+     */
+    private static function rewrite_urls_on_staging($staging_prefix, $old_url, $current_url, array $dump_files, array &$state, array &$steps, $worker = null)
+    {
+        global $wpdb;
+        $pairs = ($old_url === '' || $old_url === $current_url)
+            ? array()
+            : OCM_Extra_Domains::primary_replacement_pairs($old_url, $current_url);
+        if (!$pairs) {
+            One_Click_Migration::write_to_local_log('SYSLOG: Source and destination site URLs match; skipping URL rewrite.');
+            return true;
+        }
+
+        $all_tables = OCM_DB::get_tables();
+        $staging_tables = array();
+        foreach (is_array($all_tables) ? $all_tables : array() as $t) {
+            if (is_string($t) && strpos($t, $staging_prefix) === 0) {
+                $staging_tables[] = $t;
+            }
+        }
+        if (!$staging_tables) {
+            return true;
+        }
+
+        $progress = isset($state['url_progress']) && is_array($state['url_progress']) ? $state['url_progress'] : array();
+        $progress += array('done' => array(), 'table' => null, 'last_key' => null, 'clean' => true, 'updates' => 0);
+        if (!is_array($progress['done'])) {
+            $progress['done'] = array();
+        }
+        $started = $progress['done'] || $progress['table'] !== null;
+
+        $save = static function () use (&$state, &$steps, &$progress) {
+            $state['url_progress'] = $progress;
+            $steps['db']['dbImport'] = $state;
+            update_option(OCM_Local_Backup::OPTION_RESTORE_STEPS, $steps, false);
+        };
+        $out_of_time = static function () use ($worker) {
+            return is_object($worker) && method_exists($worker, 'has_batch_clock')
+                && $worker->has_batch_clock() && $worker->time_exceeded();
+        };
+
+        // Finish the table the last worker was in first: its position is only
+        // kept until the next table starts.
+        $in_progress = array_search($progress['table'], $staging_tables, true);
+        if ($in_progress !== false) {
+            unset($staging_tables[$in_progress]);
+            array_unshift($staging_tables, $progress['table']);
+        } elseif ($progress['table'] !== null) {
+            One_Click_Migration::write_to_local_log(sprintf(
+                'Error: Could not resume the URL update: staging table "%s" is gone.',
+                $progress['table']
+            ));
+            return false;
+        }
+
+        $db_tool = new OCM_DB();
+        foreach ($staging_tables as $table) {
+            if (!empty($progress['done'][$table])) {
+                continue;
+            }
+            if (self::restore_run_ended()) {
+                return 'ended';
+            }
+
+            $resume_key = null;
+            if ($progress['table'] === $table) {
+                if (empty($progress['clean'])) {
+                    if (!self::reimport_staging_table_for_url_update($table, $dump_files, $state, $current_url)) {
+                        return false;
+                    }
+                } else {
+                    $resume_key = is_array($progress['last_key']) ? $progress['last_key'] : null;
+                }
+            }
+            $progress['table'] = $table;
+            $progress['last_key'] = $resume_key;
+            $progress['clean'] = false;
+            $save();
+
+            $result = $db_tool->search_replace_db(array($table), array(
+                'pairs' => $pairs,
+                'continuing' => $started,
+                'log_summary' => false,
+                'resume_key' => $resume_key,
+                'should_yield' => $out_of_time,
+            ));
+            $started = true;
+            if (!is_array($result) || !empty($result['errors']) || !empty($result['unpageable_table'])
+                || !empty($result['oversized_table']) || !empty($result['paging_stuck_table'])
+            ) {
+                return false;
+            }
+            $progress['updates'] += isset($result['updates']) ? (int) $result['updates'] : 0;
+
+            if (!empty($result['yielded'])) {
+                $progress['last_key'] = isset($result['cursor']['last_key']) ? $result['cursor']['last_key'] : null;
+                $progress['clean'] = true;
+                $save();
+                One_Click_Migration::worker_heartbeat();
+                if (is_object($worker) && method_exists($worker, 'restart_task')) {
+                    $worker->restart_task();
+                }
+                return 'yield';
+            }
+
+            $progress['done'][$table] = true;
+            $progress['table'] = null;
+            $progress['last_key'] = null;
+            $progress['clean'] = true;
+            $save();
+            One_Click_Migration::worker_heartbeat();
+
+            if ($out_of_time() && count($progress['done']) < count($staging_tables)) {
+                if (is_object($worker) && method_exists($worker, 'restart_task')) {
+                    $worker->restart_task();
+                }
+                return 'yield';
+            }
+        }
+
+        One_Click_Migration::write_to_local_log(sprintf('SYSLOG: Number of updates made from replace "%d"', (int) $progress['updates']));
+        One_Click_Migration::write_to_local_log('SYSLOG: Finished updating URLs in the database');
+        return true;
+    }
+
+    /**
+     * Import the dump behind one staging table again (see rewrite_urls_on_staging).
+     *
+     * @param string   $table
+     * @param string[] $dump_files
+     * @param array    $state
+     * @param string   $current_url
+     * @return bool
+     */
+    private static function reimport_staging_table_for_url_update($table, array $dump_files, array $state, $current_url)
+    {
+        global $wpdb;
+        $source_prefix = isset($state['source_prefix']) ? (string) $state['source_prefix'] : '';
+        $staging_prefix = isset($state['prefix']) ? (string) $state['prefix'] : '';
+        foreach ($dump_files as $filepath) {
+            if (OCM_Backup::staged_table_for_dump($filepath, $source_prefix, $wpdb->base_prefix, $staging_prefix) !== $table) {
+                continue;
+            }
+            $wpdb->query('DROP TABLE IF EXISTS `' . str_replace('`', '``', $table) . '`');
+            if (!OCM_SQL_Utils::import($filepath, $source_prefix, $staging_prefix)) {
+                One_Click_Migration::write_to_local_log(sprintf(
+                    'Error: Could not import "%s" again after an interrupted URL update.',
+                    basename($filepath)
+                ));
+                return false;
+            }
+            if (basename($filepath) === $source_prefix . 'options.sql'
+                && !OCM_Backup::verify_staged_main_options($wpdb, $source_prefix, $staging_prefix, $current_url)
+            ) {
+                return false;
+            }
+            One_Click_Migration::write_to_local_log(sprintf(
+                'SYSLOG: Imported "%s" again: a worker was cut off while updating its URLs.',
+                basename($filepath)
+            ));
+            return true;
+        }
+        One_Click_Migration::write_to_local_log(sprintf(
+            'Error: Could not find the dump behind staging table "%s" to import it again after an interrupted URL update.',
+            $table
+        ));
+        return false;
+    }
+
+    /**
+     * Folder names under wp-content/plugins that are this plugin and must
+     * never be deleted or replaced by a restore: the folder it is running
+     * from, whatever it is called, and the standard one.
+     *
+     * @return string[]
+     */
+    private static function own_plugin_folders()
+    {
+        $folders = array('1-click-migration');
+        if (defined('OCM_MAIN_FILE')) {
+            $own = dirname(plugin_basename(OCM_MAIN_FILE));
+            if ($own !== '' && $own !== '.' && !in_array($own, $folders, true)) {
+                $folders[] = $own;
+            }
+        }
+        return $folders;
+    }
+
     private static function apply_file_swaps($workspace, array $selected_parts, $backup_id, array $manifest, $worker = null)
     {
+        // A run stopped from outside (Stop, Stop & Reset, deactivation) has had
+        // its workspace deleted: touching the live folders now would remove
+        // them with nothing left to put back.
+        if (self::restore_run_ended()) {
+            return false;
+        }
         self::isolate_plugins_for_restore();
 
         $steps = get_option(self::OPTION_RESTORE_STEPS, array());
@@ -1811,6 +2070,9 @@ class OCM_Local_Backup
             }
             if (!empty($steps[$part]['swapped'])) {
                 continue;
+            }
+            if (self::restore_run_ended()) {
+                return false;
             }
             $extract_path = rtrim($workspace, '/\\') . '/' . $part;
             if (!is_dir($extract_path)) {
@@ -1827,6 +2089,9 @@ class OCM_Local_Backup
             }
 
             $dest = WP_CONTENT_DIR . '/' . $part;
+            // From here the live folder is being replaced: Stop is refused.
+            $steps[$part]['swapping'] = true;
+            update_option(self::OPTION_RESTORE_STEPS, $steps, false);
             One_Click_Migration::write_to_local_log(sprintf('Restoring "%s" to directory "%s"', ucfirst($part), $dest));
             if (!OCM_Backup::replaceDirectoryFromExtract($extract_path, $dest, $part)) {
                 self::restore_isolated_plugins();
@@ -1844,11 +2109,20 @@ class OCM_Local_Backup
                 // Restored folders are moved out of the workspace, so the live
                 // folders are cleared once only: a worker resuming after the
                 // moves began must not delete what is already restored.
+                $own_folders = self::own_plugin_folders();
                 if (empty($steps['plugins']['live_cleared'])) {
+                    if (self::restore_run_ended()) {
+                        return false;
+                    }
+                    // Recorded before the first folder goes, so Stop is
+                    // refused from here and a worker resuming after a crash
+                    // in the loop below does not clear restored folders.
+                    $steps['plugins']['swapping'] = true;
+                    update_option(self::OPTION_RESTORE_STEPS, $steps, false);
                     $live_plugins = glob(WP_CONTENT_DIR . '/plugins/*', GLOB_ONLYDIR);
                     if (is_array($live_plugins)) {
                         foreach ($live_plugins as $plugin_dir) {
-                            if (basename($plugin_dir) === '1-click-migration') {
+                            if (in_array(basename($plugin_dir), $own_folders, true)) {
                                 continue;
                             }
                             OCM_Backup::deleteDirectoryBestEffort($plugin_dir);
@@ -1861,8 +2135,11 @@ class OCM_Local_Backup
                 if (is_array($extracted_plugins)) {
                     foreach ($extracted_plugins as $plugin_dir) {
                         $plugin_name = basename($plugin_dir);
-                        if ($plugin_name === '1-click-migration') {
+                        if (in_array($plugin_name, $own_folders, true)) {
                             continue;
+                        }
+                        if (self::restore_run_ended()) {
+                            return false;
                         }
                         $target = WP_CONTENT_DIR . '/plugins/' . $plugin_name;
                         if (!OCM_Backup::replaceDirectoryFromExtract($plugin_dir, $target, 'plugin ' . $plugin_name)) {
@@ -1989,6 +2266,9 @@ class OCM_Local_Backup
 
     private static function stop_restore_no_change($message)
     {
+        if (self::is_stale_restore_caller('stop', $message)) {
+            return OCM_BackgroundLocalRestore::RETURN_TYPE_STOP_PROCESS;
+        }
         if (function_exists('wp_cache_delete')) {
             wp_cache_delete(self::OPTION_ACTIVE_RESTORE_RUN, 'options');
         }
@@ -2013,8 +2293,35 @@ class OCM_Local_Backup
         return OCM_BackgroundLocalRestore::RETURN_TYPE_STOP_PROCESS;
     }
 
+    /**
+     * A worker left over from a restore that was stopped (or replaced by a new
+     * one) fails once its workspace and staging tables are gone. It must not
+     * end the run that replaced it, drop that run's staging tables or switch
+     * maintenance mode off under it.
+     *
+     * @param string $kind
+     * @param string $message
+     * @return bool True when the caller belongs to a run that is no longer current.
+     */
+    private static function is_stale_restore_caller($kind, $message)
+    {
+        if (self::$restore_run_id === '' || self::is_current_restore_run(self::$restore_run_id)) {
+            return false;
+        }
+        self::$restore_run_ended = true;
+        One_Click_Migration::write_to_local_log(sprintf(
+            ' SYSLOG: Ignoring %s from a local restore run that is no longer current: %s',
+            $kind === 'stop' ? 'a stop' : 'a failure',
+            $message
+        ));
+        return true;
+    }
+
     public static function fail_restore($message)
     {
+        if (self::is_stale_restore_caller('fail', $message)) {
+            return OCM_BackgroundLocalRestore::RETURN_TYPE_STOP_PROCESS;
+        }
         if (function_exists('wp_cache_delete')) {
             wp_cache_delete(self::OPTION_ACTIVE_RESTORE_RUN, 'options');
         }
@@ -2178,11 +2485,29 @@ class OCM_Local_Backup
             // Queue drained without completing — mark stopped cleanly.
             $orphan_run = get_option($restore_active ? self::OPTION_ACTIVE_RESTORE_RUN : self::OPTION_ACTIVE_BACKUP_RUN, array());
             $orphan_msg = 'Local operation stopped unexpectedly because no queued work remained.';
+            if ($restore_active) {
+                $orphan_steps = get_option(self::OPTION_RESTORE_STEPS, array());
+                if (is_array($orphan_steps) && self::restore_changed_live_site($orphan_steps)) {
+                    $orphan_msg .= ' Part of this backup is already restored; start the restore again to finish it.';
+                }
+            }
             One_Click_Migration::write_to_local_log('Error: ' . $orphan_msg);
             update_option(self::OPTION_ACTION_BACKUP, false, false);
             update_option(self::OPTION_ACTION_RESTORE, false, false);
             update_option(self::OPTION_IS_STOPPED, true, false);
             One_Click_Migration::disable_maintenance_mode();
+            // A dead restore leaves a full copy of the database in staging
+            // tables and plaintext SQL dumps in its workspace; a dead backup
+            // leaves its half-written archive folder.
+            if ($restore_active) {
+                global $wpdb;
+                if (isset($wpdb) && is_object($wpdb)) {
+                    OCM_SQL_Utils::drop_stale_temp_tables($wpdb, null, isset($wpdb->base_prefix) ? $wpdb->base_prefix : null);
+                }
+                self::cleanup_restore_workspaces();
+            } else {
+                OCM_Local_Storage::cleanup_stale_staging_dirs();
+            }
             self::delete_runtime_options();
             self::record_run_activity(
                 $restore_active ? 'restore' : 'backup',
@@ -2317,7 +2642,8 @@ class OCM_Local_Backup
         }
 
         return array(
-            'text' => esc_html($last_visible),
+            // Raw text: the admin page and the script escape it where they print it.
+            'text' => $last_visible,
             'value' => $last_pct,
             'action' => $action,
             'active' => ($action !== ''),
@@ -2332,18 +2658,59 @@ class OCM_Local_Backup
      * Cancel and reset any in-progress local backup or restore without deleting
      * completed local backups or user settings.
      *
-     * @return void
+     * A restore that has already replaced live tables or folders is not
+     * stopped while its worker is alive: stopping there deletes the workspace
+     * holding the rest of the backup and leaves the site half restored. It
+     * finishes on its own, or the stall guard in process_restore() ends it.
+     * Once the worker has been silent for STOP_FORCE_AFTER seconds the stop
+     * goes through, and says that part of the backup is already in place.
+     *
+     * @return true|WP_Error WP_Error 'restore_cannot_stop' when refused.
      */
     public static function cancel_and_reset()
     {
+        foreach (array(self::OPTION_ACTION_RESTORE, self::OPTION_ACTION_BACKUP, self::OPTION_RESTORE_STEPS, self::OPTION_WORKER_HEARTBEAT) as $fresh) {
+            if (function_exists('wp_cache_delete')) {
+                wp_cache_delete($fresh, 'options');
+            }
+        }
         $was_restore = (bool) get_option(self::OPTION_ACTION_RESTORE);
         $was_backup = (bool) get_option(self::OPTION_ACTION_BACKUP);
         $active_run = $was_restore
             ? get_option(self::OPTION_ACTIVE_RESTORE_RUN, array())
             : ($was_backup ? get_option(self::OPTION_ACTIVE_BACKUP_RUN, array()) : array());
 
-        One_Click_Migration::run_in_local_log(static function () {
+        $partly_restored = false;
+        if ($was_restore) {
+            $steps = get_option(self::OPTION_RESTORE_STEPS, array());
+            $partly_restored = is_array($steps) && self::restore_changed_live_site($steps);
+            if ($partly_restored) {
+                $heartbeat = (int) get_option(self::OPTION_WORKER_HEARTBEAT, 0);
+                $worker_alive = OCM_BackgroundLocalRestore::is_worker_file_lock_held()
+                    || ($heartbeat > 0 && (time() - $heartbeat) < self::STOP_FORCE_AFTER);
+                if ($worker_alive) {
+                    return new WP_Error(
+                        'restore_cannot_stop',
+                        __('This restore has already replaced part of your site, so stopping it now would leave the site half restored. It will finish on its own. If it cannot finish, it stops by itself and tells you what to do next.', '1-click-migration')
+                    );
+                }
+            }
+        }
+
+        // The run record goes first, so a worker that is still alive sees at
+        // its next check that the run ended and touches nothing more.
+        delete_option(self::OPTION_ACTIVE_RESTORE_RUN);
+        delete_option(self::OPTION_ACTIVE_BACKUP_RUN);
+        if (function_exists('wp_cache_delete')) {
+            wp_cache_delete(self::OPTION_ACTIVE_RESTORE_RUN, 'options');
+            wp_cache_delete(self::OPTION_ACTIVE_BACKUP_RUN, 'options');
+        }
+
+        One_Click_Migration::run_in_local_log(static function () use ($partly_restored) {
             One_Click_Migration::write_to_local_log('Local operation cancelled by user.');
+            if ($partly_restored) {
+                One_Click_Migration::write_to_local_log('Local restore stopped after part of this backup was already restored. Start the restore again to finish it.');
+            }
             if (get_option('ocm_maintenance_mode', false)) {
                 One_Click_Migration::disable_maintenance_mode();
             }
@@ -2383,9 +2750,12 @@ class OCM_Local_Backup
                 $was_restore ? 'restore' : 'backup',
                 'cancelled',
                 is_array($active_run) ? $active_run : array(),
-                __('Cancelled by user.', '1-click-migration')
+                $partly_restored
+                    ? __('Stopped by user after part of the backup was already restored. Start the restore again to finish it.', '1-click-migration')
+                    : __('Cancelled by user.', '1-click-migration')
             );
         }
+        return true;
     }
 
     // -------------------------------------------------------------------------
@@ -2477,6 +2847,18 @@ class OCM_Local_Backup
         // If user reduced keep_last, prune old backups now (never while a restore is active).
         OCM_Local_Storage::prune_backups($storage['keep_last'], self::active_restore_backup_id());
 
+        if (class_exists(__NAMESPACE__ . '\\OCM_Local_Telemetry')) {
+            if (isset($_POST['telemetry_enabled'])) {
+                $want_telemetry = !empty($_POST['telemetry_enabled']);
+                if ($want_telemetry) {
+                    OCM_Local_Telemetry::set_consent(OCM_Local_Telemetry::CONSENT_OPTED_IN);
+                } elseif (OCM_Local_Telemetry::is_opted_in()) {
+                    OCM_Local_Telemetry::set_consent(OCM_Local_Telemetry::CONSENT_DECLINED);
+                }
+            }
+            OCM_Local_Telemetry::record_schedule_change($schedule);
+        }
+
         $next_ts = OCM_Local_Scheduler::next_scheduled_timestamp();
         wp_send_json_success(array(
             'schedule' => $schedule,
@@ -2485,6 +2867,7 @@ class OCM_Local_Backup
             'next_run_ts' => $next_ts,
             'next_run_formatted' => OCM_Local_Scheduler::format_timestamp($next_ts),
             'status' => OCM_Local_Scheduler::get_status(),
+            'telemetry_opted_in' => class_exists(__NAMESPACE__ . '\\OCM_Local_Telemetry') ? OCM_Local_Telemetry::is_opted_in() : false,
         ));
     }
 
@@ -2583,7 +2966,13 @@ class OCM_Local_Backup
         }
         check_ajax_referer('ocm_local_cancel', 'nonce');
 
-        self::cancel_and_reset();
+        $cancelled = self::cancel_and_reset();
+        if (is_wp_error($cancelled)) {
+            wp_send_json_error(array(
+                'code' => $cancelled->get_error_code(),
+                'message' => $cancelled->get_error_message(),
+            ), 409);
+        }
         wp_send_json_success(array('cancelled' => true));
     }
 }
