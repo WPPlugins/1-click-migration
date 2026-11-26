@@ -11,6 +11,8 @@ use WP_Error;
 use wpdb;
 use ZipArchive;
 
+require_once __DIR__ . '/../handler/class-ocm-ca-bundle.php';
+
 class OCM_Backup
 {
     /** @var bool A selected archive backend ran and failed; do not retry via another huge-tree backend. */
@@ -5805,6 +5807,7 @@ class OCM_Backup
 
         $content_range = '';
         $ch = curl_init($url);
+        OCM_CA_Bundle::curl($ch);
         curl_setopt($ch, CURLOPT_RANGE, '0-0');
         curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
         curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true);
@@ -5918,6 +5921,7 @@ class OCM_Backup
 
         $before = $offset;
         $ch = curl_init($url);
+        OCM_CA_Bundle::curl($ch);
         curl_setopt($ch, CURLOPT_FILE, $handle);
         curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true);
         curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 15);

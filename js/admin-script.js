@@ -1085,16 +1085,781 @@
     var LOCAL_POLL_MAX_ERRORS = 8;
     var localReloadId = null;
 
+    // ------------------------------------------------------------------
+    // Search & Replace
+    // ------------------------------------------------------------------
+    var srPreviewKey = '';      // the inputs the last finished preview ran with
+    var srPreviewRows = 0;
+    var srPreviewSiteAddress = false;
+    var srPreviewEpoch = 0;
+    var SR_SAMPLE_LIMIT = 20;
+
+    function srNonce() {
+        return (typeof siteData !== 'undefined' && siteData.srNonce) || '';
+    }
+
+    function srInput() {
+        var tables = [];
+        $('input[data-ocm-sr-table]:checked').each(function () {
+            tables.push($(this).attr('data-ocm-sr-table'));
+        });
+        return {
+            search: String($('#ocm-sr-search').val() || ''),
+            replace: String($('#ocm-sr-replace').val() || ''),
+            tables: tables,
+            match_case: $('#ocm-sr-match-case').is(':checked') ? '1' : '0',
+            skip_guid: $('#ocm-sr-skip-guid').is(':checked') ? '1' : '0'
+        };
+    }
+
+    function srKey(input) {
+        return JSON.stringify([input.search, input.replace, input.tables, input.match_case, input.skip_guid]);
+    }
+
+    function srValidate(input) {
+        if (Array.from(input.search).length < 3) {
+            return t('srNeedSearch');
+        }
+        if (!input.tables.length) {
+            return t('srNeedTables');
+        }
+        var same = input.match_case === '1'
+            ? input.search === input.replace
+            : input.search.toLowerCase() === input.replace.toLowerCase();
+        return same ? t('srSameText') : '';
+    }
+
+    function srSetMsg(text) {
+        $('#ocm-sr-msg').text(text || '').prop('hidden', !text);
+    }
+
+    function srUpdateTablesCount() {
+        var all = $('input[data-ocm-sr-table]').length;
+        var on = $('input[data-ocm-sr-table]:checked').length;
+        $('#ocm-sr-tables-count').text(fmt(t('srTablesCount'), on, all));
+    }
+
+    function srSyncReplaceButton() {
+        var ready = srPreviewKey !== '' && srPreviewKey === srKey(srInput()) && srPreviewRows > 0;
+        $('#ocm-sr-btn-replace').prop('disabled', !ready);
+    }
+
+    function srSetFormBusy(busy) {
+        $('#ocm-sr-form-card').find('input, button').prop('disabled', !!busy);
+        if (!busy) {
+            srSyncReplaceButton();
+        }
+    }
+
+    function srShowProgress(pct, text, state) {
+        showRunProgress('sr', pct, text, state);
+    }
+
+    function srCountsTable(counts) {
+        var names = Object.keys(counts || {}).sort();
+        if (!names.length) {
+            return '';
+        }
+        var html = '<div class="ocm-local-table-wrap"><table class="ocm-local-table ocm-sr-counts"><thead><tr>'
+            + '<th>' + escHtml(t('srTableCol')) + '</th><th>' + escHtml(t('srRowsCol')) + '</th></tr></thead><tbody>';
+        names.forEach(function (name) {
+            html += '<tr><td><code>' + escHtml(name) + '</code></td><td>' + escHtml(String(counts[name].rows || 0)) + '</td></tr>';
+        });
+        return html + '</tbody></table></div>';
+    }
+
+    function srTotalRows(counts) {
+        var total = 0;
+        Object.keys(counts || {}).forEach(function (name) {
+            total += parseInt(counts[name].rows, 10) || 0;
+        });
+        return total;
+    }
+
+    function srWarningsHtml(warnings) {
+        if (!warnings || !warnings.length) {
+            return '';
+        }
+        return '<div class="ocm-sr-warnings"><strong>' + escHtml(t('srWarnings')) + '</strong><ul>'
+            + warnings.map(function (w) { return '<li>' + escHtml(w) + '</li>'; }).join('') + '</ul></div>';
+    }
+
+    function srRenderPreview(counts, samples, siteAddress, warnings) {
+        var rows = srTotalRows(counts);
+        var tables = Object.keys(counts).length;
+        $('#ocm-sr-result-title').text(t('srPreviewTitle'));
+        $('#ocm-sr-result-hint').text('');
+        if (!rows) {
+            $('#ocm-sr-result-body').html('<p class="ocm-local-empty">' + escHtml(t('srPreviewNone')) + '</p>' + srWarningsHtml(warnings));
+            return;
+        }
+        var html = '<p class="ocm-sr-summary"><strong>' + escHtml(fmt(t('srPreviewSummary'), rows.toLocaleString(), tables)) + '</strong></p>';
+        if (siteAddress) {
+            html += '<p class="ocm-sr-site-warn">' + escHtml(t('srSiteAddressWarn')) + '</p>';
+        }
+        html += srCountsTable(counts) + srWarningsHtml(warnings);
+        if (samples.length) {
+            html += '<div class="ocm-sr-samples"><div class="ocm-label">' + escHtml(t('srSamplesTitle')) + '</div>';
+            samples.forEach(function (sm) {
+                html += '<div class="ocm-sr-sample"><div class="ocm-sr-sample-where"><code>' + escHtml(sm.table) + '.' + escHtml(sm.column) + '</code></div>'
+                    + '<div class="ocm-sr-before"><span>' + escHtml(t('srBefore')) + '</span>' + escHtml(sm.before) + '</div>'
+                    + '<div class="ocm-sr-after"><span>' + escHtml(t('srAfter')) + '</span>' + escHtml(sm.after) + '</div></div>';
+            });
+            html += '</div>';
+        }
+        $('#ocm-sr-result-body').html(html);
+    }
+
+    function srRequestError(xhrOrResponse) {
+        return runRequestError(xhrOrResponse);
+    }
+
+    function srPreview() {
+        var input = srInput();
+        var problem = srValidate(input);
+        srSetMsg(problem);
+        if (problem) {
+            return;
+        }
+        var epoch = ++srPreviewEpoch;
+        var key = srKey(input);
+        var counts = {};
+        var samples = [];
+        var warnings = [];
+        var objectsSkipped = 0;
+        var siteAddress = false;
+        srPreviewKey = '';
+        srPreviewRows = 0;
+        srSetFormBusy(true);
+        $('#ocm-sr-result-title').text(t('srPreviewTitle'));
+        $('#ocm-sr-result-body').empty();
+        srShowProgress(0, t('srPreviewing'), 'running');
+
+        function step(tableIndex, lastKey) {
+            $.post(siteData.ajaxurl, $.extend({}, input, {
+                action: 'ocm_sr_preview',
+                nonce: srNonce(),
+                table_index: tableIndex,
+                last_key: lastKey ? JSON.stringify(lastKey) : '',
+                samples_left: Math.max(0, SR_SAMPLE_LIMIT - samples.length)
+            })).done(function (response) {
+                if (epoch !== srPreviewEpoch) {
+                    return;
+                }
+                if (!response || !response.success) {
+                    srSetFormBusy(false);
+                    $('#ocm-sr-progress').prop('hidden', true);
+                    srSetMsg(localAjaxMessage(response) || t('srConnectionLost'));
+                    return;
+                }
+                var d = response.data || {};
+                Object.keys(d.counts || {}).forEach(function (name) {
+                    if (!counts[name]) {
+                        counts[name] = { rows: 0, cells: 0 };
+                    }
+                    counts[name].rows += parseInt(d.counts[name].rows, 10) || 0;
+                    counts[name].cells += parseInt(d.counts[name].cells, 10) || 0;
+                });
+                (d.samples || []).forEach(function (sm) {
+                    if (samples.length < SR_SAMPLE_LIMIT) {
+                        samples.push(sm);
+                    }
+                });
+                if (d.warning) {
+                    warnings.push(d.warning);
+                }
+                objectsSkipped += parseInt(d.objects_skipped, 10) || 0;
+                siteAddress = siteAddress || !!d.site_address;
+                srShowProgress(d.progress || 0, t('srPreviewing'), 'running');
+                if (!d.done) {
+                    step(d.table_index, d.last_key);
+                    return;
+                }
+                $('#ocm-sr-progress').prop('hidden', true);
+                if (objectsSkipped > 0) {
+                    // Text inside stored objects is never changed; say how many values keep it.
+                    warnings.push(fmt(t(objectsSkipped === 1 ? 'srObjectsSkippedOne' : 'srObjectsSkippedMany'), objectsSkipped.toLocaleString()));
+                }
+                srPreviewKey = key;
+                srPreviewRows = srTotalRows(counts);
+                srPreviewSiteAddress = siteAddress;
+                srSetFormBusy(false);
+                srRenderPreview(counts, samples, siteAddress, warnings);
+            }).fail(function (xhr) {
+                if (epoch !== srPreviewEpoch) {
+                    return;
+                }
+                srSetFormBusy(false);
+                $('#ocm-sr-progress').prop('hidden', true);
+                srSetMsg(srRequestError(xhr));
+            });
+        }
+        step(0, null);
+    }
+
+    function srStartReplace() {
+        var input = srInput();
+        if (srPreviewKey === '' || srPreviewKey !== srKey(input)) {
+            srSetMsg(t('srPreviewStale'));
+            srSyncReplaceButton();
+            return;
+        }
+        var question = fmt(t('srConfirm'), input.search, input.replace, srPreviewRows.toLocaleString());
+        if (srPreviewSiteAddress) {
+            question += '\n\n' + t('srSiteAddressWarn');
+        }
+        if (typeof window.confirm === 'function' && !window.confirm(question)) {
+            return;
+        }
+        srSetMsg('');
+        srSetFormBusy(true);
+        $.post(siteData.ajaxurl, $.extend({}, input, { action: 'ocm_sr_start', nonce: srNonce() }))
+            .done(function (response) {
+                if (!response || !response.success) {
+                    srSetFormBusy(false);
+                    srSetMsg(localAjaxMessage(response) || t('srConnectionLost'));
+                    return;
+                }
+                srPreviewKey = '';
+                srRenderRun(response.data);
+            })
+            .fail(function (xhr) {
+                srSetFormBusy(false);
+                srSetMsg(srRequestError(xhr));
+            });
+    }
+
+    // ------------------------------------------------------------------
+    // A database change with a backup first and Undo (Search & Replace,
+    // Site Cleanup): the run card, the step loop, Stop, Undo and Done.
+    // cfg: prefix ('sr' | 'cl', the element ids are #ocm-<prefix>-…),
+    // actions {step, stop, undo, dismiss}, nonce(), working (the state while
+    // it changes the database), runTitle, workingText(run), body(run) -> html,
+    // stopConfirm, setFormBusy(busy), setMsg(text), onEnded(run), onDismiss().
+    // ------------------------------------------------------------------
+    function showRunProgress(prefix, pct, text, state) {
+        var $fill = $('#ocm-' + prefix + '-pg-fill');
+        $('#ocm-' + prefix + '-progress').prop('hidden', false);
+        $fill.css('width', Math.max(0, Math.min(100, pct)) + '%')
+            .toggleClass('running', state === 'running')
+            .toggleClass('ocm-pg-done', state === 'done')
+            .toggleClass('ocm-pg-failed', state === 'failed');
+        $('#ocm-' + prefix + '-pg-status').text(text || '');
+    }
+
+    // WordPress refused the request because the admin is no longer signed in
+    // ("0", status 400) or the page's security token expired ("-1", 403).
+    // Retrying can't help; only reloading the page (and signing in) can.
+    function runSessionExpired(xhrOrResponse) {
+        if (!xhrOrResponse || localAjaxMessage(xhrOrResponse)) {
+            return false;
+        }
+        var status = parseInt(xhrOrResponse.status, 10) || 0;
+        var body = typeof xhrOrResponse.responseText === 'string' ? xhrOrResponse.responseText.trim() : null;
+        return status === 401 || status === 403 || body === '-1' || (status === 400 && body === '0');
+    }
+
+    function runRequestError(xhrOrResponse) {
+        if (runSessionExpired(xhrOrResponse)) {
+            return t('runSessionExpired');
+        }
+        return localAjaxMessage(xhrOrResponse) || t('srConnectionLost');
+    }
+
+    function makeGuardedRun(cfg) {
+        var timer = null;
+        var errors = 0;
+        var MAX_ERRORS = 20;
+
+        function el(name) {
+            return $('#ocm-' + cfg.prefix + '-' + name);
+        }
+
+        function isRunning(run) {
+            return !!run && (run.state === 'backing_up' || run.state === cfg.working);
+        }
+
+        function render(run) {
+            clearTimeout(timer);
+            if (!run || !run.state || run.state === 'idle') {
+                el('run-actions').prop('hidden', true);
+                el('progress').prop('hidden', true);
+                cfg.setFormBusy(false);
+                return;
+            }
+            var running = isRunning(run);
+            cfg.setFormBusy(running);
+            el('run-actions').prop('hidden', false);
+            el('btn-stop').prop('hidden', !running).prop('disabled', false);
+            el('btn-undo').prop('hidden', running || !run.can_undo || !!run.undone).prop('disabled', false);
+            el('btn-dismiss').prop('hidden', running).prop('disabled', false);
+            el('btn-undo').data('backupTime', run.backup_time || 0);
+
+            if (run.state === 'backing_up') {
+                el('result-title').text(t(cfg.runTitle));
+                showRunProgress(cfg.prefix, parseInt(run.backup_progress, 10) || 2, t('srBackingUp') + (run.backup_text ? ' ' + run.backup_text : ''), 'running');
+                el('result-body').html(cfg.body(run));
+            } else if (run.state === cfg.working) {
+                el('result-title').text(t(cfg.runTitle));
+                showRunProgress(cfg.prefix, run.progress || 0, cfg.workingText(run), 'running');
+                el('result-body').html(cfg.body(run));
+            } else {
+                var title = run.state === 'done' ? t('srDone') : (run.state === 'stopped' ? t('srStopped') : t('srFailed'));
+                el('result-title').text(title);
+                showRunProgress(cfg.prefix, run.state === 'done' ? 100 : (run.progress || 0), run.message || '', run.state === 'done' ? 'done' : 'failed');
+                var extra = '';
+                if (run.undone) {
+                    extra = '<p class="ocm-sr-note">' + escHtml(t('srUndone')) + '</p>';
+                } else if (run.backup_id && !run.backup_exists) {
+                    extra = '<p class="ocm-sr-note">' + escHtml(t('srBackupGone')) + '</p>';
+                }
+                el('result-body').html(cfg.body(run) + srWarningsHtml(run.warnings) + extra);
+            }
+            if (cfg.onEnded) {
+                cfg.onEnded(run, running);
+            }
+            if (running) {
+                timer = setTimeout(step, run.state === 'backing_up' || run.busy ? 3000 : 200);
+            }
+        }
+
+        function step() {
+            $.post(siteData.ajaxurl, { action: cfg.actions.step, nonce: cfg.nonce() })
+                .done(function (response) {
+                    if (!response || !response.success) {
+                        stepFailed(response);
+                        return;
+                    }
+                    errors = 0;
+                    render(response.data);
+                })
+                .fail(stepFailed);
+        }
+
+        // A step that got no answer keeps the run where it was; try again a
+        // bit later, and say why the bar is not moving.
+        function stepFailed(source) {
+            errors++;
+            el('pg-status').text(runRequestError(source));
+            if (runSessionExpired(source)) {
+                return; // signed out: every retry would be refused too
+            }
+            if (errors < MAX_ERRORS) {
+                clearTimeout(timer);
+                timer = setTimeout(step, Math.min(30000, 2000 * errors));
+            }
+        }
+
+        function action(name, $button, after) {
+            $button.prop('disabled', true);
+            $.post(siteData.ajaxurl, { action: name, nonce: cfg.nonce() })
+                .done(function (response) {
+                    $button.prop('disabled', false);
+                    if (!response || !response.success) {
+                        cfg.setMsg(localAjaxMessage(response) || t('srConnectionLost'));
+                        el('pg-status').text(localAjaxMessage(response) || t('srConnectionLost'));
+                        return;
+                    }
+                    after(response.data);
+                })
+                .fail(function (xhr) {
+                    $button.prop('disabled', false);
+                    el('pg-status').text(runRequestError(xhr));
+                });
+        }
+
+        function stop() {
+            if (typeof window.confirm === 'function' && !window.confirm(t(cfg.stopConfirm))) {
+                return;
+            }
+            clearTimeout(timer);
+            action(cfg.actions.stop, el('btn-stop'), render);
+        }
+
+        function undo() {
+            var when = parseInt(el('btn-undo').data('backupTime'), 10) || 0;
+            var label = when ? new Date(when * 1000).toLocaleString() : '';
+            if (typeof window.confirm === 'function' && !window.confirm(fmt(t('srUndoConfirm'), label))) {
+                return;
+            }
+            action(cfg.actions.undo, el('btn-undo'), function () {
+                el('btn-undo').prop('hidden', true);
+                el('pg-status').text(t('srUndoStarted'));
+                localCurrentAction = 'restore';
+                setPluginMode('local', true);
+                startLocalProgressPolling();
+            });
+        }
+
+        function dismiss() {
+            action(cfg.actions.dismiss, el('btn-dismiss'), function (data) {
+                render(data);
+                if (cfg.onDismiss) {
+                    cfg.onDismiss();
+                }
+            });
+        }
+
+        function bind() {
+            el('btn-stop').on('click', stop);
+            el('btn-undo').on('click', undo);
+            el('btn-dismiss').on('click', dismiss);
+        }
+
+        return { render: render, isRunning: isRunning, bind: bind };
+    }
+
+    var srRun = makeGuardedRun({
+        prefix: 'sr',
+        actions: { step: 'ocm_sr_step', stop: 'ocm_sr_stop', undo: 'ocm_sr_undo', dismiss: 'ocm_sr_dismiss' },
+        nonce: srNonce,
+        working: 'replacing',
+        runTitle: 'srRunTitle',
+        stopConfirm: 'srStopConfirm',
+        workingText: function (run) {
+            return fmt(t('srReplacing'), run.tables_done, run.tables_total);
+        },
+        body: function (run) {
+            var head = '<p class="ocm-sr-summary"><code>' + escHtml(run.search) + '</code> &rarr; <code>' + escHtml(run.replace) + '</code></p>';
+            return run.state === 'backing_up' ? head : head + srCountsTable(run.counts);
+        },
+        setFormBusy: function (busy) { srSetFormBusy(busy); },
+        setMsg: function (text) { srSetMsg(text); },
+        onDismiss: function () {
+            $('#ocm-sr-result-title').text(t('srPreviewTitle'));
+            $('#ocm-sr-result-body').empty();
+        }
+    });
+
+    function srIsRunning(run) {
+        return srRun.isRunning(run);
+    }
+
+    function srRenderRun(run) {
+        srRun.render(run);
+    }
+
+    // ------------------------------------------------------------------
+    // Site Cleanup
+    // ------------------------------------------------------------------
+    var clScanEpoch = 0;
+    var clScanDone = false;
+
+    function clNonce() {
+        return (typeof siteData !== 'undefined' && siteData.cleanupNonce) || '';
+    }
+
+    function clSetMsg(text) {
+        $('#ocm-cl-msg').text(text || '').prop('hidden', !text);
+    }
+
+    function clChosen() {
+        var items = [];
+        $('input[data-ocm-cl-item]:checked:not(:disabled)').each(function () {
+            items.push($(this).attr('data-ocm-cl-item'));
+        });
+        return items;
+    }
+
+    function clSyncCleanButton() {
+        $('#ocm-cl-btn-clean').prop('disabled', !clScanDone || !clChosen().length);
+    }
+
+    function clSetFormBusy(busy) {
+        $('#ocm-cl-form-card').find('input, button').prop('disabled', !!busy);
+        if (!busy) {
+            $('input[data-ocm-cl-item][data-empty="1"]').prop('disabled', true);
+            clSyncCleanButton();
+        }
+    }
+
+    function clItemMeta(item) {
+        if (!item.count) {
+            return t('clNothing');
+        }
+        if (item.id === 'reclaim') {
+            return fmt(t('clTablesMeta'), item.count.toLocaleString(), item.size);
+        }
+        return fmt(t('clItemMeta'), item.count.toLocaleString(), item.size);
+    }
+
+    // The checklist from a scan. Ticks the user changed survive a rescan.
+    function clRenderScan(scan) {
+        var previous = {};
+        $('input[data-ocm-cl-item]').each(function () {
+            previous[$(this).attr('data-ocm-cl-item')] = $(this).is(':checked');
+        });
+        var html = '<div class="ocm-cl-items">';
+        (scan.items || []).forEach(function (item) {
+            var empty = !item.count;
+            var checked = !empty && (Object.prototype.hasOwnProperty.call(previous, item.id) ? previous[item.id] : !!item.default);
+            html += '<label class="ocm-check ocm-cl-item' + (empty ? ' ocm-cl-empty' : '') + '">'
+                + '<input type="checkbox" data-ocm-cl-item="' + escHtml(item.id) + '"' + (checked ? ' checked' : '')
+                + (empty ? ' disabled data-empty="1"' : '') + '>'
+                + '<span><strong>' + escHtml(item.label) + '</strong> <em class="ocm-cl-meta">' + escHtml(clItemMeta(item)) + '</em>'
+                + '<small>' + escHtml(item.help) + '</small></span></label>';
+        });
+        html += '</div>';
+        $('#ocm-cl-items').html(html);
+        clScanDone = !!scan.done;
+        clRenderScanSummary(scan);
+        clSyncCleanButton();
+    }
+
+    function clRenderScanSummary(scan) {
+        $('#ocm-cl-result-title').text(t('clScanTitle'));
+        var when = scan.scanned_at ? new Date(scan.scanned_at * 1000).toLocaleString() : '';
+        $('#ocm-cl-result-hint').text(when ? fmt(t('clScannedAt'), when) : '');
+        var anything = (scan.items || []).some(function (item) { return item.count > 0 && item.id !== 'reclaim'; });
+        $('#ocm-cl-result-body').html(anything
+            ? '<p class="ocm-sr-summary"><strong>' + escHtml(fmt(t('clScanSummary'), scan.total)) + '</strong></p>'
+            : '<p class="ocm-local-empty">' + escHtml(t('clScanNothing')) + '</p>');
+    }
+
+    function clScan() {
+        var epoch = ++clScanEpoch;
+        clSetMsg('');
+        clScanDone = false;
+        clSetFormBusy(true);
+        $('#ocm-cl-migrate').prop('hidden', true);
+        showRunProgress('cl', 0, t('clScanning'), 'running');
+
+        function step(restart) {
+            $.post(siteData.ajaxurl, { action: 'ocm_cleanup_scan', nonce: clNonce(), restart: restart ? 1 : 0 })
+                .done(function (response) {
+                    if (epoch !== clScanEpoch) {
+                        return;
+                    }
+                    if (!response || !response.success) {
+                        clSetFormBusy(false);
+                        $('#ocm-cl-progress').prop('hidden', true);
+                        clSetMsg(localAjaxMessage(response) || t('srConnectionLost'));
+                        return;
+                    }
+                    var scan = response.data || {};
+                    showRunProgress('cl', scan.progress || 0, t('clScanning'), 'running');
+                    if (!scan.done) {
+                        step(false);
+                        return;
+                    }
+                    $('#ocm-cl-progress').prop('hidden', true);
+                    clSetFormBusy(false);
+                    clRenderScan(scan);
+                })
+                .fail(function (xhr) {
+                    if (epoch !== clScanEpoch) {
+                        return;
+                    }
+                    clSetFormBusy(false);
+                    $('#ocm-cl-progress').prop('hidden', true);
+                    clSetMsg(runRequestError(xhr));
+                });
+        }
+        step(true);
+    }
+
+    function clStart() {
+        var items = clChosen();
+        if (!items.length) {
+            clSetMsg(t('clNeedItems'));
+            return;
+        }
+        if (typeof window.confirm === 'function' && !window.confirm(t('clConfirm'))) {
+            return;
+        }
+        clSetMsg('');
+        clSetFormBusy(true);
+        $.post(siteData.ajaxurl, { action: 'ocm_cleanup_start', nonce: clNonce(), items: items })
+            .done(function (response) {
+                if (!response || !response.success) {
+                    clSetFormBusy(false);
+                    clSetMsg(localAjaxMessage(response) || t('srConnectionLost'));
+                    return;
+                }
+                clRun.render(response.data);
+            })
+            .fail(function (xhr) {
+                clSetFormBusy(false);
+                clSetMsg(runRequestError(xhr));
+            });
+    }
+
+    function clCountsTable(counts) {
+        if (!counts || !counts.length) {
+            return '';
+        }
+        var html = '<div class="ocm-local-table-wrap"><table class="ocm-local-table ocm-sr-counts"><thead><tr>'
+            + '<th>' + escHtml(t('clItemCol')) + '</th><th>' + escHtml(t('clRemovedCol')) + '</th></tr></thead><tbody>';
+        counts.forEach(function (c) {
+            html += '<tr><td>' + escHtml(c.label) + '</td><td>' + escHtml(String(c.rows || 0)) + (c.size && c.rows ? ' · ' + escHtml(c.size) : '') + '</td></tr>';
+        });
+        return html + '</tbody></table></div>';
+    }
+
+    var clRun = makeGuardedRun({
+        prefix: 'cl',
+        actions: { step: 'ocm_cleanup_step', stop: 'ocm_cleanup_stop', undo: 'ocm_cleanup_undo', dismiss: 'ocm_cleanup_dismiss' },
+        nonce: clNonce,
+        working: 'cleaning',
+        runTitle: 'clRunTitle',
+        stopConfirm: 'clStopConfirm',
+        workingText: function (run) {
+            return fmt(t('clCleaning'), run.items_done, run.items_total) + (run.current_item ? ' (' + run.current_item + ')' : '');
+        },
+        body: function (run) {
+            return run.state === 'backing_up' ? '' : clCountsTable(run.counts);
+        },
+        setFormBusy: function (busy) { clSetFormBusy(busy); },
+        setMsg: function (text) { clSetMsg(text); },
+        onEnded: function (run, running) {
+            $('#ocm-cl-result-hint').text('');
+            $('#ocm-cl-migrate').prop('hidden', running || run.state !== 'done');
+            if (!running && run.state === 'done') {
+                // The scan is used up: scan again before the next cleanup.
+                clScanDone = false;
+                $('#ocm-cl-items').empty();
+                clSyncCleanButton();
+            }
+        },
+        onDismiss: function () {
+            $('#ocm-cl-migrate').prop('hidden', true);
+            $('#ocm-cl-result-title').text(t('clScanTitle'));
+            $('#ocm-cl-result-body').empty();
+        }
+    });
+
+    function clRenderSpace(rep) {
+        var html = '';
+        if (rep.tables && rep.tables.length) {
+            html += '<div class="ocm-label">' + escHtml(t('clSpaceTables')) + '</div><ul class="ocm-cl-space-list">';
+            rep.tables.forEach(function (tb) {
+                html += '<li><code>' + escHtml(tb.name) + '</code> <span>' + escHtml(tb.size_readable) + '</span>'
+                    + (tb.free_readable ? ' <em>' + escHtml(fmt(t('clSpaceUnused'), tb.free_readable)) + '</em>' : '') + '</li>';
+            });
+            html += '</ul>';
+        }
+        if (rep.folders && rep.folders.length) {
+            html += '<div class="ocm-label">' + escHtml(t('clSpaceFolders')) + '</div><ul class="ocm-cl-space-list">';
+            rep.folders.forEach(function (f) {
+                html += '<li><code>' + escHtml(f.name) + '</code> <span>' + escHtml(f.size_readable) + '</span>'
+                    + (f.backup ? ' <strong class="ocm-cl-flag">' + escHtml(t('clSpaceBackup')) + '</strong>' : '')
+                    + ' <em>' + escHtml(t(f.moved ? 'clSpaceMoved' : 'clSpaceNotMoved')) + '</em></li>';
+            });
+            html += '</ul>';
+            if (rep.partial) {
+                html += '<p class="ocm-sr-note">' + escHtml(t('clSpacePartial')) + '</p>';
+            }
+        }
+        var themes = rep.inactive_themes && rep.inactive_themes.length ? rep.inactive_themes.join(', ') : t('clSpaceNone');
+        var plugins = rep.inactive_plugins && rep.inactive_plugins.length ? rep.inactive_plugins.join(', ') : t('clSpaceNone');
+        html += '<p class="ocm-cl-inactive">' + escHtml(fmt(t('clSpaceInactiveThemes'), themes))
+            + (rep.themes_url && rep.inactive_themes && rep.inactive_themes.length ? ' <a href="' + escHtml(rep.themes_url) + '">' + escHtml(t('clSpaceManageThemes')) + '</a>' : '') + '</p>'
+            + '<p class="ocm-cl-inactive">' + escHtml(fmt(t('clSpaceInactivePlugins'), plugins))
+            + (rep.plugins_url && rep.inactive_plugins && rep.inactive_plugins.length ? ' <a href="' + escHtml(rep.plugins_url) + '">' + escHtml(t('clSpaceManagePlugins')) + '</a>' : '') + '</p>';
+        $('#ocm-cl-space-body').html(html);
+    }
+
+    function clLoadSpace() {
+        var $body = $('#ocm-cl-space-body');
+        $body.html('<p class="ocm-local-empty">' + escHtml(t('clSpaceLoading')) + '</p>');
+        $.post(siteData.ajaxurl, { action: 'ocm_cleanup_space', nonce: clNonce() })
+            .done(function (response) {
+                if (!response || !response.success) {
+                    $body.html('<p class="ocm-local-action-msg">' + escHtml(localAjaxMessage(response) || t('srConnectionLost')) + '</p>');
+                    return;
+                }
+                clRenderSpace(response.data || {});
+            })
+            .fail(function (xhr) {
+                $body.html('<p class="ocm-local-action-msg">' + escHtml(runRequestError(xhr)) + '</p>');
+            });
+    }
+
+    function initSiteCleanup() {
+        if (!$('#ocm-cl-form-card').length) {
+            return;
+        }
+        $('#ocm-cl-btn-scan').on('click', function (e) {
+            e.preventDefault();
+            clScan();
+        });
+        $('#ocm-cl-btn-clean').on('click', function (e) {
+            e.preventDefault();
+            clStart();
+        });
+        $('#ocm-cl-form-card').on('change', 'input[data-ocm-cl-item]', function () {
+            clSetMsg('');
+            clSyncCleanButton();
+        });
+        $('#ocm-cl-space-card').on('click', '#ocm-cl-btn-space', clLoadSpace);
+        clRun.bind();
+        var scan = typeof siteData !== 'undefined' ? siteData.cleanupScan : null;
+        if (scan && scan.done) {
+            clRenderScan(scan);
+        }
+        var run = typeof siteData !== 'undefined' ? siteData.cleanupRun : null;
+        if (run && run.state && run.state !== 'idle') {
+            clRun.render(run);
+        }
+    }
+
+    function initSearchReplace() {
+        if (!$('#ocm-mode-sr').length || !$('#ocm-sr-form-card').length) {
+            return;
+        }
+        $('#ocm-sr-btn-preview').on('click', function (e) {
+            e.preventDefault();
+            srPreview();
+        });
+        $('#ocm-sr-btn-replace').on('click', function (e) {
+            e.preventDefault();
+            srStartReplace();
+        });
+        srRun.bind();
+        $('#ocm-sr-search, #ocm-sr-replace').on('input', function () {
+            srSetMsg('');
+            srSyncReplaceButton();
+        });
+        $('#ocm-sr-form-card').on('change', 'input[type=checkbox]', function () {
+            srUpdateTablesCount();
+            srSyncReplaceButton();
+        });
+        $('#ocm-sr-tables-all, #ocm-sr-tables-none').on('click', function () {
+            $('input[data-ocm-sr-table]').prop('checked', this.id === 'ocm-sr-tables-all');
+            srUpdateTablesCount();
+            srSyncReplaceButton();
+        });
+        $('#ocm-sr-preset-https').on('click', function () {
+            $('#ocm-sr-search').val($(this).attr('data-from'));
+            $('#ocm-sr-replace').val($(this).attr('data-to'));
+            srSyncReplaceButton();
+            srPreview();
+        });
+        var run = typeof siteData !== 'undefined' ? siteData.srRun : null;
+        if (run && run.state && run.state !== 'idle') {
+            if (srIsRunning(run)) {
+                $('#ocm-sr-search').val(run.search);
+                $('#ocm-sr-replace').val(run.replace);
+            }
+            srRenderRun(run);
+        }
+    }
+
     function setPluginMode(mode, updateUrl) {
+        if (mode !== 'local' && mode !== 'sr' && mode !== 'cleanup') {
+            mode = 'cloud';
+        }
         var isLocal = mode === 'local';
         $('.ocm-mode-btn').removeClass('active').attr('aria-selected', 'false');
-        $('.ocm-mode-btn[data-ocm-mode="' + (isLocal ? 'local' : 'cloud') + '"]').addClass('active').attr('aria-selected', 'true');
-        $('#ocm-mode-cloud').toggleClass('active', !isLocal).prop('hidden', isLocal);
+        $('.ocm-mode-btn[data-ocm-mode="' + mode + '"]').addClass('active').attr('aria-selected', 'true');
+        $('#ocm-mode-cloud').toggleClass('active', mode === 'cloud').prop('hidden', mode !== 'cloud');
         $('#ocm-mode-local').toggleClass('active', isLocal).prop('hidden', !isLocal);
+        $('#ocm-mode-sr').toggleClass('active', mode === 'sr').prop('hidden', mode !== 'sr');
+        $('#ocm-mode-cleanup').toggleClass('active', mode === 'cleanup').prop('hidden', mode !== 'cleanup');
         if (updateUrl && window.history && window.history.replaceState) {
             try {
                 var u = new URL(window.location.href);
-                u.searchParams.set('mode', isLocal ? 'local' : 'cloud');
+                u.searchParams.set('mode', mode);
                 window.history.replaceState({}, '', u.pathname + u.search + u.hash);
             } catch (e) { /* ignore */ }
         }
@@ -1311,8 +2076,8 @@
             + '</tr></thead><tbody>';
         for (var i = 0; i < entries.length; i++) {
             var act = entries[i] || {};
-            var opType = act.type === 'restore' ? 'restore' : 'backup';
-            var opLabel = opType === 'restore' ? t('localOpRestore') : t('localOpBackup');
+            var opType = act.type === 'restore' || act.type === 'search_replace' || act.type === 'site_cleanup' ? act.type : 'backup';
+            var opLabel = { restore: t('localOpRestore'), search_replace: t('localOpSearchReplace'), site_cleanup: t('localOpSiteCleanup') }[opType] || t('localOpBackup');
             var trigger = act.trigger === 'scheduled' ? 'scheduled' : 'manual';
             var triggerLabel = trigger === 'scheduled' ? t('localScheduled') : t('localManual');
             var status = act.status || 'completed';
@@ -2031,7 +2796,21 @@
         if (!$('#ocm-mode-local').prop('hidden')) {
             maybeShowLocalTelemetryModal();
         }
-        if (typeof siteData !== 'undefined' && (siteData.localActiveAction === 'backup' || siteData.localActiveAction === 'restore')) {
+        initSearchReplace();
+        initSiteCleanup();
+        // Links that switch tabs: the cleanup hint on Cloud Migration, and
+        // "Start a migration" after a cleanup.
+        $(document).on('click', '[data-ocm-goto]', function (e) {
+            e.preventDefault();
+            setPluginMode($(this).attr('data-ocm-goto'), true);
+        });
+        var srRunning = typeof siteData !== 'undefined' && srIsRunning(siteData.srRun);
+        var clRunning = typeof siteData !== 'undefined' && clRun.isRunning(siteData.cleanupRun);
+        if (srRunning && startAction !== 'backup' && startAction !== 'restore') {
+            setPluginMode('sr', false);
+        } else if (clRunning && startAction !== 'backup' && startAction !== 'restore') {
+            setPluginMode('cleanup', false);
+        } else if (typeof siteData !== 'undefined' && (siteData.localActiveAction === 'backup' || siteData.localActiveAction === 'restore')) {
             if (startAction !== 'backup' && startAction !== 'restore') {
                 setPluginMode('local', false);
             }

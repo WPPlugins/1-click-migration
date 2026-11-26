@@ -8,6 +8,12 @@ class OCM_Local_Storage
 {
     const STORAGE_SETTINGS_OPTION = 'ocm_local_storage_settings';
     const DEFAULT_KEEP_LAST = 5;
+    /**
+     * Manifest 'purpose' of a backup taken so one change can be undone (the
+     * database copy before a search & replace or a cleanup). "Keep last N" counts these
+     * apart from the site's own backups.
+     */
+    const PURPOSE_UNDO = 'undo';
     const DEFAULT_MIN_FREE_SPACE_MB = 500;
     const MAX_KEEP_LAST = 500;
     const MAX_MIN_FREE_SPACE_MB = 1048576;
@@ -414,6 +420,7 @@ class OCM_Local_Storage
         $data['has_log'] = is_file($dir . '/backup.log');
         $data['trigger'] = isset($data['trigger']) && $data['trigger'] === 'scheduled' ? 'scheduled' : 'manual';
         $data['label'] = isset($data['label']) ? (string) $data['label'] : '';
+        $data['purpose'] = isset($data['purpose']) && $data['purpose'] === self::PURPOSE_UNDO ? self::PURPOSE_UNDO : '';
         $data['created_at'] = isset($data['created_at']) ? (string) $data['created_at'] : '';
         $data['created_gmt'] = isset($data['created_gmt']) ? (int) $data['created_gmt'] : 0;
         $data['created_us'] = isset($data['created_us']) ? (float) $data['created_us'] : 0.0;
@@ -498,6 +505,10 @@ class OCM_Local_Storage
      * Enforce count-based retention ("keep last N"), deleting the oldest completed
      * backups beyond $keep_last.
      *
+     * Undo backups (PURPOSE_UNDO) are counted on their own: the newest
+     * $keep_last of them stay, and they never push out the site's own manual
+     * and scheduled backups, however often a tool that takes one is run.
+     *
      * @param int|null $keep_last
      * @param string   $active_restore_backup_id
      * @return string[] Deleted backup IDs.
@@ -515,13 +526,19 @@ class OCM_Local_Storage
             return array();
         }
 
-        $backups = self::list_backups();
-        if (count($backups) <= $keep_last) {
-            return array();
+        // Newest first within each group.
+        $groups = array('' => array(), self::PURPOSE_UNDO => array());
+        foreach (self::list_backups() as $backup) {
+            $groups[isset($backup['purpose']) && $backup['purpose'] === self::PURPOSE_UNDO ? self::PURPOSE_UNDO : ''][] = $backup;
+        }
+        $to_remove = array();
+        foreach ($groups as $group) {
+            if (count($group) > $keep_last) {
+                $to_remove = array_merge($to_remove, array_slice($group, $keep_last));
+            }
         }
 
         $pruned = array();
-        $to_remove = array_slice($backups, $keep_last);
         foreach ($to_remove as $backup) {
             $id = (string) $backup['id'];
             if ($active_restore_backup_id !== '' && hash_equals((string) $active_restore_backup_id, $id)) {

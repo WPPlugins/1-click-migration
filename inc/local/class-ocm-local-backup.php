@@ -101,7 +101,8 @@ class OCM_Local_Backup
     {
         return self::is_running()
             || (bool) get_option('ocm_action_start_backup')
-            || (bool) get_option('ocm_action_start_restore');
+            || (bool) get_option('ocm_action_start_restore')
+            || (class_exists(__NAMESPACE__ . '\\OCM_Guarded_Run') && OCM_Guarded_Run::any_working());
     }
 
     /**
@@ -304,7 +305,7 @@ class OCM_Local_Backup
             $entries = array();
         }
 
-        $type = isset($entry['type']) && $entry['type'] === 'restore' ? 'restore' : 'backup';
+        $type = isset($entry['type']) && in_array($entry['type'], array('restore', 'search_replace', 'site_cleanup'), true) ? $entry['type'] : 'backup';
         $trigger = isset($entry['trigger']) && $entry['trigger'] === 'scheduled' ? 'scheduled' : 'manual';
         $allowed_statuses = array('completed', 'failed', 'skipped', 'cancelled');
         $raw_status = isset($entry['status']) ? (string) $entry['status'] : 'completed';
@@ -585,9 +586,11 @@ class OCM_Local_Backup
      * @param string   $label
      * @param string   $trigger  'manual'|'scheduled'
      * @param bool     $dispatch Whether to dispatch/trigger the background worker immediately.
+     * @param string   $purpose  OCM_Local_Storage::PURPOSE_UNDO for the copy a tool takes before
+     *                           it changes the database ("Keep last N" counts those apart); '' otherwise.
      * @return array|WP_Error    Run info on success, WP_Error on refusal.
      */
-    public static function start_backup(array $parts, $label = '', $trigger = 'manual', $dispatch = true)
+    public static function start_backup(array $parts, $label = '', $trigger = 'manual', $dispatch = true, $purpose = '')
     {
         $included = self::normalize_parts($parts);
         if (empty($included)) {
@@ -596,6 +599,7 @@ class OCM_Local_Backup
         $excluded = array_values(array_diff(OCM_Local_Storage::PARTS, $included));
         $trigger = ($trigger === 'scheduled') ? 'scheduled' : 'manual';
         $label = substr(sanitize_text_field((string) $label), 0, 80);
+        $purpose = ($purpose === OCM_Local_Storage::PURPOSE_UNDO) ? OCM_Local_Storage::PURPOSE_UNDO : '';
 
         if (self::any_operation_running()) {
             $msg = __('Another backup or restore is already running on this site.', '1-click-migration');
@@ -669,6 +673,7 @@ class OCM_Local_Backup
             'backup_id' => $backup_id,
             'trigger' => $trigger,
             'label' => $label,
+            'purpose' => $purpose,
             'excluded' => $excluded,
             'expected_parts' => $included,
             'sizes' => $disk['sizes'],
@@ -1010,6 +1015,7 @@ class OCM_Local_Backup
             'created_us' => microtime(true),
             'trigger' => isset($run['trigger']) ? (string) $run['trigger'] : 'manual',
             'label' => isset($run['label']) ? (string) $run['label'] : '',
+            'purpose' => isset($run['purpose']) && $run['purpose'] === OCM_Local_Storage::PURPOSE_UNDO ? OCM_Local_Storage::PURPOSE_UNDO : '',
             'site_url' => get_site_url(),
             'home_url' => function_exists('get_home_url') ? get_home_url() : get_site_url(),
             'wp_version' => isset($wp_version) ? (string) $wp_version : '',

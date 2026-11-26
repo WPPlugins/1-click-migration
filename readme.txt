@@ -1,34 +1,27 @@
-=== 1-Click WordPress Migration Plugin – Backup & Restore ===
+=== 1-Click WordPress Migration Plugin ===
 Contributors: 1clickmigration
-Tags: wordpress migration, migration plugin, wordpress backup, backup restore, scheduled backup
+Tags: wordpress migration, migration plugin, migration, migrate, backup
 Requires at least: 5.3
 Tested up to: 7.2
 Requires PHP: 7.4
-Stable tag: 4.0.2
+Stable tag: 4.2.0
 Author URI: https://1clickmigration.com
 License: GPLv3 or later
 License URI: http://www.gnu.org/licenses/gpl-3.0.html
 
-WordPress migration plugin with FREE scheduled local backup & restore. One-click site migrations, success guaranteed, no size cap.
+One-click WordPress migration plugin, success guaranteed, no size cap. Free extra tools: local backups, search & replace and site cleanup.
 
 == Description ==
 
-### 1-Click WordPress Migration Plugin & Free Local Backup ###
+### 1-Click WordPress Migration Plugin ###
 
-1-Click Migration is a WordPress migration plugin with free local backup & restore built in. Schedule automatic local backups (hourly, daily, weekly or monthly) and restore on the same server for free — no account, email or cloud upload required. When you're ready to move your WordPress website to a new host, a new domain or a second install, use Cloud Migration to transfer everything with an 8-character restore code while your live site stays online ($9.99, success guaranteed or a refund).
+1-Click Migration is a WordPress migration plugin with success guaranteed. This migration plugin backs up your WordPress website and emails you an 8-character restore code. Paste that code into a new host, a new domain or a second install to finish your WordPress migration. Site addresses are updated throughout the database, serialized data included, while your live site stays online. No account and no license key. Each migration costs $9.99, success guaranteed or a refund.
+
+The plugin also comes with three free extra tools: Local Backup & Restore, Search & Replace and Site Cleanup.
 
 https://vimeo.com/1236211963
 
-**Free Local Backup & Restore**
-
-* **Automatic scheduled backups.** Run hourly, daily, weekly or monthly WordPress backups automatically in your site's timezone.
-* **Manual on-demand backups.** Create a quick WordPress database backup or full site backup before updating plugins, themes or WordPress core.
-* **Selective backup & restore.** Back up or restore any combination of your database, plugins, themes and uploads.
-* **Safe 1-click local restore.** Imports the database into temporary staging tables and verifies core options before replacing your live site.
-* **Automatic retention & disk-space guard.** Keep your last N backups (default 5, or unlimited) with automatic cleanup of old backups, plus a configurable minimum free-space guard so scheduled backups never fill your hosting disk.
-* **Private local storage & activity log.** Stored as plain ZIP archives in a private folder outside your website's public files where the server allows it, otherwise in a folder with an unguessable name, both protected by `.htaccess`, `web.config` and `index.php`. Includes a full activity history and log viewer.
-
-**Cloud Migration – Move, Clone & Transfer WordPress**
+**What you can do with it**
 
 * **Move to a new host.** [Transfer a website between any two hosts](https://1clickmigration.com/migrate-wordpress-to-new-host/) without downloading or uploading backup files yourself.
 * **Change your domain name.** [Copy a WordPress site to a new domain](https://1clickmigration.com/change-wordpress-domain-name/), and the old address is replaced everywhere in the database, including inside serialized options and widgets.
@@ -39,13 +32,6 @@ https://vimeo.com/1236211963
 
 Use this WordPress migration plugin for any WordPress migration, WP migration or WordPress site migration: a hosting migration to a new provider, a server migration within the same host, a domain migration, or a move from localhost to live. Move WordPress to another server, host or domain with no FTP, cPanel or phpMyAdmin — just a WordPress login on each site. It's an automatic migration tool and WP migration plugin for a complete website migration, from the database to the uploads folder.
 
-**Pricing**
-
-* **Local Backup & Restore — Free.** Unlimited manual and scheduled local backups, retention controls and same-site restores.
-* **Cloud Migration — $9.99, success guaranteed or a refund.** One PayPal payment per migration before you restore on the new host or domain — covers retries and restoring on a second site.
-* **Unlimited Cloud Migrations — $15 a month.** [Subscribe](https://1clickmigration.com/subscriptions/) with the email you use in the plugin; cancel anytime.
-* **Fix or refund guarantee.** If a migration doesn't work, we'll fix it or refund you.
-
 **Built to fail safely**
 
 * The database imports into temporary tables and is checked before anything is replaced. If a check fails, the migration plugin stops, explains why, and leaves your site untouched.
@@ -53,31 +39,42 @@ Use this WordPress migration plugin for any WordPress migration, WP migration or
 * Available disk space is checked before files are unpacked.
 * Long backups and restores run in short steps and pick up where they left off, so hosts with strict PHP time limits are fine.
 
+**Free Extra Tools**
+
+The migration is the paid part. These three tools come with the plugin and are free to use as often as you like, with no account, email or cloud upload.
+
+* **Local Backup & Restore.** Back up the database, plugins, themes and uploads, in full or in any combination, to a private folder on your own server. Create a quick on-demand WordPress database backup or a full site backup before updating plugins, themes or WordPress core, or run automatic scheduled backups hourly, daily, weekly or monthly in your site's timezone. Automatic retention keeps your last N backups (default 5, or unlimited), and a configurable free-space guard means scheduled backups never fill your hosting disk. A safe one-click restore imports the database into temporary staging tables and verifies its core options before your live site is replaced. A full activity history and log viewer show every run.
+* **Search & Replace.** Find and replace text anywhere in the database: posts, pages, settings, widgets and page builder data, including serialized data, which is updated safely so nothing breaks. Preview how many rows would change, with before → after examples, before anything is changed. Change a domain or switch http to https with one click.
+* **Site Cleanup.** Database cleanup in one click: old revisions, old auto-drafts, spam comments, expired transients and leftover data from deleted posts and comments. A scan shows how many items each kind of leftover has and how much space it takes, before anything changes. Optionally empty the trash, and optimize database tables to reclaim space, so your host gets the freed space back. See the largest tables and folders, other plugins' old backups and inactive themes and plugins. Delete revisions and leftovers before a migration and there is less to move.
+
+Search & Replace and Site Cleanup back up your database before every change. If something looks wrong, click Undo to put it back.
+
+**Pricing**
+
+* **Migration — $9.99, success guaranteed or a refund.** One PayPal payment per migration before you restore on the new host or domain — covers retries and restoring on a second site.
+* **Unlimited migrations — $15 a month.** [Subscribe](https://1clickmigration.com/subscriptions/) with the email you use in the plugin; cancel anytime.
+* **Fix or refund guarantee.** If a migration doesn't work, we'll fix it or refund you.
+* **Free extra tools.** Local Backup & Restore, Search & Replace and Site Cleanup cost nothing: unlimited manual and scheduled local backups, same-site restores, database search & replace and database cleanup.
+
 **Private by default**
 
 * Cloud backup parts are AES-256 encrypted on your server before upload, stored on Amazon S3, and deleted after 48 hours.
 * Only someone with the restore code can restore a cloud backup, and we email the code only to the address you enter.
 * Payments happen on PayPal's own page; the plugin never asks for card or payment details.
-* **Optional anonymous Local Backups reports (off by default):** If you allow it on the Local Backups screen, the plugin sends a short anonymous report to `https://1clickmigration.com/api/local_telemetry.php`: once when you turn it on, each time a local backup or restore finishes or fails, when you change the backup schedule, and if the plugin crashes during a local backup or restore. Each report holds an anonymous, hashed install ID, whether the backup or restore worked, the selected parts, a size range, how long it took, whether a schedule is on and how often it runs, your WordPress, PHP and plugin versions, a short error code and, for crashes, the plugin file and line number. It does not hold your site address, email addresses, error messages or backup contents. Your site's IP address reaches our server, as it does with any web request, and is not stored with the reports. You can turn it off anytime under Schedule & Storage settings on the Local Backups screen.
+* Local backups are stored as plain ZIP archives in a private folder on your own server and are never uploaded.
 
 Questions before backing up, or running into a plugin issue? [Ask on the WordPress.org support forum](https://wordpress.org/support/plugin/1-click-migration/) and share your site's domain (never your restore code). Learn more at [1clickmigration.com](https://1clickmigration.com).
 
 == How it works ==
 
-**Local Backups (Free)**
+**On the site you're moving from**
 
-1. Go to **Tools → One Click Migration** and switch to **Local Backups**.
-2. Click **Create Local Backup** for an immediate backup, or enable a schedule (hourly, daily, weekly or monthly) with retention and free-space guard settings.
-3. Click **Restore** next to any saved backup to restore the selected parts safely on the same site.
-
-**Cloud Migration – On the site you're moving from**
-
-1. Remove themes, plugins and media you don't need. A smaller site backs up faster.
+1. Remove themes, plugins and media you don't need. A smaller site backs up faster. The Site Cleanup tab shows what takes up space.
 2. Deactivate every plugin except 1-Click Migration.
 3. Go to **Tools → One Click Migration**, enter your email and click **Start backup**. Most backups finish in 10–30 minutes.
 4. Keep the email with your 8-character restore code — it's the only way to restore the backup.
 
-**Cloud Migration – On the site you're moving to**
+**On the site you're moving to**
 
 1. Install WordPress and the 1-Click Migration plugin on the new host or domain.
 2. Delete any other plugins the host pre-installed.
@@ -86,24 +83,33 @@ Questions before backing up, or running into a plugin issue? [Ask on the WordPre
 
 If a large site fails in one go, click **Stop & Reset** and use **Advanced options** to move one part at a time, database last.
 
+**Free extra tool: Local Backups**
+
+1. Go to **Tools → One Click Migration** and switch to **Local Backups**.
+2. Click **Create Local Backup** for an immediate backup, or enable a schedule (hourly, daily, weekly or monthly) with retention and free-space guard settings.
+3. Click **Restore** next to any saved backup to restore the selected parts safely on the same site.
+
+**Free extra tool: Search & Replace**
+
+1. Go to **Tools → One Click Migration** and switch to **Search & Replace**.
+2. Type what to search for and what to replace it with, and click **Preview changes**.
+3. Check the preview, then click **Back up & replace**. Click **Undo** if you want the database back as it was.
+
+**Free extra tool: Site Cleanup**
+
+1. Go to **Tools → One Click Migration** and switch to **Site Cleanup**.
+2. Click **Scan site** to see what can be removed and how much space it takes.
+3. Tick what to remove and click **Back up & clean**. Click **Undo** if you want the database back as it was.
+
 == Installation ==
 1. Install 1-Click Migration from Plugins → Add New, or upload the `1-click-migration` folder to `/wp-content/plugins/`.
 2. Activate the migration plugin on the Plugins screen.
-3. Go to Tools → One Click Migration for Cloud Migration, or switch to Local Backups for free backups on this server.
+3. Go to Tools → One Click Migration to start a migration. The free extra tools (Local Backups, Search & Replace and Site Cleanup) are tabs on the same screen.
 
 == Frequently Asked Questions ==
 
-= Are local backups and restores free? =
-Yes. Manual and scheduled local backups (hourly, daily, weekly or monthly) and same-site restores are completely free, with no account or cloud upload required. You only pay for Cloud Migration to move a site to another host or domain ($9.99, success guaranteed or a refund, or $15 a month unlimited).
-
-= Can I schedule automatic daily or weekly WordPress backups? =
-Yes. Under Local Backups, enable the schedule and choose hourly, daily, weekly or monthly backups, the time in your site's timezone, and which parts (database, plugins, themes, uploads) to include.
-
-= Where are local backups stored, and can they fill up my disk? =
-Local backups are saved as plain ZIP archives in a private folder outside your website's public files where the server allows it, otherwise in a folder with an unguessable name, both protected by `.htaccess`, `web.config` and `index.php`. Automatic retention pruning removes older backups past your "Keep last" limit, and a configurable free-space guard skips scheduled runs if hosting disk space gets low.
-
 = How much does a WordPress migration cost, and how do I pay? =
-Local backups and same-site restores are free. A Cloud Migration costs $9.99, success guaranteed or a refund. Pay once via PayPal or card on PayPal's own page (from the plugin or restore-code email) before you restore; one payment covers retries and restoring the same backup on a second site for 48 hours. If you move many sites, [$15 a month covers unlimited migrations](https://1clickmigration.com/subscriptions/), cancel anytime.
+A WordPress migration costs $9.99, success guaranteed or a refund. Pay once via PayPal or card on PayPal's own page (from the plugin or restore-code email) before you restore; one payment covers retries and restoring the same backup on a second site for 48 hours. If you move many sites, [$15 a month covers unlimited migrations](https://1clickmigration.com/subscriptions/), cancel anytime. Local backups, same-site restores, search & replace and site cleanup are free.
 
 = What if my WordPress migration doesn't work? =
 We'll fix it or refund you in full, no questions asked. For general plugin questions or backup errors, [ask on the support forum](https://wordpress.org/support/plugin/1-click-migration/) with your site's domain (never post your restore code).
@@ -141,14 +147,43 @@ Yes. Back up the local site, then restore it on the live server with the restore
 = Which hosts does this WordPress migration plugin work with? =
 Any host that runs WordPress on PHP 7.4 or later, including Bluehost, SiteGround, Hostinger, GoDaddy, HostGator, DreamHost, Namecheap, IONOS, A2 Hosting, InMotion Hosting, GreenGeeks, ScalaHosting, Liquid Web, Cloudways, WP Engine, Flywheel, Kinsta, Pressable and Pantheon, plus cloud servers on DigitalOcean, AWS Lightsail, Vultr and Linode, and local development sites. It works with cPanel, Plesk or no control panel at all. It also works on hosts that block background requests or cut long PHP requests short. On Pantheon, restore onto the Dev environment in SFTP mode, because code folders on Test and Live are read-only.
 
+= Are local backups and restores free? =
+Yes. Manual and scheduled local backups (hourly, daily, weekly or monthly) and same-site restores are completely free, with no account or cloud upload required. You only pay for Cloud Migration to move a site to another host or domain ($9.99, success guaranteed or a refund, or $15 a month unlimited).
+
+= Can I schedule automatic daily or weekly WordPress backups? =
+Yes. Under Local Backups, enable the schedule and choose hourly, daily, weekly or monthly backups, the time in your site's timezone, and which parts (database, plugins, themes, uploads) to include.
+
+= Where are local backups stored, and can they fill up my disk? =
+Local backups are saved as plain ZIP archives in a private folder outside your website's public files where the server allows it, otherwise in a folder with an unguessable name, both protected by `.htaccess`, `web.config` and `index.php`. Automatic retention pruning removes older backups past your "Keep last" limit, and a configurable free-space guard skips scheduled runs if hosting disk space gets low.
+
+= Can I search and replace text in the WordPress database? =
+Yes, and it's free. On the Search & Replace tab, type the text to find and the text to replace it with, and click Preview changes to see what would change. Serialized data is updated safely, your database is backed up first, and Undo puts it back. After a migration it's a quick way to replace a leftover old domain or switch http links to https.
+
+= Can I clean up the database before migrating? =
+Yes, and it's free. Site Cleanup scans for old revisions, auto-drafts, spam comments, expired transients and leftover data, shows how much space each takes, and removes what you tick after backing up the database. A smaller database means a faster backup and a faster migration.
+
 == Screenshots ==
-1. Free local WordPress backups. Back up now, or schedule hourly, daily, weekly or monthly backups with retention and a free-space guard.
-2. Saved local backups and activity history. Restore, view the log of, or delete any backup.
-3. Restore a local backup in full, or choose the database, themes, plugins or uploads.
-4. One-click WordPress migration plugin. Back up a live site and get a restore code by email; the site stays up while you migrate.
-5. Enter the restore code on the destination site to finish your WordPress migration.
+1. 1-Click WordPress migration plugin. Enter your email and start the backup; the site stays up while you migrate.
+2. Enter the restore code on the destination site to finish your WordPress migration.
+3. WordPress migration complete. The restore finished on the new host and the progress bar turns green.
+4. Free extra tool: Local Backups. Back up now, or schedule hourly, daily, weekly or monthly backups with retention and a free-space guard.
+5. Saved local backups and activity history. Restore, view the log of, or delete any backup.
+6. Free extra tool: Search & Replace. Preview what would change, then replace with a backup first and one-click Undo.
+7. Free extra tool: Site Cleanup. Scan for old revisions, spam and leftovers, see what's taking up space, and clean up with one-click Undo.
 
 == Changelog ==
+= 4.2.0 =
+* **New: free Site Cleanup**: Scan your database for old revisions, old auto-drafts, spam comments, expired temporary data and leftover data from deleted posts and comments, see how much space each takes, then remove what you tick. Optionally empty the trash and rebuild tables to give the space back to your host. Your database is backed up before every cleanup, and Undo puts it back with one click.
+* **What's taking up space**: See your largest tables and folders, other plugins' old backups and inactive themes and plugins.
+* **Before a migration**: The Cloud Migration tab tells you when a cleanup would make your backup noticeably smaller.
+* **Backups on servers without an up-to-date certificate list**: Backup uploads, the backup log and restore downloads now check the storage service with WordPress's own certificate list, the same one WordPress already uses to register the backup. Before, a server whose PHP had no certificate list of its own could register a backup and then fail to upload anything.
+* **A backup that can't reach storage still says why**: If your server can't connect to the storage service at all, for example because of a firewall or proxy, the plugin now sends its log through the backup service instead, so the reason reaches us and we can help.
+* **Signed out during Search & Replace or Site Cleanup**: When your WordPress login expires, these tabs now say you were signed out and to reload the page, instead of "Lost the connection", and stop retrying. Anything that was running continues once you sign in again.
+* **Listing**: The WordPress.org page leads with migration again and lists Local Backup & Restore, Search & Replace and Site Cleanup as free extra tools, with new screenshots.
+
+= 4.1.0 =
+* **New: free Search & Replace**: Find text anywhere in your database and replace it, including inside serialized settings and widgets. Preview what would change first. Your database is backed up before every replace, and Undo puts it back with one click. One click also switches an http site's links to https.
+
 = 4.0.2 =
 * **Restoring after your site address changed**: A local restore on a site that has since moved to https or to a new domain now updates the old address everywhere in the database. Before, only the main site address was updated and links inside posts and settings kept the old one.
 * **Safer Stop**: Stop can no longer leave a site half restored. Once a restore has started replacing your database or files it finishes on its own, and Stop tells you so. If a restore gets stuck there, Stop works again after a few minutes and says that part of the backup is already in place.
@@ -214,6 +249,12 @@ Any host that runs WordPress on PHP 7.4 or later, including Bluehost, SiteGround
 Older versions are listed in [changelog.txt](https://plugins.trac.wordpress.org/browser/1-click-migration/trunk/changelog.txt).
 
 == Upgrade Notice ==
+
+= 4.2.0 =
+Adds two free extra tools, Search & Replace and Site Cleanup, each with a preview or scan first, a backup of your database before every change and one-click Undo. Backups now upload on servers without an up-to-date certificate list. Includes all 4.1.0 changes.
+
+= 4.1.0 =
+Adds free Search & Replace: find and replace text anywhere in your database with a preview first, a backup before every change and one-click Undo.
 
 = 4.0.2 =
 Local restore fixes: the site address is updated everywhere after a move to https or a new domain, Stop can no longer leave a site half restored, and the Local Backups screen explains failures. Adds optional anonymous Local Backups reports, off unless you allow them.

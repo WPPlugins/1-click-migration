@@ -21,6 +21,11 @@ function ocm_uninstall_forget_local_telemetry()
 {
     delete_option('ocm_local_telemetry');
     delete_transient('ocm_ltel_rate');
+    // The last search & replace holds the text that was searched for.
+    delete_option('ocm_sr_run');
+    // The last cleanup run and scan.
+    delete_option('ocm_cleanup_run');
+    delete_option('ocm_cleanup_scan');
 }
 
 if (function_exists('is_multisite') && is_multisite() && function_exists('get_sites')) {

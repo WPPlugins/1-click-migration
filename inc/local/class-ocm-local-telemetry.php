@@ -49,7 +49,7 @@ class OCM_Local_Telemetry
     );
 
     const SIZE_BUCKETS = array('0', '<10MB', '10-100MB', '100-500MB', '500MB-1GB', '1-5GB', '5GB+');
-    const EVENTS = array('opt_in', 'local_backup', 'local_restore', 'local_schedule', 'local_crash');
+    const EVENTS = array('opt_in', 'local_backup', 'local_restore', 'local_schedule', 'local_crash', 'search_replace', 'site_cleanup');
     const STATUSES = array('enabled', 'disabled', 'completed', 'failed', 'skipped', 'cancelled');
     const FREQUENCIES = array('hourly', 'daily', 'weekly', 'monthly');
 
@@ -571,7 +571,8 @@ class OCM_Local_Telemetry
             if (!self::is_opted_in()) {
                 return false;
             }
-            $type = isset($entry['type']) && $entry['type'] === 'restore' ? 'local_restore' : 'local_backup';
+            $type = isset($entry['type']) && in_array($entry['type'], array('search_replace', 'site_cleanup'), true) ? $entry['type']
+                : (isset($entry['type']) && $entry['type'] === 'restore' ? 'local_restore' : 'local_backup');
             $status = isset($entry['status']) ? (string) $entry['status'] : '';
 
             $code = '';

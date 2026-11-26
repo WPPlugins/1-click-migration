@@ -3,8 +3,8 @@
 /**
  * Plugin Name: 1 Click Migration
  * Plugin URI: https://wordpress.org/plugins/1-click-migration/
- * Description: FREE local backup & restore (scheduled or manual), plus 1-click cloud migration with no size cap. Cloud migrations: $9.99, success guaranteed or a refund.
- * Version: 4.0.2
+ * Description: WordPress migration plugin: move, clone or transfer your site to any host or domain in 1 click, with no size cap. Migrations: $9.99, success guaranteed or a refund. Free extra tools: local backup & restore, search & replace and site cleanup.
+ * Version: 4.2.0
  * Requires at least: 5.3
  * Requires PHP: 7.4
  * Author: 1ClickMigration
@@ -29,6 +29,7 @@ define('OCM_SET_TIME_LIMIT', 900);
 define('OCM_WORKER_TIME_BUDGET', 20);
 
 require_once __DIR__ . '/inc/handler/class-ocm-private-dir.php';
+require_once __DIR__ . '/inc/handler/class-ocm-ca-bundle.php';
 
 define('OCM_DEBUG_LOG_FILENAME', 'ocm_debug.log');
 // This site's private directory (log, restore worker lock), inside the
@@ -58,6 +59,9 @@ require_once __DIR__ . '/inc/handler/class-ocm-debug-mode.php';
 require_once __DIR__ . '/inc/local/class-ocm-local-storage.php';
 require_once __DIR__ . '/inc/local/class-ocm-local-scheduler.php';
 require_once __DIR__ . '/inc/local/class-ocm-local-telemetry.php';
+require_once __DIR__ . '/inc/local/class-ocm-guarded-run.php';
+require_once __DIR__ . '/inc/local/class-ocm-search-replace.php';
+require_once __DIR__ . '/inc/local/class-ocm-site-cleanup.php';
 require_once __DIR__ . '/inc/local/class-ocm-local-backup.php';
 
 // If the function it's not available, require it.
@@ -130,6 +134,21 @@ class One_Click_Migration
     /** @var bool This request logged a LOG_UPLOAD_NOW_MARKERS line. */
     private static $log_terminal_written = false;
 
+    /** Most log text relay_log() sends; the service refuses more than 512 KB. */
+    const RELAY_LOG_MAX_BYTES = 262144;
+
+    /** Log line (hidden from the progress card) that says why the log PUT could not connect. */
+    const LOG_UPLOAD_UNREACHABLE_MARKER = ' SYSLOG: LOG_UPLOAD_UNREACHABLE';
+
+    /** @var string Log URL whose copies go through the relay for the rest of this request. */
+    private static $log_relay_url = '';
+
+    /** @var bool The relay failed in this request: not tried again. */
+    private static $log_relay_failed = false;
+
+    /** @var bool This request logged LOG_UPLOAD_UNREACHABLE_MARKER. */
+    private static $log_unreachable_noted = false;
+
     /** @var string */
     private static $version;
 
@@ -192,6 +211,20 @@ class One_Click_Migration
         add_action('wp_ajax_ocm_local_clear_activity', array(OCM_Local_Backup::class, 'ajax_clear_activity'));
         add_action('wp_ajax_ocm_local_save_telemetry', array(OCM_Local_Telemetry::class, 'ajax_save_consent'));
         add_action('wp_ajax_ocm_local_cancel', array(OCM_Local_Backup::class, 'ajax_cancel'));
+        add_action('wp_ajax_ocm_sr_tables', array(OCM_Search_Replace::class, 'ajax_tables'));
+        add_action('wp_ajax_ocm_sr_preview', array(OCM_Search_Replace::class, 'ajax_preview'));
+        add_action('wp_ajax_ocm_sr_start', array(OCM_Search_Replace::class, 'ajax_start'));
+        add_action('wp_ajax_ocm_sr_step', array(OCM_Search_Replace::class, 'ajax_step'));
+        add_action('wp_ajax_ocm_sr_stop', array(OCM_Search_Replace::class, 'ajax_stop'));
+        add_action('wp_ajax_ocm_sr_undo', array(OCM_Search_Replace::class, 'ajax_undo'));
+        add_action('wp_ajax_ocm_sr_dismiss', array(OCM_Search_Replace::class, 'ajax_dismiss'));
+        add_action('wp_ajax_ocm_cleanup_scan', array(OCM_Site_Cleanup::class, 'ajax_scan'));
+        add_action('wp_ajax_ocm_cleanup_start', array(OCM_Site_Cleanup::class, 'ajax_start'));
+        add_action('wp_ajax_ocm_cleanup_step', array(OCM_Site_Cleanup::class, 'ajax_step'));
+        add_action('wp_ajax_ocm_cleanup_stop', array(OCM_Site_Cleanup::class, 'ajax_stop'));
+        add_action('wp_ajax_ocm_cleanup_undo', array(OCM_Site_Cleanup::class, 'ajax_undo'));
+        add_action('wp_ajax_ocm_cleanup_dismiss', array(OCM_Site_Cleanup::class, 'ajax_dismiss'));
+        add_action('wp_ajax_ocm_cleanup_space', array(OCM_Site_Cleanup::class, 'ajax_space'));
         add_action('plugins_loaded', array(__CLASS__, 'init_background_jobs'));
         add_action('plugins_loaded', array(__CLASS__, 'init_handler'));
         add_action('rest_api_init', static function () {
@@ -356,6 +389,11 @@ class One_Click_Migration
                 'saveTelemetry' => wp_create_nonce('ocm_local_save_telemetry'),
                 'cancel' => wp_create_nonce('ocm_local_cancel'),
             ),
+            'srNonce' => wp_create_nonce('ocm_sr'),
+            'srRun' => OCM_Search_Replace::public_run(OCM_Search_Replace::get_run()),
+            'cleanupNonce' => wp_create_nonce('ocm_cleanup'),
+            'cleanupRun' => OCM_Site_Cleanup::public_run(OCM_Site_Cleanup::get_run()),
+            'cleanupScan' => OCM_Site_Cleanup::public_scan(),
             'i18n' => OCM_Admin_Page::script_strings(),
         ));
     }
@@ -926,7 +964,7 @@ class One_Click_Migration
         // does not leave an empty file that suppresses later download attempts.
         if (isset($urls->log_download) && !file_exists($file)) {
             try {
-                $client = new Client();
+                $client = new Client(OCM_CA_Bundle::guzzle());
                 $response = $client->get($urls->log_download, ['http_errors' => false]);
 
                 if ($response->getStatusCode() === 200) {
@@ -1092,6 +1130,11 @@ class One_Click_Migration
      * PUT the whole local log to the presigned log URL. A 404 means the bucket
      * is gone: drop the local log and, unless called from a flush, send the
      * admin to the no_bucket notice.
+     *
+     * When the PUT cannot connect at all (no HTTP answer: a firewall, a proxy,
+     * a certificate problem), a backup sends the log through the registration
+     * service instead (relay_log()), which this site reached moments ago.
+     * Without that the run leaves nothing behind to say why it stopped.
      */
     private static function upload_log($url, $may_redirect)
     {
@@ -1101,31 +1144,171 @@ class One_Click_Migration
             return;
         }
 
-        try {
-            $request = new Request(
-                'PUT',
-                $url,
-                [],
-                $body
-            );
+        // Once the relay has delivered for this URL, the rest of the request
+        // skips the direct PUT: each failed connection costs its full timeout.
+        $relay = self::$log_relay_url === $url;
 
-            $client = new Client();
-            $client->send($request);
-        } catch (Exception $e) {
-            if ($e->getCode() === 404) {
-                self::delete_log_file();
-                if ($may_redirect) {
-                    wp_safe_redirect(admin_url('tools.php?page=one-click-migration&message=no_bucket'));
-                    exit;
+        if (!$relay) {
+            try {
+                $request = new Request(
+                    'PUT',
+                    $url,
+                    [],
+                    $body
+                );
+
+                $client = new Client(OCM_CA_Bundle::guzzle());
+                $client->send($request);
+            } catch (Exception $e) {
+                if ($e->getCode() === 404) {
+                    self::delete_log_file();
+                    if ($may_redirect) {
+                        wp_safe_redirect(admin_url('tools.php?page=one-click-migration&message=no_bucket'));
+                        exit;
+                    }
+                    return;
                 }
-                return;
+                if (self::is_connection_failure($e)) {
+                    self::note_log_upload_unreachable($e);
+                    $relay = true;
+                } else {
+                    // Try again at the next upload, hand-over or shutdown.
+                    self::defer_log_upload($url);
+                }
             }
-            // Try again at the next upload, hand-over or shutdown.
-            self::defer_log_upload($url);
+        }
+
+        if ($relay) {
+            if (self::relay_log($url)) {
+                self::$log_relay_url = $url;
+            } else {
+                self::$log_relay_url = '';
+                // Try again at the next upload, hand-over or shutdown.
+                self::defer_log_upload($url);
+            }
         }
 
         self::$log_uploaded_url = $url;
         self::$log_uploaded_at = microtime(true);
+    }
+
+    /**
+     * True when a log PUT got no HTTP answer at all. A 403 or 404 from S3 is
+     * an answer: the relay could not do better and is not tried.
+     */
+    private static function is_connection_failure($e)
+    {
+        if ($e instanceof \GuzzleHttp\Exception\ConnectException) {
+            return true;
+        }
+        return $e instanceof \GuzzleHttp\Exception\RequestException && !$e->hasResponse();
+    }
+
+    /**
+     * Record once per request why the log PUT could not connect. Hidden from
+     * the progress card (SYSLOG); it is what the relayed log is for. Appended
+     * directly: write_to_log() would start another upload.
+     */
+    private static function note_log_upload_unreachable($e)
+    {
+        if (self::$log_unreachable_noted) {
+            return;
+        }
+        self::$log_unreachable_noted = true;
+
+        // Guzzle names the presigned URL: keep the host, drop the signature.
+        $reason = preg_replace('~(https?://[^\s?]+)\?\S*~', '$1', (string) $e->getMessage());
+        // A line holding "Error:" reads as a failed step to the log parsers.
+        $reason = self::sanitize_log_message(str_replace('Error:', 'error', (string) $reason));
+        self::append_log_line(
+            OCM_DEBUG_LOG_FILE,
+            date('m/d/YTH:i:sa') . ' - ' . self::LOG_UPLOAD_UNREACHABLE_MARKER . ' ' . $reason
+        );
+    }
+
+    /**
+     * Send the log for $url through the registration service. Only a backup
+     * that is still running can: it holds the restore code until the code is
+     * emailed, and the service refuses a finished backup. One failed attempt
+     * ends relaying for this request.
+     *
+     * @return bool True when the service stored the log.
+     */
+    private static function relay_log($url)
+    {
+        if (self::$log_relay_failed || !class_exists(__NAMESPACE__ . '\\OCM_S3')) {
+            return false;
+        }
+
+        $urls      = get_option('ocm_presigned_urls');
+        $bucket_id = (string) get_option('ocm_bucket_id', '');
+        $email     = (string) get_option('ocm_user_email', '');
+        $code      = (string) get_option('ocm_restore_code_plain', '');
+        // $url can be a previous run's (lines held back for it): never send
+        // that log under this run's bucket.
+        if (!is_object($urls) || empty($urls->log) || (string) $urls->log !== $url
+            || '' === $bucket_id || '' === $email || '' === $code
+        ) {
+            return false;
+        }
+
+        $log = @file_get_contents(OCM_DEBUG_LOG_FILE);
+        if (!is_string($log) || '' === $log) {
+            return false;
+        }
+
+        try {
+            $sent = OCM_S3::relay_log($email, $bucket_id, $code, self::relay_log_body($log, $bucket_id));
+        } catch (\Throwable $e) {
+            $sent = false;
+        }
+        if (!$sent) {
+            self::$log_relay_failed = true;
+        }
+        return $sent;
+    }
+
+    /**
+     * The log as the relay sends it: whole when it fits in
+     * RELAY_LOG_MAX_BYTES, else its tail from a line start. The lines the
+     * log monitor reads from the top of a run (1CmSyncers/save_s3_log_data.php
+     * only takes a log whose last "Backup ID:" line names its bucket) are
+     * carried over from the part left out.
+     *
+     * @param string $log
+     * @param string $bucket_id
+     * @return string
+     */
+    public static function relay_log_body($log, $bucket_id)
+    {
+        $log = (string) $log;
+        if (strlen($log) <= self::RELAY_LOG_MAX_BYTES) {
+            return $log;
+        }
+
+        $start = strlen($log) - self::RELAY_LOG_MAX_BYTES;
+        $newline = strpos($log, "\n", $start);
+        $start = false === $newline ? $start : $newline + 1;
+        $head = substr($log, 0, $start);
+
+        $kept = array();
+        $needles = array('Site URL: ', 'WP Version: ', 'PHP Version: ', 'OCM Plugin Version: ', 'Current IP Address: ', 'Backup ID: ' . $bucket_id);
+        foreach ($needles as $needle) {
+            $pos = strrpos($head, $needle);
+            if (false === $pos) {
+                continue;
+            }
+            $line_start = strrpos($head, "\n", $pos - strlen($head));
+            $line_start = false === $line_start ? 0 : $line_start + 1;
+            $line_end = strpos($head, "\n", $pos);
+            $line_end = false === $line_end ? strlen($head) : $line_end;
+            $kept[$line_start] = rtrim(substr($head, $line_start, $line_end - $line_start), "\r");
+        }
+        ksort($kept);
+
+        return '[...CUT...] relayed log, first ' . $start . ' bytes left out' . "\n"
+            . ($kept ? implode("\n", $kept) . "\n" : '')
+            . substr($log, $start);
     }
 
     public static function ensure_private_log_directory()
@@ -1578,7 +1761,7 @@ PHP;
         }
 
         try {
-            $client = new Client();
+            $client = new Client(OCM_CA_Bundle::guzzle());
             $response = $client->get($urls->log_download, ['http_errors' => false, 'timeout' => 15]);
             if ($response->getStatusCode() !== 200) {
                 return;

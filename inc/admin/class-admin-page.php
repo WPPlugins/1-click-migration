@@ -226,6 +226,69 @@ class OCM_Admin_Page
             'localLogLoadFailed'    => __('Could not load local log.', '1-click-migration'),
             'localOpBackup'         => __('Backup', '1-click-migration'),
             'localOpRestore'        => __('Restore', '1-click-migration'),
+            'localOpSearchReplace'  => __('Search & Replace', '1-click-migration'),
+            'srTablesCount'         => __('%1$d of %2$d', '1-click-migration'),
+            'srNeedSearch'          => __('Type at least 3 characters to search for.', '1-click-migration'),
+            'srNeedTables'          => __('Choose at least one table.', '1-click-migration'),
+            'srSameText'            => __('The replacement is the same as the search text, so there is nothing to change.', '1-click-migration'),
+            'srPreviewing'          => __('Looking for matches…', '1-click-migration'),
+            'srPreviewTitle'        => __('Preview', '1-click-migration'),
+            'srPreviewNone'         => __('No matches found. Nothing would change.', '1-click-migration'),
+            'srPreviewSummary'      => __('%1$s rows in %2$s tables would change.', '1-click-migration'),
+            'srPreviewStale'        => __('You changed the search since the preview. Preview again before replacing.', '1-click-migration'),
+            'srSamplesTitle'        => __('Examples', '1-click-migration'),
+            'srBefore'              => __('Before', '1-click-migration'),
+            'srAfter'               => __('After', '1-click-migration'),
+            'srTableCol'            => __('Table', '1-click-migration'),
+            'srRowsCol'             => __('Rows', '1-click-migration'),
+            'srSiteAddressWarn'     => __('This changes your site\'s own address. You\'ll be signed out and need to sign in again at the new address.', '1-click-migration'),
+            'srConfirm'             => __('Replace "%1$s" with "%2$s" in %3$s rows? Your database is backed up first, so you can undo this.', '1-click-migration'),
+            'srBackingUp'           => __('Backing up the database first…', '1-click-migration'),
+            'srReplacing'           => __('Replacing… %1$s of %2$s tables done', '1-click-migration'),
+            'srRunTitle'            => __('Search & Replace', '1-click-migration'),
+            'srDone'                => __('Done', '1-click-migration'),
+            'srFailed'              => __('Stopped with a problem', '1-click-migration'),
+            'srStopped'             => __('Stopped', '1-click-migration'),
+            'srStopConfirm'         => __('Stop now? Tables already done keep the new text; you can undo afterwards.', '1-click-migration'),
+            'srUndoConfirm'         => __('Put the whole database back as it was at %s? Anything saved since then (posts, orders, comments, settings) will be lost too.', '1-click-migration'),
+            'srUndoStarted'         => __('Undo started. Follow it on the Local Backups tab.', '1-click-migration'),
+            'srUndone'              => __('This change was undone.', '1-click-migration'),
+            'srBackupGone'          => __('The backup taken before this change was deleted, so Undo isn\'t available.', '1-click-migration'),
+            'srWarnings'            => __('Skipped:', '1-click-migration'),
+            'srBusy'                => __('Another tab is working on this right now.', '1-click-migration'),
+            'srObjectsSkippedOne'   => __('%s value keeps the old text: it sits inside plugin data that can\'t be changed safely.', '1-click-migration'),
+            'srObjectsSkippedMany'  => __('%s values keep the old text: it sits inside plugin data that can\'t be changed safely.', '1-click-migration'),
+            'srConnectionLost'      => __('Lost the connection to your site. It will continue where it left off when you reopen this page.', '1-click-migration'),
+            'runSessionExpired'     => __('You were signed out, or this page expired. Reload the page and sign in again. Anything that was running continues from where it stopped.', '1-click-migration'),
+            'localOpSiteCleanup'    => __('Site Cleanup', '1-click-migration'),
+            'clScanning'            => __('Scanning…', '1-click-migration'),
+            'clScanTitle'           => __('Scan', '1-click-migration'),
+            'clScanSummary'         => __('About %s can be removed with the ticked items.', '1-click-migration'),
+            'clScanNothing'         => __('Nothing worth removing was found. Your database is already tidy.', '1-click-migration'),
+            'clScannedAt'           => __('Scanned %s', '1-click-migration'),
+            'clItemMeta'            => __('%1$s · about %2$s', '1-click-migration'),
+            'clTablesMeta'          => __('%1$s tables · %2$s unused', '1-click-migration'),
+            'clNothing'             => __('Nothing to remove', '1-click-migration'),
+            'clNeedItems'           => __('Tick at least one thing to remove.', '1-click-migration'),
+            'clConfirm'             => __('Remove the ticked items? Your database is backed up first, so you can undo this.', '1-click-migration'),
+            'clRunTitle'            => __('Site Cleanup', '1-click-migration'),
+            'clCleaning'            => __('Cleaning… %1$s of %2$s done', '1-click-migration'),
+            'clStopConfirm'         => __('Stop now? What is removed so far stays removed; you can undo afterwards.', '1-click-migration'),
+            'clItemCol'             => __('Item', '1-click-migration'),
+            'clRemovedCol'          => __('Removed', '1-click-migration'),
+            'clSpaceLoading'        => __('Measuring…', '1-click-migration'),
+            'clSpaceTables'         => __('Largest database tables', '1-click-migration'),
+            'clSpaceFolders'        => __('Largest folders', '1-click-migration'),
+            'clSpaceUnused'         => __('%s unused (Reclaim space gives it back)', '1-click-migration'),
+            'clSpaceBackup'         => __('Another plugin\'s backups', '1-click-migration'),
+            'clSpaceNotMoved'       => __('not moved by a migration, but uses disk space', '1-click-migration'),
+            'clSpaceMoved'          => __('moved with every migration', '1-click-migration'),
+            'clSpacePartial'        => __('Some folders are larger than shown: measuring stopped after a few seconds.', '1-click-migration'),
+            'clSpaceInactiveThemes' => __('Inactive themes: %s', '1-click-migration'),
+            'clSpaceInactivePlugins'=> __('Inactive plugins: %s', '1-click-migration'),
+            'clSpaceManageThemes'   => __('Manage themes', '1-click-migration'),
+            'clSpaceManagePlugins'  => __('Manage plugins', '1-click-migration'),
+            'clSpaceNone'           => __('None', '1-click-migration'),
             'localStatusCompleted'  => __('Completed', '1-click-migration'),
             'localStatusFailed'     => __('Failed', '1-click-migration'),
             'localStatusSkipped'    => __('Skipped', '1-click-migration'),
@@ -288,7 +351,15 @@ class OCM_Admin_Page
         $support_url = OCM_Backup::SUPPORT_FORUM_URL;
         $local_active = class_exists(__NAMESPACE__ . '\\OCM_Local_Backup') && OCM_Local_Backup::is_running();
         $requested_mode = isset($_GET['mode']) ? sanitize_text_field($_GET['mode']) : '';
-        $active_mode = ($requested_mode === 'local' || ($requested_mode !== 'cloud' && $local_active && !$action_active)) ? 'local' : 'cloud';
+        $sr_active = class_exists(__NAMESPACE__ . '\\OCM_Search_Replace') && OCM_Search_Replace::is_running();
+        $cleanup_active = class_exists(__NAMESPACE__ . '\\OCM_Site_Cleanup') && OCM_Site_Cleanup::is_running();
+        if ($requested_mode === 'sr' || ($requested_mode === '' && $sr_active && !$action_active)) {
+            $active_mode = 'sr';
+        } elseif ($requested_mode === 'cleanup' || ($requested_mode === '' && $cleanup_active && !$action_active)) {
+            $active_mode = 'cleanup';
+        } else {
+            $active_mode = ($requested_mode === 'local' || ($requested_mode !== 'cloud' && $local_active && !$action_active)) ? 'local' : 'cloud';
+        }
         ?>
         <div class="ocm-app">
 
@@ -320,6 +391,8 @@ class OCM_Admin_Page
                 <div class="ocm-mode-bar" role="tablist" aria-label="<?php esc_attr_e('Plugin mode', '1-click-migration'); ?>">
                     <button type="button" class="ocm-mode-btn<?php echo $active_mode === 'cloud' ? ' active' : ''; ?>" data-ocm-mode="cloud" role="tab" aria-selected="<?php echo $active_mode === 'cloud' ? 'true' : 'false'; ?>"><?php esc_html_e('Cloud Migration', '1-click-migration'); ?></button>
                     <button type="button" class="ocm-mode-btn<?php echo $active_mode === 'local' ? ' active' : ''; ?>" data-ocm-mode="local" role="tab" aria-selected="<?php echo $active_mode === 'local' ? 'true' : 'false'; ?>"><?php esc_html_e('Local Backups', '1-click-migration'); ?></button>
+                    <button type="button" class="ocm-mode-btn<?php echo $active_mode === 'sr' ? ' active' : ''; ?>" data-ocm-mode="sr" role="tab" aria-selected="<?php echo $active_mode === 'sr' ? 'true' : 'false'; ?>"><?php esc_html_e('Search & Replace', '1-click-migration'); ?></button>
+                    <button type="button" class="ocm-mode-btn<?php echo $active_mode === 'cleanup' ? ' active' : ''; ?>" data-ocm-mode="cleanup" role="tab" aria-selected="<?php echo $active_mode === 'cleanup' ? 'true' : 'false'; ?>"><?php esc_html_e('Site Cleanup', '1-click-migration'); ?></button>
                 </div>
 
                 <div id="ocm-mode-cloud" class="ocm-mode-panel<?php echo $active_mode === 'cloud' ? ' active' : ''; ?>"<?php echo $active_mode === 'cloud' ? '' : ' hidden'; ?>>
@@ -457,6 +530,10 @@ class OCM_Admin_Page
                                         </button>
                                     </div>
                                     <div class="ocm-field-help"><?php esc_html_e('We\'ll email you a restore code when the backup completes.', '1-click-migration'); ?></div>
+                                    <?php $cleanup_hint = class_exists(__NAMESPACE__ . '\\OCM_Site_Cleanup') ? OCM_Site_Cleanup::migration_hint() : ''; ?>
+                                    <?php if ($cleanup_hint !== ''): ?>
+                                        <p class="ocm-cleanup-hint"><button type="button" class="ocm-btn-link" data-ocm-goto="cleanup"><?php echo esc_html($cleanup_hint); ?></button></p>
+                                    <?php endif; ?>
                                 </div>
                             </div>
 
@@ -538,12 +615,204 @@ class OCM_Admin_Page
                 </div><!-- /#ocm-mode-cloud -->
 
                 <?php self::render_local_backups_panel($active_mode); ?>
+                <?php self::render_search_replace_panel($active_mode); ?>
+                <?php self::render_site_cleanup_panel($active_mode); ?>
             </main>
 
             <!-- Hidden values consumed by admin-script.js -->
             <input type="hidden" id="ocmStartAction" value="<?php echo esc_attr($start_action_value); ?>"/>
             <a href="<?php echo esc_url(admin_url('admin-post.php?action=start_backup')); ?>" id="ocm-backup-href" hidden></a>
             <a href="<?php echo esc_url(admin_url('admin-post.php?action=start_restore')); ?>" id="ocm-restore-href" hidden></a>
+        </div>
+        <?php
+    }
+
+    /**
+     * Render the Site Cleanup panel. The script fills the checklist (from the
+     * stored scan), the results and the space report.
+     *
+     * @param string $active_mode 'cloud'|'local'|'sr'|'cleanup'
+     * @return void
+     */
+    private static function render_site_cleanup_panel($active_mode)
+    {
+        if (!class_exists(__NAMESPACE__ . '\\OCM_Site_Cleanup')) {
+            return;
+        }
+        $multisite = function_exists('is_multisite') && is_multisite();
+        $is_active = $active_mode === 'cleanup';
+        ?>
+        <div id="ocm-mode-cleanup" class="ocm-mode-panel<?php echo $is_active ? ' active' : ''; ?>"<?php echo $is_active ? '' : ' hidden'; ?>>
+            <div class="ocm-local-head">
+                <div>
+                    <h1 class="ocm-h1"><?php esc_html_e('Site Cleanup', '1-click-migration'); ?></h1>
+                    <p class="ocm-lede"><?php esc_html_e('Remove old revisions, spam and other leftovers from your database, and see what takes up space. Free. Your database is backed up first, so you can undo it with one click.', '1-click-migration'); ?></p>
+                </div>
+            </div>
+
+            <?php if ($multisite): ?>
+                <section class="ocm-card ocm-card-pad"><p><?php esc_html_e('Site Cleanup isn\'t available on multisite networks yet.', '1-click-migration'); ?></p></section>
+            <?php else: ?>
+            <div class="ocm-grid">
+                <section class="ocm-card ocm-card-pad" id="ocm-cl-form-card" aria-label="<?php esc_attr_e('Clean up', '1-click-migration'); ?>">
+                    <div class="ocm-h-stack ocm-card-headstrip">
+                        <span class="ocm-card-title"><?php esc_html_e('Clean up', '1-click-migration'); ?></span>
+                        <span class="ocm-mini-hint"><?php esc_html_e('Scan first, nothing changes until you confirm', '1-click-migration'); ?></span>
+                    </div>
+                    <div id="ocm-cl-items">
+                        <p class="ocm-local-empty"><?php esc_html_e('Click Scan site to see what can be removed and how much space it takes.', '1-click-migration'); ?></p>
+                    </div>
+                    <p class="ocm-local-action-msg" id="ocm-cl-msg" role="alert" hidden></p>
+                    <div class="ocm-local-form-actions ocm-sr-actions">
+                        <button type="button" class="ocm-btn ocm-btn-dark" id="ocm-cl-btn-scan"><?php esc_html_e('Scan site', '1-click-migration'); ?></button>
+                        <button type="button" class="ocm-btn ocm-btn-primary ocm-submit" id="ocm-cl-btn-clean" disabled><?php esc_html_e('Back up & clean', '1-click-migration'); ?></button>
+                    </div>
+                </section>
+
+                <section class="ocm-card ocm-card-pad" id="ocm-cl-result-card" aria-label="<?php esc_attr_e('Results', '1-click-migration'); ?>" aria-live="polite">
+                    <div class="ocm-h-stack ocm-card-headstrip">
+                        <span class="ocm-card-title" id="ocm-cl-result-title"><?php esc_html_e('Results', '1-click-migration'); ?></span>
+                        <span class="ocm-mini-hint" id="ocm-cl-result-hint"></span>
+                    </div>
+                    <div class="ocm-sr-progress" id="ocm-cl-progress" hidden>
+                        <div class="ocm-pg-bar"><div class="ocm-pg-fill running" id="ocm-cl-pg-fill" style="width:0%"></div></div>
+                        <div class="ocm-pg-status" id="ocm-cl-pg-status"></div>
+                    </div>
+                    <div id="ocm-cl-result-body">
+                        <p class="ocm-local-empty"><?php esc_html_e('The scan only counts. Nothing is removed until you click Back up & clean.', '1-click-migration'); ?></p>
+                    </div>
+                    <div class="ocm-local-form-actions ocm-sr-run-actions" id="ocm-cl-run-actions" hidden>
+                        <button type="button" class="ocm-btn ocm-btn-ghost" id="ocm-cl-btn-stop" hidden><?php esc_html_e('Stop', '1-click-migration'); ?></button>
+                        <button type="button" class="ocm-btn ocm-btn-dark" id="ocm-cl-btn-undo" hidden><?php esc_html_e('Undo', '1-click-migration'); ?></button>
+                        <button type="button" class="ocm-btn ocm-btn-ghost" id="ocm-cl-btn-dismiss" hidden><?php esc_html_e('Done', '1-click-migration'); ?></button>
+                    </div>
+                    <p class="ocm-cl-migrate" id="ocm-cl-migrate" hidden>
+                        <button type="button" class="ocm-btn-link" data-ocm-goto="cloud"><?php esc_html_e('Ready to move this site? Start a migration.', '1-click-migration'); ?></button>
+                    </p>
+                </section>
+            </div>
+
+            <section class="ocm-card ocm-card-pad ocm-cl-space-card" id="ocm-cl-space-card" aria-label="<?php esc_attr_e('What\'s taking up space', '1-click-migration'); ?>">
+                <div class="ocm-h-stack ocm-card-headstrip">
+                    <span class="ocm-card-title"><?php esc_html_e('What\'s taking up space', '1-click-migration'); ?></span>
+                    <span class="ocm-mini-hint"><?php esc_html_e('Read-only, changes nothing', '1-click-migration'); ?></span>
+                </div>
+                <div id="ocm-cl-space-body">
+                    <button type="button" class="ocm-btn ocm-btn-ghost ocm-btn-sm" id="ocm-cl-btn-space"><?php esc_html_e('Show the largest tables and folders', '1-click-migration'); ?></button>
+                </div>
+            </section>
+            <?php endif; ?>
+        </div>
+        <?php
+    }
+
+    /**
+     * Render the Search & Replace panel. The script fills the result card.
+     *
+     * @param string $active_mode 'cloud'|'local'|'sr'
+     * @return void
+     */
+    private static function render_search_replace_panel($active_mode)
+    {
+        if (!class_exists(__NAMESPACE__ . '\\OCM_Search_Replace')) {
+            return;
+        }
+        $multisite = function_exists('is_multisite') && is_multisite();
+        $tables = $multisite ? array() : OCM_Search_Replace::list_tables();
+        $home = (string) get_option('home', '');
+        $https_from = '';
+        if (stripos($home, 'http://') === 0) {
+            $https_from = untrailingslashit($home);
+        }
+        $is_active = $active_mode === 'sr';
+        ?>
+        <div id="ocm-mode-sr" class="ocm-mode-panel<?php echo $is_active ? ' active' : ''; ?>"<?php echo $is_active ? '' : ' hidden'; ?>>
+            <div class="ocm-local-head">
+                <div>
+                    <h1 class="ocm-h1"><?php esc_html_e('Search & Replace', '1-click-migration'); ?></h1>
+                    <p class="ocm-lede"><?php esc_html_e('Find text anywhere in your database and replace it, including inside saved settings and widgets. Free. Your database is backed up first, so you can undo it with one click.', '1-click-migration'); ?></p>
+                </div>
+            </div>
+
+            <?php if ($multisite): ?>
+                <section class="ocm-card ocm-card-pad"><p><?php esc_html_e('Search & Replace isn\'t available on multisite networks yet.', '1-click-migration'); ?></p></section>
+            <?php else: ?>
+            <div class="ocm-grid">
+                <section class="ocm-card ocm-card-pad" id="ocm-sr-form-card" aria-label="<?php esc_attr_e('Find and replace', '1-click-migration'); ?>">
+                    <div class="ocm-h-stack ocm-card-headstrip">
+                        <span class="ocm-card-title"><?php esc_html_e('Find and replace', '1-click-migration'); ?></span>
+                        <span class="ocm-mini-hint"><?php esc_html_e('Preview first, nothing changes until you confirm', '1-click-migration'); ?></span>
+                    </div>
+
+                    <div class="ocm-field" style="margin-bottom:12px;">
+                        <label class="ocm-label" for="ocm-sr-search"><?php esc_html_e('Search for', '1-click-migration'); ?></label>
+                        <input id="ocm-sr-search" class="ocm-input ocm-local-input-plain" type="text" maxlength="2000" autocomplete="off" spellcheck="false" placeholder="<?php esc_attr_e('e.g. http://old-domain.com', '1-click-migration'); ?>"/>
+                    </div>
+                    <div class="ocm-field" style="margin-bottom:12px;">
+                        <label class="ocm-label" for="ocm-sr-replace"><?php esc_html_e('Replace with', '1-click-migration'); ?> <span class="ocm-hint">&mdash; <?php esc_html_e('leave empty to delete the text', '1-click-migration'); ?></span></label>
+                        <input id="ocm-sr-replace" class="ocm-input ocm-local-input-plain" type="text" maxlength="2000" autocomplete="off" spellcheck="false" placeholder="<?php esc_attr_e('e.g. https://new-domain.com', '1-click-migration'); ?>"/>
+                    </div>
+
+                    <?php if ($https_from !== ''): ?>
+                        <p class="ocm-sr-preset">
+                            <button type="button" class="ocm-btn ocm-btn-ghost ocm-btn-sm" id="ocm-sr-preset-https"
+                                data-from="<?php echo esc_attr($https_from); ?>"
+                                data-to="<?php echo esc_attr('https://' . substr($https_from, 7)); ?>"><?php esc_html_e('Switch this site\'s links to https', '1-click-migration'); ?></button>
+                        </p>
+                    <?php endif; ?>
+
+                    <div class="ocm-adv-grid open ocm-sr-options">
+                        <label class="ocm-check"><input type="checkbox" id="ocm-sr-match-case" checked><span><?php esc_html_e('Match case', '1-click-migration'); ?><small><?php esc_html_e('"Apple" won\'t match "apple"', '1-click-migration'); ?></small></span></label>
+                        <label class="ocm-check"><input type="checkbox" id="ocm-sr-skip-guid" checked><span><?php esc_html_e('Leave post GUIDs alone', '1-click-migration'); ?><small><?php esc_html_e('Recommended: feed readers use them', '1-click-migration'); ?></small></span></label>
+                    </div>
+
+                    <details class="ocm-sr-tables" id="ocm-sr-tables">
+                        <summary><?php esc_html_e('Tables', '1-click-migration'); ?> <span id="ocm-sr-tables-count"><?php
+                            /* translators: 1: tables selected, 2: all tables */
+                            echo esc_html(sprintf(__('%1$d of %2$d', '1-click-migration'), count($tables), count($tables)));
+                        ?></span></summary>
+                        <p class="ocm-sr-tables-tools">
+                            <button type="button" class="ocm-btn-link" id="ocm-sr-tables-all"><?php esc_html_e('Select all', '1-click-migration'); ?></button>
+                            <button type="button" class="ocm-btn-link" id="ocm-sr-tables-none"><?php esc_html_e('Select none', '1-click-migration'); ?></button>
+                        </p>
+                        <div class="ocm-sr-tables-list">
+                            <?php foreach ($tables as $t): ?>
+                                <label class="ocm-check"><input type="checkbox" data-ocm-sr-table="<?php echo esc_attr($t['name']); ?>" checked><span><?php echo esc_html($t['name']); ?><small><?php
+                                    /* translators: 1: number of rows, 2: size */
+                                    echo esc_html(sprintf(__('%1$s rows · %2$s', '1-click-migration'), number_format_i18n($t['rows']), OCM_Backup::readable_bytes($t['size'])));
+                                ?></small></span></label>
+                            <?php endforeach; ?>
+                        </div>
+                    </details>
+
+                    <p class="ocm-local-action-msg" id="ocm-sr-msg" role="alert" hidden></p>
+
+                    <div class="ocm-local-form-actions ocm-sr-actions">
+                        <button type="button" class="ocm-btn ocm-btn-dark" id="ocm-sr-btn-preview"><?php esc_html_e('Preview changes', '1-click-migration'); ?></button>
+                        <button type="button" class="ocm-btn ocm-btn-primary ocm-submit" id="ocm-sr-btn-replace" disabled><?php esc_html_e('Back up & replace', '1-click-migration'); ?></button>
+                    </div>
+                </section>
+
+                <section class="ocm-card ocm-card-pad" id="ocm-sr-result-card" aria-label="<?php esc_attr_e('Results', '1-click-migration'); ?>" aria-live="polite">
+                    <div class="ocm-h-stack ocm-card-headstrip">
+                        <span class="ocm-card-title" id="ocm-sr-result-title"><?php esc_html_e('Results', '1-click-migration'); ?></span>
+                        <span class="ocm-mini-hint" id="ocm-sr-result-hint"></span>
+                    </div>
+                    <div class="ocm-sr-progress" id="ocm-sr-progress" hidden>
+                        <div class="ocm-pg-bar"><div class="ocm-pg-fill running" id="ocm-sr-pg-fill" style="width:0%"></div></div>
+                        <div class="ocm-pg-status" id="ocm-sr-pg-status"></div>
+                    </div>
+                    <div id="ocm-sr-result-body">
+                        <p class="ocm-local-empty"><?php esc_html_e('Type what to look for, then click Preview changes. You\'ll see what would change before anything does.', '1-click-migration'); ?></p>
+                    </div>
+                    <div class="ocm-local-form-actions ocm-sr-run-actions" id="ocm-sr-run-actions" hidden>
+                        <button type="button" class="ocm-btn ocm-btn-ghost" id="ocm-sr-btn-stop" hidden><?php esc_html_e('Stop', '1-click-migration'); ?></button>
+                        <button type="button" class="ocm-btn ocm-btn-dark" id="ocm-sr-btn-undo" hidden><?php esc_html_e('Undo', '1-click-migration'); ?></button>
+                        <button type="button" class="ocm-btn ocm-btn-ghost" id="ocm-sr-btn-dismiss" hidden><?php esc_html_e('Done', '1-click-migration'); ?></button>
+                    </div>
+                </section>
+            </div>
+            <?php endif; ?>
         </div>
         <?php
     }
@@ -771,7 +1040,7 @@ class OCM_Admin_Page
                         <div class="ocm-field">
                             <label class="ocm-label" for="ocm-local-keep-last"><?php esc_html_e('Keep last N backups', '1-click-migration'); ?></label>
                             <input id="ocm-local-keep-last" class="ocm-input ocm-local-input-plain" type="number" min="0" max="500" value="<?php echo (int) $storage['keep_last']; ?>"/>
-                            <div class="ocm-field-help"><?php esc_html_e('Keeps the newest N backups and deletes older ones automatically. Manual and scheduled backups both count. 0 keeps all of them.', '1-click-migration'); ?></div>
+                            <div class="ocm-field-help"><?php esc_html_e('Keeps the newest N backups and deletes older ones automatically. Manual and scheduled backups both count. Backups taken before a search & replace or a cleanup are counted on their own. 0 keeps all of them.', '1-click-migration'); ?></div>
                         </div>
                         <div class="ocm-field">
                             <label class="ocm-label" for="ocm-local-min-free"><?php esc_html_e('Minimum free space guard (MB)', '1-click-migration'); ?></label>
@@ -786,7 +1055,7 @@ class OCM_Admin_Page
                     </label>
                     <div class="ocm-field-help ocm-local-telemetry-note"><?php
                         /* translators: %s: the web address the reports are sent to */
-                        echo esc_html(sprintf(__('Optional and off by default. When this is on, the plugin sends a short anonymous report to %s: once when you turn it on, each time a local backup or restore finishes or fails, when you change the schedule, and if the plugin crashes during a local backup or restore.', '1-click-migration'), $telemetry_url));
+                        echo esc_html(sprintf(__('Optional and off by default. When this is on, the plugin sends a short anonymous report to %s: once when you turn it on, each time a local backup, restore, search & replace or cleanup finishes or fails, when you change the schedule, and if the plugin crashes during a local backup or restore.', '1-click-migration'), $telemetry_url));
                         echo ' ';
                         esc_html_e('Sent: an anonymous, hashed install ID, whether the backup or restore worked, the selected parts, a size range, how long it took, whether a schedule is on and how often it runs, your WordPress, PHP and plugin versions, a short error code, and for crashes the plugin file and line number.', '1-click-migration');
                         echo ' ';
@@ -945,7 +1214,13 @@ class OCM_Admin_Page
                                 </thead>
                                 <tbody>
                                     <?php foreach ($activity as $act):
-                                        $act_type = isset($act['type']) && $act['type'] === 'restore' ? 'restore' : 'backup';
+                                        $act_type = isset($act['type']) && in_array($act['type'], array('restore', 'search_replace', 'site_cleanup'), true) ? $act['type'] : 'backup';
+                                        $act_type_labels = array(
+                                            'backup' => __('Backup', '1-click-migration'),
+                                            'restore' => __('Restore', '1-click-migration'),
+                                            'search_replace' => __('Search & Replace', '1-click-migration'),
+                                            'site_cleanup' => __('Site Cleanup', '1-click-migration'),
+                                        );
                                         $act_trigger = isset($act['trigger']) && $act['trigger'] === 'scheduled' ? 'scheduled' : 'manual';
                                         $act_status = isset($act['status']) ? (string) $act['status'] : 'completed';
                                         $act_status_label = isset($status_labels[$act_status]) ? $status_labels[$act_status] : ucfirst($act_status);
@@ -969,7 +1244,7 @@ class OCM_Admin_Page
                                                 <?php endif; ?>
                                             </td>
                                             <td>
-                                                <span class="ocm-op-badge ocm-op-<?php echo esc_attr($act_type); ?>"><?php echo $act_type === 'restore' ? esc_html__('Restore', '1-click-migration') : esc_html__('Backup', '1-click-migration'); ?></span>
+                                                <span class="ocm-op-badge ocm-op-<?php echo esc_attr($act_type); ?>"><?php echo esc_html($act_type_labels[$act_type]); ?></span>
                                                 <?php if ($act_type === 'backup'): ?>
                                                     <span class="ocm-trigger-badge ocm-trigger-<?php echo esc_attr($act_trigger); ?>"><?php echo $act_trigger === 'scheduled' ? esc_html__('Scheduled', '1-click-migration') : esc_html__('Manual', '1-click-migration'); ?></span>
                                                 <?php endif; ?>
@@ -1063,7 +1338,7 @@ class OCM_Admin_Page
                 <div class="ocm-modal-card ocm-local-modal-card">
                     <button type="button" class="ocm-modal-close" data-ocm-local-telemetry-decline aria-label="<?php esc_attr_e('Close', '1-click-migration'); ?>">&times;</button>
                     <h2 id="ocm-local-telemetry-title" class="ocm-modal-title"><?php esc_html_e('Help improve Local Backups?', '1-click-migration'); ?></h2>
-                    <p class="ocm-modal-body"><?php esc_html_e('Send an anonymous report when a local backup or restore finishes, fails or crashes. Never your site address, emails or backup contents. Off unless you allow it.', '1-click-migration'); ?></p>
+                    <p class="ocm-modal-body"><?php esc_html_e('Send an anonymous report when a local backup, restore, search & replace or cleanup finishes, fails or crashes. Never your site address, emails or backup contents. Off unless you allow it.', '1-click-migration'); ?></p>
                     <p class="ocm-modal-body"><?php esc_html_e('You can turn this off anytime under Schedule & Storage settings.', '1-click-migration'); ?></p>
                     <div class="ocm-modal-actions">
                         <button type="button" class="ocm-btn ocm-btn-primary" id="ocm-local-telemetry-allow"><?php esc_html_e('Allow & Continue', '1-click-migration'); ?></button>
@@ -1072,7 +1347,7 @@ class OCM_Admin_Page
                     <details class="ocm-local-telemetry-details">
                         <summary><?php esc_html_e('What is sent', '1-click-migration'); ?></summary>
                         <ul class="ocm-local-telemetry-list">
-                            <li><?php esc_html_e('When: once when you turn this on, each time a local backup or restore finishes or fails, when you change the backup schedule, and if the plugin crashes during a local backup or restore.', '1-click-migration'); ?></li>
+                            <li><?php esc_html_e('When: once when you turn this on, each time a local backup, restore, search & replace or cleanup finishes or fails, when you change the backup schedule, and if the plugin crashes during a local backup or restore.', '1-click-migration'); ?></li>
                             <li><?php esc_html_e('What: a hashed install ID, whether the backup or restore worked, the parts, a size range, how long it took, whether a schedule is on and how often it runs, your WordPress, PHP and plugin versions, a short error code, and for crashes the plugin file and line.', '1-click-migration'); ?></li>
                             <li><?php
                                 /* translators: %s: the web address the reports are sent to */
