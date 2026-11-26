@@ -13,27 +13,163 @@ class OCM_Restore_Precheck {
         return $values;
     }
 
+    /**
+     * Did a restore-code lookup fail because the 1-Click Migration service was
+     * busy or out of reach, rather than because of the code? OCM_S3 has already
+     * retried no answer, 429 and 5xx by then, so this is a rate limit or an
+     * outage that outlasted the retries. Only a 4xx other than 429 is an answer
+     * about the code itself: wrong, or expired.
+     *
+     * @param int   $status HTTP status of the last answer, 0 when none came.
+     * @param mixed $error  The answer's error field; 'network' when none came.
+     * @return bool
+     */
+    public static function lookup_unavailable($status, $error) {
+        $status = (int) $status;
+        return 'network' === $error || 429 === $status || $status < 400 || $status >= 500;
+    }
+
+    /** @return string For the admin when the lookup failed but the backup is fine. */
+    public static function service_busy_message() {
+        return __('The 1-Click Migration service is busy or could not be reached right now. Your backup is safe. Please try again in a minute.', '1-click-migration');
+    }
+
+    /** @return string For the admin when the service says the code is wrong or expired. */
+    public static function code_not_found_message() {
+        return __('No backup was found for this restore code. Check the code in your email. Restore codes work for 48 hours after the backup; if yours is older, make a new backup on the old site.', '1-click-migration');
+    }
+
+    /** Our own site: the only place a "Pay now" link may point. */
+    const PAY_URL_PREFIX = 'https://1clickmigration.com/';
+
+    /**
+     * Did the service answer that this backup exists but has not been paid for
+     * yet (HTTP 402, error payment_required)? Returns what the admin sees: the
+     * price ('' when the service named none), the pay link ('' unless it
+     * points at our own site), the backed-up site's host and when the backup
+     * was made (UTC "Y-m-d H:i:s"); each '' when missing or not in that exact
+     * shape (older servers send neither). Null for every other answer.
+     *
+     * @param mixed $redeem What OCM_S3::redeem_restore_code() returned.
+     * @return array|null
+     */
+    public static function payment_required($redeem) {
+        if (!is_object($redeem) || 402 !== (int) ($redeem->_status ?? 0) || 'payment_required' !== ($redeem->error ?? '')) {
+            return null;
+        }
+        $site = $redeem->site ?? '';
+        $created = $redeem->created ?? '';
+        return array(
+            'price'   => self::price_label($redeem->amount ?? '', $redeem->currency ?? ''),
+            'pay_url' => self::pay_url($redeem->pay_url ?? ''),
+            'site'    => is_string($site) && preg_match('/^[a-z0-9.-]{1,253}$/D', $site) ? $site : '',
+            'created' => is_string($created) && preg_match('/^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}$/D', $created) ? $created : '',
+        );
+    }
+
+    /**
+     * The pay page for one of this site's own backups, as shown on the
+     * backup-finished notice ("&s=b" tells the funnel where the click came
+     * from). '' unless the bucket id is exactly 32 hex characters.
+     *
+     * @param mixed $bucket_id
+     * @return string
+     */
+    public static function backup_pay_url($bucket_id) {
+        if (!is_string($bucket_id) || !preg_match('/^[a-f0-9]{32}$/D', $bucket_id)) {
+            return '';
+        }
+        return self::pay_url(self::PAY_URL_PREFIX . 'api/pay.php?b=' . $bucket_id . '&s=b');
+    }
+
+    /**
+     * "9.99", "USD" → "$9.99"; other currencies read "9.99 EUR". '' unless both
+     * are exactly an amount with two decimals and a three-letter code, so the
+     * service's answer can go into a message as it is.
+     */
+    public static function price_label($amount, $currency) {
+        if (!is_string($amount) || !is_string($currency)
+            || !preg_match('/^[0-9]{1,6}\.[0-9]{2}$/D', $amount) || !preg_match('/^[A-Z]{3}$/D', $currency)) {
+            return '';
+        }
+        return 'USD' === $currency ? '$' . $amount : $amount . ' ' . $currency;
+    }
+
+    /** The pay link, or '' unless it is a plain https address on our own site. */
+    public static function pay_url($url) {
+        return is_string($url) && strlen($url) <= 300 && 0 === strpos($url, self::PAY_URL_PREFIX)
+            && preg_match('/^[A-Za-z0-9:\/?&=._~%-]+$/D', $url) ? $url : '';
+    }
+
+    /**
+     * For the admin when the backup has to be paid for before it can be
+     * restored. With a pay link the admin page pays inside the restore and
+     * this is only the summary; without one (the redirect after a refused
+     * restore start, the log), the restore-code email is the way to pay.
+     *
+     * @param string $price    Price label, '' when unknown.
+     * @param bool   $has_link Whether the admin page can offer the pay step.
+     * @return string
+     */
+    public static function payment_required_message($price = '', $has_link = false) {
+        if ($has_link) {
+            if ('' !== $price) {
+                return sprintf(
+                    /* translators: %s: price of the migration, e.g. $9.99 */
+                    __('This backup is ready. Restoring it costs %s, one time. Pay here and the restore starts by itself as soon as the payment goes through. If the migration doesn\'t work, we\'ll fix it or refund you in full.', '1-click-migration'),
+                    $price
+                );
+            }
+            return __('This backup is ready. Pay here and the restore starts by itself as soon as the payment goes through. If the migration doesn\'t work, we\'ll fix it or refund you in full.', '1-click-migration');
+        }
+        if ('' !== $price) {
+            return sprintf(
+                /* translators: %s: price of the migration, e.g. $9.99 */
+                __('This backup hasn\'t been paid for yet. Restoring it costs %s, one time. Pay from the link in your restore-code email, then click Check backup & restore again. If the migration doesn\'t work, we\'ll fix it or refund you in full.', '1-click-migration'),
+                $price
+            );
+        }
+        return __('This backup hasn\'t been paid for yet. Pay from the link in your restore-code email, then click Check backup & restore again. If the migration doesn\'t work, we\'ll fix it or refund you in full.', '1-click-migration');
+    }
+
     public static function prepare() {
         if (!current_user_can('manage_options')) {
-            wp_send_json_error(array('message' => 'Forbidden'), 403);
+            wp_send_json_error(array('message' => __('Only a site administrator can do this.', '1-click-migration')), 403);
         }
         check_ajax_referer('ocm_prepare_restore');
         if (get_option('ocm_action_start_backup') || get_option('ocm_action_start_restore')) {
-            wp_send_json_error(array('message' => 'Wait for the current operation to finish, or stop it before preparing a restore.'), 409);
+            wp_send_json_error(array('message' => __('Wait for the current operation to finish, or stop it before preparing a restore.', '1-click-migration')), 409);
         }
         $code = isset($_POST['restore_code']) && is_string($_POST['restore_code'])
             ? strtoupper(preg_replace('/[\s-]+/', '', wp_unslash($_POST['restore_code']))) : '';
         if (!preg_match('/^[A-Z0-9]{6,32}$/', $code)) {
-            wp_send_json_error(array('message' => 'Enter the restore code from your backup email.'), 400);
+            wp_send_json_error(array('message' => __('Enter the restore code from your backup email.', '1-click-migration')), 400);
         }
         $excluded = self::exclusions($_POST['selected'] ?? '');
         if (count($excluded) === 4) {
-            wp_send_json_error(array('message' => 'Select at least one section to restore.'), 400);
+            wp_send_json_error(array('message' => __('Select at least one section to restore.', '1-click-migration')), 400);
         }
         $redeem = OCM_S3::redeem_restore_code($code);
         if (!is_object($redeem) || ($redeem->_status ?? 0) !== 200 || !empty($redeem->error)
             || empty($redeem->bucket_id) || empty($redeem->aes_key_b64) || empty($redeem->urls)) {
-            wp_send_json_error(array('message' => 'The backup could not be opened. Check your restore code and try again.'), 400);
+            // A busy or unreachable service must not read as a lost backup.
+            $redeem = is_object($redeem) ? $redeem : (object) array();
+            // Neither must a backup that is simply waiting to be paid for.
+            $payment = self::payment_required($redeem);
+            if (null !== $payment) {
+                wp_send_json_error(array(
+                    'code'    => 'payment_required',
+                    'message' => self::payment_required_message($payment['price'], '' !== $payment['pay_url']),
+                    'pay_url' => $payment['pay_url'],
+                    'price'   => $payment['price'],
+                    'site'    => $payment['site'],
+                    'created' => $payment['created'],
+                ), 400);
+            }
+            if (self::lookup_unavailable($redeem->_status ?? 0, $redeem->error ?? '')) {
+                wp_send_json_error(array('message' => self::service_busy_message()), 503);
+            }
+            wp_send_json_error(array('message' => self::code_not_found_message()), 400);
         }
         $manifest = null;
         if (!in_array('db', $excluded, true) && !empty($redeem->urls->log_download)) {
@@ -41,7 +177,7 @@ class OCM_Restore_Precheck {
                 'timeout' => 30, 'limit_response_size' => 4 * 1024 * 1024,
             ));
             if (is_wp_error($response) || !in_array((int) wp_remote_retrieve_response_code($response), array(200, 404), true)) {
-                wp_send_json_error(array('message' => 'The backup address check could not be downloaded. Please try again.'), 502);
+                wp_send_json_error(array('message' => __('The backup address check could not be downloaded. Please try again.', '1-click-migration')), 502);
             }
             if ((int) wp_remote_retrieve_response_code($response) === 200) {
                 $manifest = OCM_URL_Manifest::from_log(wp_remote_retrieve_body($response), $redeem->bucket_id);
@@ -60,7 +196,7 @@ class OCM_Restore_Precheck {
             'candidates' => $report['candidates'],
         );
         if (!set_transient('ocm_restore_precheck_' . $token, $plan, self::TTL)) {
-            wp_send_json_error(array('message' => 'The restore preparation could not be saved. Please try again.'), 500);
+            wp_send_json_error(array('message' => __('The restore preparation could not be saved. Please try again.', '1-click-migration')), 500);
         }
         $rows = OCM_Extra_Domains::public_rows($report['candidates']);
         $db = new OCM_DB();
@@ -91,23 +227,23 @@ class OCM_Restore_Precheck {
     /** Selection IDs are resolved exclusively against the server-side inventory. */
     public static function consume($token, $code, $excluded, $ids) {
         if (!is_string($token) || !preg_match('/^[a-zA-Z0-9]{32}$/', $token)) {
-            return new \WP_Error('precheck_missing', 'Check the backup again before starting restore.');
+            return new \WP_Error('precheck_missing', __('Check the backup again before starting restore.', '1-click-migration'));
         }
         $key = 'ocm_restore_precheck_' . $token;
         $plan = get_transient($key);
         if (!is_array($plan) || $plan['user'] !== get_current_user_id()
             || !hash_equals($plan['code_hash'], hash('sha256', $code))
             || $plan['destination'] !== site_url() || $plan['excluded'] !== self::exclusions($excluded)) {
-            return new \WP_Error('precheck_expired', 'The restore details changed or the check expired. Check the backup again.');
+            return new \WP_Error('precheck_expired', __('The restore details changed or the check expired. Check the backup again.', '1-click-migration'));
         }
         if (!is_array($ids) || count($ids) > OCM_Extra_Domains::MAX_CANDIDATES) {
-            return new \WP_Error('precheck_selection', 'The address selection is invalid. Check the backup again.');
+            return new \WP_Error('precheck_selection', __('The address selection is invalid. Check the backup again.', '1-click-migration'));
         }
         $selected = array();
         $available = array_column($plan['candidates'], null, 'id');
         foreach ($ids as $id) {
             if (!is_string($id) || !isset($available[$id])) {
-                return new \WP_Error('precheck_selection', 'The address selection is invalid. Check the backup again.');
+                return new \WP_Error('precheck_selection', __('The address selection is invalid. Check the backup again.', '1-click-migration'));
             }
             $selected[$id] = $available[$id];
         }

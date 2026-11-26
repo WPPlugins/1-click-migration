@@ -254,6 +254,13 @@ class OCM_SQL_Utils
         }
 
         $result = self::run('/usr/bin/env mysql --no-defaults --no-auto-rehash', $mysql_args);
+        if ($result && '-' !== $result_file && !self::cli_import_visible($result_file)) {
+            One_Click_Migration::write_to_log(sprintf(
+                'SYSLOG: mysql command-line import of "%s" reported success, but WordPress\'s database connection can\'t see it; importing it through $wpdb instead.',
+                basename($result_file)
+            ));
+            $result = false;
+        }
         if ($result == false)
         {
 	        One_Click_Migration::write_to_log('Notice: Database restore in progress. Please don\'t leave the plugin page.');
@@ -265,6 +272,49 @@ class OCM_SQL_Utils
         }
 
         self::sql_fix_after($result_file);
+        return true;
+    }
+
+    /**
+     * After the mysql command line reports success, check through WordPress's
+     * own connection that the dump's table is there, with rows when the dump
+     * inserts any. The command line can land where WordPress doesn't look
+     * (another server or socket, a db.php drop-in) or skip a file and still
+     * exit 0, and the options check then finds no siteurl (field restore
+     * 84630436). True when the table is visible, or when it can't be told.
+     *
+     * @param string $result_file
+     * @return bool
+     */
+    public static function cli_import_visible($result_file)
+    {
+        global $wpdb;
+        if (!is_object($wpdb) || !method_exists($wpdb, 'get_col') || !method_exists($wpdb, 'get_var')) {
+            return true;
+        }
+        $handle = @fopen($result_file, 'rb');
+        if (!$handle) {
+            return true;
+        }
+        $head = (string) fread($handle, self::SQL_STREAM_READ_BYTES);
+        fclose($handle);
+        if (!preg_match('/^\s*CREATE\s+TABLE(?:\s+IF\s+NOT\s+EXISTS)?\s+`?([^`\s(]+)`?/mi', $head, $m)) {
+            return true;
+        }
+        $table = $m[1];
+
+        $wpdb->last_error = '';
+        $tables = $wpdb->get_col('SHOW TABLES');
+        if (!is_array($tables) || (!$tables && '' !== (string) $wpdb->last_error)) {
+            return true;
+        }
+        // lower_case_table_names hosts list names in lower case.
+        if (!in_array(strtolower($table), array_map('strtolower', array_map('strval', $tables)), true)) {
+            return false;
+        }
+        if (preg_match('/^\s*INSERT\s+(?:IGNORE\s+)?INTO\s+`?' . preg_quote($table, '/') . '`?[\s(]/mi', $head)) {
+            return null !== $wpdb->get_var('SELECT 1 FROM `' . str_replace('`', '``', $table) . '` LIMIT 1');
+        }
         return true;
     }
 
@@ -298,6 +348,11 @@ class OCM_SQL_Utils
 
 	        self::reset_import_runtime_state();
 	        self::log_import_driver($wpdb, $result_file);
+	        // Dumps import one table per file in name order, so a child table
+	        // (wp_pbb_ab_test_variants) is created and filled before its parent
+	        // (wp_pbb_ab_tests). The CLI import and mysqldump's header turn the
+	        // checks off for that; the PHP exporter writes no header.
+	        self::query_imported_sql($wpdb, 'SET foreign_key_checks = 0');
 
 	        $error_count = 0;
 	        $statement_index = 0;
@@ -359,6 +414,7 @@ class OCM_SQL_Utils
 	            }
 	        }
 	        fclose($handle);
+	        self::query_imported_sql($wpdb, 'SET foreign_key_checks = 1');
 
 	        if ($remapped_statements > 0) {
 	            One_Click_Migration::write_to_log(sprintf(
@@ -1134,6 +1190,130 @@ class OCM_SQL_Utils
     }
 
     /**
+     * Table prefixes of every WordPress table set in a restore db/ folder, one
+     * per "*usermeta.sql" dump. The backup dumps every table in the database,
+     * so other installs or staging copies sharing it show up here too.
+     *
+     * @param string $db_dir
+     * @return string[] Sorted prefixes.
+     */
+    public static function wordpress_table_set_prefixes($db_dir)
+    {
+        $prefixes = array();
+        $db_dir = rtrim((string) $db_dir, '/\\');
+        foreach (@scandir($db_dir) ?: array() as $filename) {
+            if (preg_match('/^(.+)usermeta\.sql$/i', $filename, $match)
+                && is_file($db_dir . DIRECTORY_SEPARATOR . $filename)
+            ) {
+                $prefixes[] = $match[1];
+            }
+        }
+        sort($prefixes, SORT_STRING);
+        return array_values(array_unique($prefixes));
+    }
+
+    /**
+     * The table set a table belongs to: the longest prefix that starts its
+     * name, so "wp_old_options" belongs to "wp_old_" rather than "wp_".
+     *
+     * @param string   $table
+     * @param string[] $prefixes
+     * @return string|null
+     */
+    public static function table_set_prefix_for($table, array $prefixes)
+    {
+        $owner = null;
+        foreach ($prefixes as $prefix) {
+            if ($prefix !== '' && strpos((string) $table, $prefix) === 0
+                && ($owner === null || strlen($prefix) > strlen($owner))
+            ) {
+                $owner = $prefix;
+            }
+        }
+        return $owner;
+    }
+
+    /**
+     * The siteurl value in an options table dump (mysqldump or the PHP
+     * exporter), read in chunks so a large options table never loads whole.
+     *
+     * @param string $filepath
+     * @return string|null
+     */
+    public static function siteurl_from_options_dump($filepath)
+    {
+        $handle = @fopen($filepath, 'rb');
+        if (!$handle) {
+            return null;
+        }
+        $pattern = "/'siteurl'\\s*,\\s*'([^'\\\\]*+(?:\\\\.[^'\\\\]*+)*+)'/";
+        $carry = '';
+        $found = null;
+        while (!feof($handle)) {
+            $chunk = fread($handle, 1048576);
+            if ($chunk === false) {
+                break;
+            }
+            $text = $carry . $chunk;
+            if (preg_match($pattern, $text, $match) && strlen($match[1]) <= 2048) {
+                $found = stripcslashes($match[1]);
+                break;
+            }
+            // Keep enough of the tail for a row split across chunks.
+            $carry = substr($text, -4200);
+        }
+        fclose($handle);
+        return $found;
+    }
+
+    /**
+     * Pick the backed-up site's table prefix when the dump holds more than one
+     * WordPress table set. Prefers the prefix the backup recorded in its log;
+     * a backup made before that line existed falls back to the set whose
+     * options dump has the backup's site address as siteurl.
+     *
+     * @param string   $db_dir
+     * @param string[] $prefixes        From wordpress_table_set_prefixes().
+     * @param string   $recorded_prefix BACKUP_TABLE_PREFIX from the backup log, or ''.
+     * @param string   $source_url      The backup's site address, or ''.
+     * @return array{prefix:string,how:string}|false
+     */
+    public static function resolve_source_table_set($db_dir, array $prefixes, $recorded_prefix = '', $source_url = '')
+    {
+        if (count($prefixes) === 1) {
+            return array('prefix' => (string) reset($prefixes), 'how' => 'only');
+        }
+        if (is_string($recorded_prefix) && $recorded_prefix !== '' && in_array($recorded_prefix, $prefixes, true)) {
+            return array('prefix' => $recorded_prefix, 'how' => 'recorded');
+        }
+
+        $want = self::normalize_site_address($source_url);
+        if ($want === '') {
+            return false;
+        }
+        $db_dir = rtrim((string) $db_dir, '/\\') . DIRECTORY_SEPARATOR;
+        $matches = array();
+        foreach ($prefixes as $prefix) {
+            $siteurl = self::siteurl_from_options_dump($db_dir . $prefix . 'options.sql');
+            if ($siteurl !== null && self::normalize_site_address($siteurl) === $want) {
+                $matches[] = $prefix;
+            }
+        }
+        if (count($matches) === 1) {
+            return array('prefix' => $matches[0], 'how' => 'siteurl');
+        }
+        return false;
+    }
+
+    /** "https://Example.com/" and "http://example.com" compare equal. */
+    private static function normalize_site_address($url)
+    {
+        $url = strtolower(trim((string) $url));
+        $url = preg_replace('#^https?://#', '', $url);
+        return rtrim((string) $url, '/');
+    }
+
+    /**
      * Given a template string and an arbitrary number of arguments,
      * returns the final command, with the parameters escaped.
      */
@@ -1147,7 +1327,7 @@ class OCM_SQL_Utils
         return vsprintf($cmd, array_map('escapeshellarg', $args));
     }
 
-    public static function swap_table_prefix($filepath, $target_prefix = null)
+    public static function swap_table_prefix($filepath, $target_prefix = null, $source_prefix = '')
     {
         global $wpdb;
 
@@ -1155,7 +1335,9 @@ class OCM_SQL_Utils
             $target_prefix = $wpdb->base_prefix;
         }
 
-        $old_table_prefix = self::get_table_prefix($filepath);
+        $old_table_prefix = is_string($source_prefix) && $source_prefix !== ''
+            ? $source_prefix
+            : self::get_table_prefix($filepath);
         if ($old_table_prefix === false || $old_table_prefix === '') {
             return false;
         }
@@ -1188,7 +1370,8 @@ class OCM_SQL_Utils
 
     /**
      * Prepare dump for staging: source→dest data swap, statement heads → staging,
-     * foreign tables under staging, CONSTRAINT names stripped inside CREATE TABLE only.
+     * foreign tables under staging; inside CREATE TABLE only, CONSTRAINT names
+     * stripped and foreign keys pointed at the staged parent tables.
      */
     public static function prepare_sql_dump_for_staging($filepath, $dest_prefix, $staging_prefix, $source_prefix = '')
     {
@@ -1199,7 +1382,7 @@ class OCM_SQL_Utils
         ) {
             return false;
         }
-        if (!self::swap_table_prefix($filepath, $dest_prefix)) {
+        if (!self::swap_table_prefix($filepath, $dest_prefix, $source_prefix)) {
             return false;
         }
         if (!self::enforce_statement_table_prefix($filepath, $dest_prefix, $staging_prefix)) {
@@ -1208,7 +1391,7 @@ class OCM_SQL_Utils
         if (!self::stage_foreign_table_statements($filepath, $staging_prefix, $dest_prefix, $source_prefix)) {
             return false;
         }
-        return self::strip_create_table_constraint_names($filepath);
+        return self::strip_create_table_constraint_names($filepath, $dest_prefix, $staging_prefix);
     }
 
     /** Remap foreign-prefix statement heads onto `{staging}{original_table}`. */
@@ -1286,8 +1469,15 @@ class OCM_SQL_Utils
      * Bounded fread chunks (never fgets / never loads a whole line). Quote state
      * and a pending-escape flag span chunks so `\` at a 1 MiB boundary cannot
      * close a string early. Offset/strpos scan — no per-line remainder re-copy.
+     *
+     * With $reference_prefix and $staging_prefix, `REFERENCES `{reference}x``
+     * in those statements becomes `{staging}x`: a staged child otherwise keeps
+     * its foreign key on the live table, which a fresh site doesn't have
+     * (field restore 4945c8ae: errno 150 "Foreign key constraint is
+     * incorrectly formed") and which promote moves to the trash. RENAME TABLE
+     * carries the key over to the live name.
      */
-    public static function strip_create_table_constraint_names($filepath)
+    public static function strip_create_table_constraint_names($filepath, $reference_prefix = '', $staging_prefix = '')
     {
         $t0 = microtime(true);
         if (!is_string($filepath) || $filepath === '' || !is_file($filepath) || !is_readable($filepath)) {
@@ -1324,6 +1514,14 @@ class OCM_SQL_Utils
         // Only an incomplete CREATE TABLE line-head prefix (≤64 bytes), never a chunk remainder.
         $create_prefix = '';
         $stripped = 0;
+        $references = 0;
+        $reference_pattern = null;
+        if (is_string($reference_prefix) && $reference_prefix !== ''
+            && is_string($staging_prefix) && $staging_prefix !== ''
+            && $reference_prefix !== $staging_prefix
+        ) {
+            $reference_pattern = '/\b((?i:REFERENCES)\s+`)' . preg_quote($reference_prefix, '/') . '/';
+        }
         $ok = true;
         $create_cap = self::SQL_STREAM_READ_BYTES;
         // Optional post-CREATE tail processed via offset scan (not prepended onto the next fread).
@@ -1365,7 +1563,7 @@ class OCM_SQL_Utils
                         $create_buf = '';
                         break;
                     }
-                    $tail = self::strip_flush_create_buffer($create_buf, $out, $stripped, $ok);
+                    $tail = self::strip_flush_create_buffer($create_buf, $out, $stripped, $ok, $reference_pattern, $staging_prefix, $references);
                     if (!$ok) {
                         break;
                     }
@@ -1429,6 +1627,15 @@ class OCM_SQL_Utils
                 if ($in_string) {
                     $start = $i;
                     while ($i < $len) {
+                        // Jump to the next backslash or quote in one native
+                        // call. Walking a long text value byte by byte in PHP
+                        // took over 55 s of CPU on a 1 GB posts dump, more
+                        // than a host that caps requests at 60 s allows, and
+                        // the restore restarted this file until it gave up.
+                        $i += strcspn($chunk, "\\'", $i);
+                        if ($i >= $len) {
+                            break;
+                        }
                         $ch = $chunk[$i];
                         if ($ch === '\\') {
                             if ($i + 1 < $len) {
@@ -1551,21 +1758,34 @@ class OCM_SQL_Utils
                 basename($filepath)
             ));
         }
+        if ($references > 0) {
+            One_Click_Migration::write_to_log(sprintf(
+                'Notice: Pointed %d foreign key(s) in "%s" at the staging tables (prefix "%s" to "%s").',
+                $references,
+                basename($filepath),
+                $reference_prefix,
+                $staging_prefix
+            ));
+        }
         return true;
     }
 
     /**
-     * If $create_buf holds a full CREATE…; statement, strip CONSTRAINT names,
-     * write it, and return any trailing bytes after ";". Returns null when more
-     * input is needed. Sets $ok false on write/preg failure.
+     * If $create_buf holds a full CREATE…; statement, strip CONSTRAINT names
+     * (and remap REFERENCES when $reference_pattern is set), write it, and
+     * return any trailing bytes after ";". Returns null when more input is
+     * needed. Sets $ok false on write/preg failure.
      *
-     * @param string   $create_buf
-     * @param resource $out
-     * @param int      $stripped
-     * @param bool     $ok
+     * @param string      $create_buf
+     * @param resource    $out
+     * @param int         $stripped
+     * @param bool        $ok
+     * @param string|null $reference_pattern
+     * @param string      $staging_prefix
+     * @param int         $references
      * @return string|null
      */
-    private static function strip_flush_create_buffer(&$create_buf, $out, &$stripped, &$ok)
+    private static function strip_flush_create_buffer(&$create_buf, $out, &$stripped, &$ok, $reference_pattern = null, $staging_prefix = '', &$references = 0)
     {
         $end = self::sql_statement_end_offset($create_buf);
         if ($end === null) {
@@ -1579,6 +1799,22 @@ class OCM_SQL_Utils
             return null;
         }
         $stripped += (int) $count;
+        if ($reference_pattern !== null) {
+            $rewritten = preg_replace_callback(
+                $reference_pattern,
+                static function ($m) use ($staging_prefix) {
+                    return $m[1] . $staging_prefix;
+                },
+                $rewritten,
+                -1,
+                $count
+            );
+            if (!is_string($rewritten)) {
+                $ok = false;
+                return null;
+            }
+            $references += (int) $count;
+        }
         if (!self::write_all($out, $rewritten)) {
             $ok = false;
             return null;
@@ -1621,6 +1857,11 @@ class OCM_SQL_Utils
     {
         $len = strlen($chunk);
         for ($i = 0; $i < $len; $i++) {
+            // Skip the bytes that can't change the state in one native call.
+            $i += $in_string ? strcspn($chunk, "\\'", $i) : strcspn($chunk, "'", $i);
+            if ($i >= $len) {
+                break;
+            }
             $ch = $chunk[$i];
             if ($in_string) {
                 if ($ch === '\\' && $i + 1 < $len) {
@@ -1653,7 +1894,7 @@ class OCM_SQL_Utils
         if (!is_array($tables) || !$tables) {
             return 0;
         }
-        $dropped = 0;
+        $stale = array();
         foreach ($tables as $table) {
             $table = (string) $table;
             if (!preg_match('/^(ocm[0-9a-f]{4}_)/', $table, $m)) {
@@ -1662,9 +1903,10 @@ class OCM_SQL_Utils
             if (is_string($protect_prefix) && $protect_prefix !== '' && $m[1] === $protect_prefix) {
                 continue;
             }
-            $wpdb->query('DROP TABLE IF EXISTS `' . str_replace('`', '``', $table) . '`');
-            $dropped++;
+            $stale[] = $table;
         }
+        self::drop_tables($wpdb, $stale);
+        $dropped = count($stale);
         if ($dropped > 0) {
             One_Click_Migration::write_to_log(sprintf(
                 'Notice: Dropped %d stale temporary staging table(s) left by an earlier restore.',
@@ -1737,12 +1979,36 @@ class OCM_SQL_Utils
         if (!is_array($tables)) {
             return;
         }
+        $matching = array();
         foreach ($tables as $table) {
             $table = (string) $table;
             if (strpos($table, $prefix) === 0) {
-                $wpdb->query('DROP TABLE IF EXISTS `' . str_replace('`', '``', $table) . '`');
+                $matching[] = $table;
             }
         }
+        self::drop_tables($wpdb, $matching);
+    }
+
+    /**
+     * DROP TABLE each of $tables with foreign key checks off: staged tables
+     * reference each other once their keys point at staging, and a parent
+     * can't be dropped before its child while checks are on (the tables come
+     * in name order, wp_pbb_browsers before wp_pbb_log_browsers).
+     *
+     * @param object   $wpdb
+     * @param string[] $tables
+     * @return void
+     */
+    private static function drop_tables($wpdb, array $tables)
+    {
+        if (!$tables) {
+            return;
+        }
+        $wpdb->query('SET foreign_key_checks = 0');
+        foreach ($tables as $table) {
+            $wpdb->query('DROP TABLE IF EXISTS `' . str_replace('`', '``', (string) $table) . '`');
+        }
+        $wpdb->query('SET foreign_key_checks = 1');
     }
 
     /**
@@ -1831,9 +2097,7 @@ class OCM_SQL_Utils
             ));
             return false;
         }
-        foreach ($trash_targets as $trash_table) {
-            $wpdb->query('DROP TABLE IF EXISTS `' . str_replace('`', '``', $trash_table) . '`');
-        }
+        self::drop_tables($wpdb, $trash_targets);
         if (function_exists('delete_option')) {
             delete_option(self::OPTION_STAGING_PREFIX);
         }

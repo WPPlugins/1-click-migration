@@ -144,7 +144,8 @@
     border-top: 1px solid transparent;
 }
 .ocm-help-item.open .ocm-help-body {
-    max-height: 600px; opacity: 1;
+    /* Tall enough for the longest section in any language; 600px cut off the last lines. */
+    max-height: 2400px; opacity: 1;
     padding: 10px 14px 14px 46px;
     border-top-color: var(--ocm-line-2);
 }
@@ -255,12 +256,12 @@
     text-decoration: none;
 }
 .ocm-btn:active { transform: translateY(1px); }
-.ocm-btn-primary { background: var(--ocm-navy); color: #fff; }
-.ocm-btn-primary:hover { background: var(--ocm-navy-700); color: #fff; }
-.ocm-btn-dark { background: var(--ocm-ink); color: #fff; }
-.ocm-btn-dark:hover { background: #1c2027; color: #fff; }
+.ocm-btn-primary { background: var(--ocm-btn-bg, var(--ocm-navy)); color: var(--ocm-btn-fg, #fff); box-shadow: var(--ocm-btn-glow, none); }
+.ocm-btn-primary:hover { background: var(--ocm-btn-bg-hover, var(--ocm-navy-700)); color: var(--ocm-btn-fg, #fff); }
+.ocm-btn-dark { background: var(--ocm-btn2-bg, var(--ocm-ink)); color: var(--ocm-btn-fg, #fff); box-shadow: var(--ocm-btn2-glow, none); }
+.ocm-btn-dark:hover { background: var(--ocm-btn2-bg-hover, #1c2027); color: var(--ocm-btn-fg, #fff); }
 .ocm-btn-ghost {
-    background: #fff; color: var(--ocm-navy);
+    background: var(--ocm-bg); color: var(--ocm-navy);
     border: 1px solid var(--ocm-line);
 }
 .ocm-btn-ghost:hover { background: var(--ocm-navy-50); border-color: #c9d4e8; color: var(--ocm-navy); }
@@ -445,7 +446,8 @@ body.ocm-modal-open { overflow: hidden; }
 }
 /* ID-qualified so WP admin `a { color }` / `a:focus { box-shadow }` cannot win:
    the modal is appended to <body>, outside .ocm-app. */
-#ocm-restore-success-modal a.ocm-modal-review {
+#ocm-restore-success-modal a.ocm-modal-review,
+#ocm-restore-success-modal a.ocm-modal-forum {
     box-sizing: border-box;
     display: flex; align-items: center; justify-content: center;
     width: 100%; height: 48px;
@@ -453,19 +455,25 @@ body.ocm-modal-open { overflow: hidden; }
     font-size: 15px; font-weight: 700; line-height: 1;
     text-align: center; text-decoration: none;
 }
-#ocm-restore-success-modal a.ocm-modal-review:visited {
+#ocm-restore-success-modal a.ocm-modal-review:visited,
+#ocm-restore-success-modal a.ocm-modal-forum:visited {
     color: #ffffff;
 }
 #ocm-restore-success-modal a.ocm-modal-review:hover,
+#ocm-restore-success-modal a.ocm-modal-forum:hover,
 #ocm-restore-success-modal a.ocm-modal-review:focus,
-#ocm-restore-success-modal a.ocm-modal-review:active {
+#ocm-restore-success-modal a.ocm-modal-forum:focus,
+#ocm-restore-success-modal a.ocm-modal-review:active,
+#ocm-restore-success-modal a.ocm-modal-forum:active {
     background: #143a78; color: #ffffff; text-decoration: none;
 }
-#ocm-restore-success-modal a.ocm-modal-review:focus {
+#ocm-restore-success-modal a.ocm-modal-review:focus,
+#ocm-restore-success-modal a.ocm-modal-forum:focus {
     outline: none;
     box-shadow: 0 0 0 3px rgba(11, 42, 91, .28);
 }
-.ocm-modal-dismiss { width: 100%; }
+.ocm-modal-dismiss,
+#ocm-restore-success-modal .ocm-modal-choice { width: 100%; }
 
 #ocm-restore-success-modal .ocm-modal-never {
     align-self: center; margin: 0; font-size: 12.5px;
@@ -570,3 +578,732 @@ body.ocm-modal-open { overflow: hidden; }
 #ocm-restore-precheck button:focus-visible,
 #ocm-restore-precheck input:focus-visible,
 #ocm-restore-precheck summary:focus-visible { outline: 2px solid var(--ocm-navy); outline-offset: 3px; }
+
+/* Pay step inside the restore. The <dialog> is appended to <body>, outside
+   .ocm-app, so it sets its own font, box sizing and weights. */
+.ocm-pay-step, .ocm-pay-step * { box-sizing: border-box; }
+.ocm-pay-dialog {
+    border: 0; padding: 0; background: transparent;
+    width: 440px; max-width: calc(100vw - 32px);
+    color: var(--ocm-ink);
+    font-family: 'Inter', system-ui, -apple-system, Segoe UI, Helvetica, Arial, sans-serif;
+    -webkit-font-smoothing: antialiased;
+}
+.ocm-pay-dialog::backdrop { background: rgba(15, 17, 21, .48); }
+.ocm-pay-card {
+    position: relative;
+    background: #fff;
+    border-radius: var(--ocm-radius-lg);
+    box-shadow: var(--ocm-shadow-2);
+    padding: 26px 24px 18px;
+    font-size: 14px; font-weight: 500; line-height: 1.5;
+}
+.ocm-pay-inline .ocm-pay-card { box-shadow: none; border: 1px solid var(--ocm-line); margin-top: 12px; }
+.ocm-pay-head { display: flex; align-items: center; gap: 10px; margin: 0 0 14px; padding-right: 32px; }
+.ocm-pay-title { margin: 0; font-size: 20px; font-weight: 700; letter-spacing: -.02em; line-height: 1.3; color: var(--ocm-ink); }
+.ocm-pay-gone { font-size: 16px; margin: 0 32px 16px 0; }
+.ocm-pay-facts { display: grid; gap: 6px; margin: 0 0 16px; }
+.ocm-pay-facts > div { display: flex; gap: 12px; font-size: 13.5px; }
+.ocm-pay-facts dt { flex: 0 0 88px; margin: 0; color: var(--ocm-muted); font-weight: 500; }
+.ocm-pay-facts dd { margin: 0; min-width: 0; font-weight: 600; overflow-wrap: anywhere; }
+.ocm-pay-price {
+    background: var(--ocm-surface);
+    border: 1px solid var(--ocm-line-2);
+    border-radius: var(--ocm-radius);
+    padding: 12px 14px; margin: 0 0 16px;
+}
+.ocm-pay-step p.ocm-pay-price-line {
+    display: flex; justify-content: space-between; align-items: baseline; gap: 12px;
+    margin: 0; font-size: 14px; font-weight: 600;
+}
+.ocm-pay-amount { font-size: 18px; font-weight: 700; }
+.ocm-pay-step p.ocm-pay-price-note { margin: 2px 0 0; font-size: 12.5px; color: var(--ocm-muted); font-weight: 500; }
+.ocm-pay-step p.ocm-pay-recheck {
+    margin: 0 0 12px; padding: 8px 12px;
+    background: var(--ocm-navy-50); color: var(--ocm-navy);
+    border-radius: 8px; font-size: 13px; font-weight: 500;
+}
+.ocm-pay-actions { display: flex; flex-direction: column; gap: 10px; margin: 0 0 12px; }
+.ocm-pay-actions .ocm-btn { width: 100%; }
+.ocm-pay-step p.ocm-pay-body { margin: 0 0 16px; font-size: 13.5px; color: var(--ocm-ink-2); font-weight: 500; }
+.ocm-pay-step p.ocm-pay-note,
+.ocm-pay-step p.ocm-pay-guarantee { margin: 0 0 8px; font-size: 12.5px; color: var(--ocm-muted); font-weight: 500; }
+.ocm-pay-step button:focus-visible,
+.ocm-pay-step .ocm-pay-title:focus-visible { outline: 2px solid var(--ocm-navy); outline-offset: 3px; }
+.ocm-pay-step .ocm-pay-title:focus:not(:focus-visible) { outline: none; }
+.ocm-pay-spinner {
+    flex: 0 0 auto; width: 18px; height: 18px;
+    border: 2px solid var(--ocm-line); border-top-color: var(--ocm-navy);
+    border-radius: 50%;
+    animation: ocm-pay-spin .8s linear infinite;
+}
+@keyframes ocm-pay-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+    .ocm-pay-spinner { animation: none; border-right-color: var(--ocm-navy); }
+}
+#ocm-restore-precheck .ocm-pay-ready { margin: 0; font-size: 13.5px; font-weight: 600; }
+
+/* "Pay $9.99 now" on the backup-finished notice. ID-qualified so WP admin
+   link colours cannot win. */
+#ocm-top-banner a.ocm-banner-pay,
+#ocm-top-banner a.ocm-banner-pay:visited,
+#ocm-top-banner a.ocm-banner-pay:hover,
+#ocm-top-banner a.ocm-banner-pay:focus { color: #fff; text-decoration: none; }
+#ocm-top-banner a.ocm-banner-pay { margin-top: 10px; }
+#ocm-top-banner a.ocm-banner-pay:focus-visible { outline: 2px solid var(--ocm-navy); outline-offset: 2px; }
+#ocm-top-banner .ocm-pay-thanks { display: inline-block; margin-top: 10px; font-weight: 700; color: var(--ocm-ok); }
+
+
+/* ==========================================================================
+   Neon theme. The plugin's panel is a dark sign inside the light WordPress
+   admin, in the colours of the plugin icon. One thing glows at a time: the
+   tab you are on and the button to press next. Messages that must be read
+   (banners, the plugins warning, the pay step, the dialogs) stay plain,
+   light and still.
+   ========================================================================== */
+.ocm-app {
+    --ocm-neon-red: #FF1E3C;
+    --ocm-neon-yellow: #FFE45C;
+    --ocm-neon-cyan: #19E8FF;
+    --ocm-neon-green: #2BFF88;
+    --ocm-accent: var(--ocm-neon-yellow);          /* backup = yellow, restore = cyan (below) */
+    --ocm-accent-soft: rgba(255, 228, 92, .4);
+
+    --ocm-navy: #8FE9FF;                           /* accent text and outlines on the dark panel */
+    --ocm-navy-700: #C4F4FF;
+    --ocm-navy-50: rgba(143, 233, 255, .1);
+    --ocm-ink: #EEF1FF;
+    --ocm-ink-2: #C9CFEA;
+    --ocm-muted: #9AA3C7;
+    --ocm-line: #2A2F57;
+    --ocm-line-2: #1E2246;
+    --ocm-bg: #0D1026;
+    --ocm-surface: #0D1026;
+    --ocm-ok: #2BFF88;
+    --ocm-err: #FF8A99;
+    --ocm-shadow-1: none;
+
+    --ocm-btn-fg: #0A0C1F;
+    --ocm-btn-bg: var(--ocm-neon-cyan);
+    --ocm-btn-bg-hover: #6FF1FF;
+    --ocm-btn-glow: 0 0 8px var(--ocm-neon-cyan), 0 0 26px rgba(25, 232, 255, .5);
+    --ocm-btn2-bg: var(--ocm-neon-yellow);
+    --ocm-btn2-bg-hover: #FFEE8F;
+    --ocm-btn2-glow: 0 0 8px var(--ocm-neon-yellow), 0 0 26px rgba(255, 228, 92, .5);
+
+    margin: 20px 20px 20px 0;
+    min-height: 0;
+    max-width: 1280px;
+    border-radius: 18px;
+    overflow: hidden;
+    background: radial-gradient(120% 90% at 50% 0%, #16193A 0%, #0A0C1F 55%, #040510 100%);
+    box-shadow: 0 10px 30px rgba(10, 12, 31, .25);
+}
+.ocm-app:has(.ocm-tab[data-ocm-tab="restore"].active) {
+    --ocm-accent: var(--ocm-neon-cyan);
+    --ocm-accent-soft: rgba(25, 232, 255, .4);
+}
+
+/* Plain boxes keep the original light colours, whatever surrounds them. */
+.ocm-app .ocm-banner,
+.ocm-app .ocm-warn,
+.ocm-app .ocm-pay-card,
+.ocm-app .ocm-maintenance-mode-indicator {
+    --ocm-navy: #0b2a5b; --ocm-navy-700: #143a78; --ocm-navy-50: #eef3fb;
+    --ocm-ink: #0f1115; --ocm-ink-2: #2a2f3a; --ocm-muted: #6b7280;
+    --ocm-line: #e5e7ec; --ocm-line-2: #eef0f4; --ocm-bg: #ffffff; --ocm-surface: #f7f8fb;
+    --ocm-ok: #16794f; --ocm-err: #a83227;
+    --ocm-btn-fg: #fff; --ocm-btn-bg: #0b2a5b; --ocm-btn-bg-hover: #143a78; --ocm-btn-glow: none;
+    --ocm-btn2-bg: #0f1115; --ocm-btn2-bg-hover: #1c2027; --ocm-btn2-glow: none;
+}
+.ocm-app .ocm-pay-card { color: var(--ocm-ink); }
+.ocm-app .ocm-maintenance-mode-indicator { background: #fff; color: #5b3a00; border-left: 6px solid #ff9800; text-align: left; }
+
+/* Header: the icon and the name. The ring's glow is the only thing on the page that always moves. */
+.ocm-app .ocm-topbar { height: 64px; background: transparent; border-bottom-color: var(--ocm-line); }
+.ocm-app .ocm-topbar-link {
+    color: var(--ocm-navy); font-weight: 600; text-decoration: none;
+    padding: 5px 11px; border-radius: 999px;
+    border: 1px solid rgba(143, 233, 255, .35);
+    transition: border-color .15s ease, background .15s ease, color .15s ease;
+}
+.ocm-app .ocm-topbar-link:hover,
+.ocm-app .ocm-topbar-link:focus { color: var(--ocm-navy-700); border-color: var(--ocm-navy); background: var(--ocm-navy-50); }
+.ocm-app .ocm-topbar-link:focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
+.ocm-app .ocm-help-forum {
+    margin: 12px 0 0; padding: 10px 12px;
+    border-radius: 10px; border: 1px solid var(--ocm-line);
+    background: rgba(143, 233, 255, .05);
+    color: var(--ocm-ink-2); font-size: 12.5px; line-height: 1.5;
+}
+.ocm-app .ocm-help-forum a { color: var(--ocm-navy); font-weight: 600; }
+.ocm-app .ocm-help-forum a:hover { color: var(--ocm-navy-700); }
+.ocm-brand-icon { width: 44px; height: 44px; flex: 0 0 auto; overflow: visible; display: block; }
+.ocm-brand-name { font-size: 16px; font-weight: 700; letter-spacing: .01em; color: var(--ocm-ink); }
+.ocm-brand-halo { animation: ocm-buzz 5s steps(1, end) infinite; }
+@keyframes ocm-buzz {
+    0% { opacity: 1 } 9% { opacity: .25 } 10% { opacity: .9 } 11% { opacity: .3 } 12% { opacity: 1 } 22% { opacity: .4 } 23% { opacity: 1 }
+    31% { opacity: .2 } 32% { opacity: .8 } 33% { opacity: .3 } 34% { opacity: 1 } 45% { opacity: .45 } 47% { opacity: 1 }
+    57% { opacity: .25 } 58% { opacity: .95 } 59% { opacity: .2 } 60% { opacity: .6 } 61% { opacity: .3 } 62% { opacity: 1 }
+    78% { opacity: .3 } 79% { opacity: .9 } 80% { opacity: .25 } 81% { opacity: 1 } 100% { opacity: 1 }
+}
+
+/* Surfaces */
+.ocm-app .ocm-card { background: rgba(13, 16, 38, .55); }
+.ocm-app .ocm-help-item,
+.ocm-app .ocm-check { background: transparent; }
+.ocm-app .ocm-check:hover { border-color: #414878; }
+.ocm-app .ocm-check input { accent-color: var(--ocm-accent); }
+.ocm-app .ocm-step-title,
+.ocm-app .ocm-card-title { color: var(--ocm-ink); }
+.ocm-app .ocm-help-body strong { color: var(--ocm-ink); }
+.ocm-app .ocm-help-body a,
+.ocm-app .ocm-pg-status a,
+.ocm-app .ocm-info a { color: var(--ocm-navy); }
+.ocm-app .ocm-callout { border-left-color: var(--ocm-neon-yellow); }
+
+/* Tabs: two tubes, one lit and one unlit glass */
+.ocm-app .ocm-tabs { background: transparent; padding: 0; gap: 10px; border-radius: 0; }
+.ocm-app .ocm-tab {
+    font-size: 14px; padding: 8px 22px; border-radius: 10px;
+    color: rgba(238, 241, 255, .45); border: 2px solid rgba(238, 241, 255, .16);
+}
+.ocm-app .ocm-tab:hover:not(.active) { color: var(--ocm-ink); border-color: rgba(238, 241, 255, .35); }
+.ocm-app .ocm-tab.active {
+    background: transparent; color: var(--ocm-accent); border-color: var(--ocm-accent);
+    box-shadow: 0 0 6px var(--ocm-accent), 0 0 20px var(--ocm-accent-soft), inset 0 0 12px rgba(255, 255, 255, .06);
+    text-shadow: 0 0 10px var(--ocm-accent-soft);
+}
+.ocm-app .ocm-tab:focus-visible,
+.ocm-app .ocm-btn:focus-visible,
+.ocm-app .ocm-help-toggle:focus-visible,
+.ocm-app .ocm-adv-toggle:focus-visible { outline: 2px solid #fff; outline-offset: 3px; }
+
+/* Fields */
+.ocm-app input.ocm-input,
+.ocm-app .ocm-input { background: #0D1026; color: var(--ocm-ink); border-color: var(--ocm-line); height: 46px; font-size: 15px; }
+.ocm-app .ocm-input::placeholder { color: #5d668f; }
+.ocm-app .ocm-input:focus {
+    border-color: var(--ocm-accent);
+    box-shadow: 0 0 0 1px var(--ocm-accent), 0 0 16px var(--ocm-accent-soft) !important;
+}
+.ocm-app input.ocm-input.ocm-input-code,
+.ocm-app .ocm-input-code { font-size: 18px; }
+.ocm-app .ocm-input-icon { color: #7780a8; }
+.ocm-app .ocm-submit { height: 46px; font-size: 14px; font-weight: 700; position: relative; }
+.ocm-app .ocm-btn-ghost { background: transparent; color: var(--ocm-ink); border-color: rgba(238, 241, 255, .3); }
+.ocm-app .ocm-btn-ghost:hover { background: rgba(238, 241, 255, .08); border-color: rgba(238, 241, 255, .5); color: #fff; }
+.ocm-app .ocm-button.one-click-disabled,
+.ocm-app .ocm-submit[disabled] { box-shadow: none; }
+
+/* The click from the icon: five rays flash once above the button that was pressed. */
+.ocm-app .ocm-submit.ocm-burst::after {
+    content: ""; position: absolute; right: -8px; top: -22px; width: 46px; height: 30px; pointer-events: none;
+    background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 46 30'%3E%3Cg stroke='%23FF2E4D' stroke-width='3.5' stroke-linecap='round'%3E%3Cpath d='M4 22 L12 19'/%3E%3Cpath d='M11 8 L17 14'/%3E%3Cpath d='M23 3 L23 11'/%3E%3Cpath d='M35 8 L29 14'/%3E%3Cpath d='M42 22 L34 19'/%3E%3C/g%3E%3C/svg%3E") no-repeat center / contain;
+    filter: drop-shadow(0 0 4px #FF2E4D);
+    animation: ocm-burst .7s steps(1, end) forwards;
+}
+@keyframes ocm-burst { 0% { opacity: 1 } 60% { opacity: .5 } 100% { opacity: 0 } }
+
+/* Progress: a tube that fills. It hums while running, and is steady green when done, steady red when stopped. */
+.ocm-app .ocm-pg-label { color: var(--ocm-ink); }
+.ocm-app .ocm-pg-pct { background: transparent; color: var(--ocm-ink); font-weight: 700; }
+.ocm-app .ocm-pg-status { font-size: 13px; }
+.ocm-app .ocm-pg-extras .ocm-info { font-size: 13px; }
+.ocm-app .ocm-pg-extras .ocm-info.notice { color: #FFD98A; }
+.ocm-app .ocm-pg-bar {
+    height: 14px; padding: 2px; overflow: visible;
+    background: rgba(238, 241, 255, .04); border: 1.5px solid rgba(238, 241, 255, .16);
+}
+.ocm-app .ocm-pg-fill {
+    position: relative; height: 100%; max-width: 100%;
+    background: var(--ocm-accent);
+    box-shadow: 0 0 6px var(--ocm-accent), 0 0 20px var(--ocm-accent);
+}
+.ocm-app .ocm-pg-fill[style*="width:0%"],
+.ocm-app .ocm-pg-fill[style*="width: 0%"] { box-shadow: none; }
+.ocm-app .ocm-pg-fill::after { display: none; }
+.ocm-app .ocm-pg-fill.running { animation: ocm-hum 1.3s steps(1, end) infinite; }
+@keyframes ocm-hum { 0% { filter: brightness(1) } 30% { filter: brightness(.82) } 36% { filter: brightness(1.05) } 70% { filter: brightness(.9) } 76% { filter: brightness(1) } }
+.ocm-app .ocm-pg-fill.ocm-pg-done { background: var(--ocm-neon-green); box-shadow: 0 0 6px var(--ocm-neon-green), 0 0 20px var(--ocm-neon-green); }
+.ocm-app .ocm-pg-fill.ocm-pg-failed { background: var(--ocm-neon-red); box-shadow: 0 0 6px var(--ocm-neon-red), 0 0 20px var(--ocm-neon-red); }
+
+/* The address review inside the restore tab */
+.ocm-app #ocm-restore-precheck h3 { color: var(--ocm-ink); }
+.ocm-app #ocm-restore-precheck p,
+.ocm-app #ocm-restore-precheck label,
+.ocm-app #ocm-restore-precheck summary { color: var(--ocm-ink-2); }
+.ocm-app #ocm-restore-precheck strong { color: var(--ocm-ink); }
+.ocm-app #ocm-restore-precheck .ocm-pay-card p,
+.ocm-app #ocm-restore-precheck .ocm-pay-card label { color: inherit; }
+
+.ocm-app .ocm-footnote { margin-top: 14px; color: #6f789f; }
+
+@media (prefers-reduced-motion: reduce) {
+    .ocm-brand-halo, .ocm-app .ocm-pg-fill.running, .ocm-app .ocm-submit.ocm-burst::after { animation: none; }
+    .ocm-app .ocm-submit.ocm-burst::after { display: none; }
+}
+@media (max-width: 782px) {
+    .ocm-app { margin: 10px 10px 10px 0; border-radius: 14px; }
+}
+/* A stopped or finished run's last line is the thing to read: full-strength text, not the muted grey. */
+.ocm-app .ocm-pg-bar:has(.ocm-pg-failed) ~ .ocm-pg-status,
+.ocm-app .ocm-pg-bar:has(.ocm-pg-done) ~ .ocm-pg-status { color: var(--ocm-ink); font-size: 14px; }
+/* Phones: cards never grow wider than the panel, and the button drops under its field. */
+.ocm-app .ocm-grid > * { min-width: 0; }
+@media (max-width: 600px) {
+    .ocm-app .ocm-action-head { flex-wrap: wrap; }
+    .ocm-app .ocm-input-line { flex-wrap: wrap; }
+    .ocm-app .ocm-input-line .ocm-input-wrap { flex: 1 1 100%; }
+    .ocm-app .ocm-input-line .ocm-submit { width: 100%; }
+}
+
+/* ==========================================================================
+   Top-level Mode Switcher & Local Backups Panel
+   ========================================================================== */
+.ocm-mode-bar {
+    display: inline-flex;
+    gap: 8px;
+    margin-bottom: 16px;
+    padding: 4px;
+    border-radius: 12px;
+    background: rgba(238, 241, 255, .04);
+    border: 1px solid var(--ocm-line);
+}
+.ocm-mode-btn {
+    border: 1px solid transparent;
+    background: transparent;
+    color: var(--ocm-muted);
+    font: inherit;
+    font-size: 13px;
+    font-weight: 700;
+    padding: 8px 18px;
+    border-radius: 9px;
+    cursor: pointer;
+    transition: all .15s ease;
+}
+.ocm-mode-btn:hover:not(.active) {
+    color: var(--ocm-ink);
+}
+.ocm-mode-btn.active {
+    color: var(--ocm-neon-cyan);
+    background: rgba(25, 232, 255, .1);
+    border-color: rgba(25, 232, 255, .45);
+    box-shadow: 0 0 12px rgba(25, 232, 255, .18);
+}
+.ocm-mode-btn:focus-visible {
+    outline: 2px solid #fff;
+    outline-offset: 2px;
+}
+.ocm-mode-panel[hidden] { display: none; }
+.ocm-app [hidden] { display: none !important; }
+
+.ocm-local-head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 16px;
+    flex-wrap: wrap;
+}
+.ocm-local-stats {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 14px;
+    margin-bottom: 16px;
+}
+.ocm-local-stat {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    min-width: 0;
+}
+.ocm-local-stat-label {
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: .08em;
+    color: var(--ocm-muted);
+}
+.ocm-local-stat-val {
+    font-size: 18px;
+    font-weight: 700;
+    color: var(--ocm-ink);
+}
+.ocm-local-stat-sub {
+    font-size: 12px;
+    color: var(--ocm-muted);
+}
+.ocm-local-path-code {
+    display: block;
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 11.5px;
+    color: var(--ocm-ink-2);
+    background: rgba(238, 241, 255, .06);
+    padding: 5px 8px;
+    border-radius: 6px;
+    overflow-wrap: anywhere;
+}
+.ocm-local-low-badge {
+    display: inline-block;
+    margin-left: 6px;
+    padding: 1px 6px;
+    border-radius: 999px;
+    font-size: 10.5px;
+    font-weight: 700;
+    background: rgba(255, 30, 60, .2);
+    color: #FF8A99;
+    border: 1px solid rgba(255, 30, 60, .45);
+}
+
+.ocm-app input.ocm-input.ocm-local-input-plain,
+.ocm-app select.ocm-local-select {
+    width: 100%;
+    height: 40px;
+    padding: 0 12px !important;
+    border: 1px solid var(--ocm-line);
+    border-radius: 10px;
+    background: #0D1026;
+    color: var(--ocm-ink);
+    font: inherit;
+    font-size: 13.5px;
+}
+.ocm-app select.ocm-local-select:focus {
+    border-color: var(--ocm-neon-cyan);
+    outline: none;
+}
+
+.ocm-local-parts-grid { margin-top: 0; }
+.ocm-local-toggle {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 12px;
+    font-weight: 600;
+    color: var(--ocm-ink);
+    cursor: pointer;
+}
+.ocm-local-toggle input { accent-color: var(--ocm-neon-cyan); width: 16px; height: 16px; }
+.ocm-local-form-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+}
+.ocm-local-inline-parts {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 8px;
+}
+.ocm-local-inline-parts .ocm-check { padding: 8px 10px; }
+.ocm-local-sched-meta {
+    margin-top: 12px;
+    padding: 8px 12px;
+    border-radius: 8px;
+    background: rgba(238, 241, 255, .04);
+    border: 1px solid var(--ocm-line-2);
+    font-size: 12px;
+    color: var(--ocm-ink-2);
+}
+.ocm-local-form-actions {
+    margin-top: 14px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+}
+.ocm-local-settings-msg { font-size: 12.5px; font-weight: 600; }
+.ocm-local-settings-msg.ocm-ok { color: var(--ocm-ok); }
+.ocm-local-settings-msg.ocm-err { color: var(--ocm-err); }
+/* A failed delete / clear, shown in the card it belongs to. */
+.ocm-local-action-msg { color: var(--ocm-err); font-size: 12.5px; font-weight: 600; margin: 0 0 10px; }
+.ocm-local-action-msg[hidden] { display: none; }
+/* Local progress notice (a refused Stop, logged out). Not ".notice": the cloud screen writes into every .ocm-info.notice. */
+.ocm-pg-extras .ocm-info.ocm-local-pg-notice { color: #8a6d18; }
+.ocm-app .ocm-pg-extras .ocm-info.ocm-local-pg-notice { color: #FFD98A; }
+
+#ocm-local-progress-card { margin-top: 16px; }
+.ocm-local-backups-card { margin-top: 16px; }
+.ocm-local-empty { margin: 8px 0 4px; color: var(--ocm-muted); font-size: 13px; }
+.ocm-local-table-wrap { overflow-x: auto; }
+.ocm-local-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13px;
+}
+.ocm-local-table th {
+    text-align: left;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: .08em;
+    color: var(--ocm-muted);
+    padding: 10px 10px;
+    border-bottom: 1px solid var(--ocm-line);
+}
+.ocm-local-table td {
+    padding: 12px 10px;
+    border-bottom: 1px solid var(--ocm-line-2);
+    color: var(--ocm-ink-2);
+    vertical-align: middle;
+}
+.ocm-local-id-sub { margin-top: 3px; }
+.ocm-local-id-sub code {
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 11px;
+    color: var(--ocm-muted);
+}
+.ocm-trigger-badge {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 999px;
+    font-size: 11px;
+    font-weight: 700;
+}
+.ocm-trigger-manual {
+    background: rgba(143, 233, 255, .14);
+    color: var(--ocm-navy);
+}
+.ocm-trigger-scheduled {
+    background: rgba(43, 255, 136, .14);
+    color: var(--ocm-ok);
+}
+.ocm-local-row-label {
+    display: inline-block;
+    margin-left: 6px;
+    color: var(--ocm-ink);
+    font-weight: 600;
+}
+.ocm-part-pills { display: flex; flex-wrap: wrap; gap: 5px; }
+.ocm-part-pill {
+    padding: 2px 8px;
+    border-radius: 6px;
+    font-size: 11.5px;
+    font-weight: 600;
+    background: rgba(238, 241, 255, .07);
+    border: 1px solid var(--ocm-line);
+    color: var(--ocm-ink);
+}
+.ocm-local-row-actions { white-space: nowrap; }
+.ocm-btn-sm { height: 32px; padding: 0 12px; font-size: 12px; border-radius: 8px; }
+
+.ocm-local-activity-card,
+.ocm-local-log-card { margin-top: 16px; }
+
+.ocm-op-badge,
+.ocm-status-badge {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 999px;
+    font-size: 11px;
+    font-weight: 700;
+}
+.ocm-op-backup {
+    background: rgba(143, 233, 255, .14);
+    color: var(--ocm-navy);
+}
+.ocm-op-restore {
+    background: rgba(25, 232, 255, .18);
+    color: var(--ocm-neon-cyan);
+    border: 1px solid rgba(25, 232, 255, .35);
+}
+.ocm-status-completed {
+    background: rgba(43, 255, 136, .14);
+    color: var(--ocm-ok);
+    border: 1px solid rgba(43, 255, 136, .35);
+}
+.ocm-status-failed {
+    background: rgba(255, 30, 60, .18);
+    color: #FF8A99;
+    border: 1px solid rgba(255, 30, 60, .4);
+}
+.ocm-status-skipped {
+    background: rgba(255, 228, 92, .16);
+    color: var(--ocm-neon-yellow);
+    border: 1px solid rgba(255, 228, 92, .35);
+}
+.ocm-status-cancelled {
+    background: rgba(238, 241, 255, .1);
+    color: var(--ocm-muted);
+    border: 1px solid var(--ocm-line);
+}
+.ocm-activity-details { max-width: 340px; overflow-wrap: anywhere; }
+
+.ocm-local-log-toggle {
+    display: flex;
+    width: 100%;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: var(--ocm-ink);
+    cursor: pointer;
+    text-align: left;
+}
+.ocm-local-log-toggle:focus-visible { outline: 2px solid #fff; outline-offset: 4px; border-radius: 6px; }
+.ocm-local-log-toggle .ocm-chev { color: var(--ocm-muted); transition: transform .15s ease; }
+.ocm-local-log-toggle.open .ocm-chev { transform: rotate(180deg); }
+.ocm-local-log-body { margin-top: 12px; }
+.ocm-local-log-body[hidden] { display: none; }
+.ocm-local-log-toolbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    flex-wrap: wrap;
+    margin-bottom: 10px;
+}
+.ocm-local-log-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.ocm-local-log-pre {
+    margin: 0;
+    padding: 12px 14px;
+    max-height: 360px;
+    overflow: auto;
+    border-radius: 10px;
+    border: 1px solid var(--ocm-line);
+    background: #070918;
+    color: #d7def8;
+    font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    font-size: 12px;
+    line-height: 1.5;
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+.ocm-local-log-modal-card { width: min(760px, 100%); }
+.ocm-local-log-pre-modal {
+    max-height: 60vh;
+    margin: 12px 0;
+    border-color: #20264a;
+}
+
+.ocm-local-telemetry-toggle {
+    margin: 12px 0 4px;
+    font-size: 13px;
+}
+.ocm-local-telemetry-note {
+    margin-bottom: 10px;
+}
+.ocm-local-telemetry-list {
+    margin: 10px 0 14px;
+    padding-left: 18px;
+    color: #2a2f3a;
+    font-size: 13px;
+    line-height: 1.55;
+}
+.ocm-local-telemetry-list li {
+    margin-bottom: 5px;
+}
+.ocm-local-telemetry-details {
+    margin: 14px 0 0;
+    font-size: 13px;
+    text-align: center;
+}
+.ocm-local-telemetry-details[open] {
+    text-align: left;
+}
+.ocm-local-telemetry-details summary {
+    cursor: pointer;
+    color: #1d4ed8;
+    font-weight: 500;
+}
+.ocm-local-telemetry-details .ocm-local-telemetry-list {
+    margin: 8px 0 0;
+}
+
+.ocm-local-modal-card {
+    background: #ffffff;
+    color: #0f1115;
+    width: min(460px, 100%);
+    text-align: left;
+}
+.ocm-local-modal-card .ocm-modal-title { color: #0f1115; }
+.ocm-local-modal-card .ocm-modal-body { color: #2a2f3a; }
+.ocm-local-modal-card .ocm-local-restore-caution {
+    margin: 0 0 12px; padding: 10px 12px;
+    background: #fff6e5; border: 1px solid #f0d9a8; border-radius: 8px;
+    color: #5c4508; font-size: 13px;
+}
+.ocm-local-restore-parts {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+    margin: 12px 0;
+}
+.ocm-local-restore-parts .ocm-check {
+    background: #f7f8fb;
+    border: 1px solid #e5e7ec;
+    color: #0f1115;
+}
+.ocm-local-modal-card .ocm-btn-primary {
+    background: #0b2a5b;
+    color: #ffffff;
+    box-shadow: none;
+}
+.ocm-local-modal-card .ocm-btn-ghost {
+    background: #ffffff;
+    color: #0b2a5b;
+    border-color: #d0d7e2;
+}
+
+@media (max-width: 900px) {
+    .ocm-local-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .ocm-local-inline-parts { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 600px) {
+    .ocm-local-stats,
+    .ocm-local-form-grid { grid-template-columns: 1fr; }
+}
+
+/* ---------- Search & Replace ---------- */
+.ocm-op-search_replace {
+    background: rgba(255, 228, 92, .14);
+    color: var(--ocm-neon-yellow);
+    border: 1px solid rgba(255, 228, 92, .35);
+}
+.ocm-sr-preset { margin: 0 0 12px; }
+.ocm-sr-options { margin-bottom: 12px; }
+.ocm-sr-tables { margin: 0 0 12px; border: 1px solid var(--ocm-line); border-radius: var(--ocm-radius); padding: 8px 12px; }
+.ocm-sr-tables summary { cursor: pointer; font-weight: 600; color: var(--ocm-ink); }
+.ocm-sr-tables summary span { color: var(--ocm-muted); font-weight: 400; margin-left: 4px; }
+.ocm-sr-tables-tools { display: flex; gap: 12px; margin: 8px 0; }
+.ocm-sr-tables-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 6px; max-height: 280px; overflow: auto; }
+.ocm-sr-tables-list .ocm-check { padding: 6px 8px; }
+.ocm-sr-tables-list .ocm-check span { overflow-wrap: anywhere; }
+.ocm-sr-actions { display: flex; gap: 10px; flex-wrap: wrap; }
+.ocm-sr-progress { margin-bottom: 12px; }
+.ocm-sr-summary { margin: 0 0 10px; overflow-wrap: anywhere; }
+.ocm-sr-summary code { white-space: pre-wrap; }
+.ocm-sr-site-warn, .ocm-sr-warnings { color: var(--ocm-err); font-size: 12.5px; margin: 0 0 10px; }
+.ocm-sr-warnings ul { margin: 4px 0 0 18px; }
+.ocm-sr-note { color: var(--ocm-muted); font-size: 12.5px; margin: 10px 0 0; }
+.ocm-sr-counts { margin-bottom: 12px; }
+.ocm-sr-samples { display: grid; gap: 8px; }
+.ocm-sr-sample { border: 1px solid var(--ocm-line); border-radius: var(--ocm-radius); padding: 8px 10px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; overflow-wrap: anywhere; white-space: pre-wrap; }
+.ocm-sr-sample-where { color: var(--ocm-muted); margin-bottom: 4px; }
+.ocm-sr-before span, .ocm-sr-after span { display: inline-block; min-width: 52px; font-family: inherit; font-weight: 700; margin-right: 6px; }
+.ocm-sr-before { color: var(--ocm-err); }
+.ocm-sr-after { color: var(--ocm-ok); }
+.ocm-sr-run-actions { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 12px; }
+.ocm-sr-run-actions[hidden], .ocm-sr-progress[hidden], .ocm-sr-run-actions [hidden] { display: none; }
+
+/* ---------- Site Cleanup ---------- */
+.ocm-op-site_cleanup {
+    background: rgba(43, 255, 136, .12);
+    color: var(--ocm-ok);
+    border: 1px solid rgba(43, 255, 136, .35);
+}
+.ocm-cl-items { display: grid; gap: 6px; margin-bottom: 12px; }
+.ocm-cl-item span { display: block; }
+.ocm-cl-meta { font-style: normal; color: var(--ocm-muted); font-size: 12px; margin-left: 4px; }
+.ocm-cl-empty { opacity: .55; }
+.ocm-cl-migrate { margin: 12px 0 0; }
+.ocm-cl-migrate[hidden], .ocm-cleanup-hint[hidden] { display: none; }
+.ocm-cleanup-hint { margin: 8px 0 0; font-size: 12.5px; }
+.ocm-cleanup-hint .ocm-btn-link { text-align: left; }
+.ocm-cl-space-card { margin-top: 16px; }
+.ocm-cl-space-list { margin: 6px 0 14px; padding: 0; list-style: none; display: grid; gap: 4px; font-size: 13px; }
+.ocm-cl-space-list li { overflow-wrap: anywhere; }
+.ocm-cl-space-list span { font-weight: 600; margin-left: 6px; }
+.ocm-cl-space-list em { color: var(--ocm-muted); font-style: normal; font-size: 12px; margin-left: 6px; }
+.ocm-cl-flag { color: var(--ocm-err); font-size: 12px; margin-left: 6px; }
+.ocm-cl-inactive { margin: 4px 0; font-size: 13px; overflow-wrap: anywhere; }
+.ocm-cl-inactive a { color: var(--ocm-navy); margin-left: 6px; }

@@ -79,6 +79,7 @@ class OCM_BackgroundBackup extends WP_Background_Process
             return self::RETURN_TYPE_END_PROCESSS;
         }
         OCM_Backup::set_backup_run_context($run_id);
+        OCM_Backup::register_backup_crash_guard();
 
         $presigned_urls = get_option('ocm_presigned_urls');
         $aes_key_b64    = get_option('ocm_aes_key');
@@ -93,6 +94,7 @@ class OCM_BackgroundBackup extends WP_Background_Process
         } else {
             $return = OCM_Backup::initiate_folder_backup($action, $presigned_urls, $aes_key);
         }
+        OCM_Backup::disarm_backup_crash_guard();
 
         if (!OCM_Backup::is_current_backup_run($run_id)) {
             return self::RETURN_TYPE_END_PROCESSS;
@@ -369,6 +371,20 @@ class OCM_BackgroundBackup extends WP_Background_Process
 
     }
 
+    /**
+     * Drop the library's "cancelled" flag. cancel() sets it and dispatches a
+     * request that deletes the queue once it sees the flag; the flag stays
+     * until that request arrives. A worker dispatched for a new run before it
+     * did would delete the new run's queue instead (maybe_handle() ->
+     * delete_all()), and the run would wait forever.
+     *
+     * @return void
+     */
+    public function clear_cancel_status()
+    {
+        delete_site_option($this->identifier . '_status');
+    }
+
     public function cancel_scheduled_event()
     {
 
@@ -385,22 +401,39 @@ class OCM_BackgroundBackup extends WP_Background_Process
     }
 
     /**
+     * Refresh the process lock from outside the worker loop without resetting
+     * the batch clock. Another plugin (e.g. WooCommerce) may load an older
+     * WP_Background_Process first, where lock_process() is protected and takes
+     * no argument, so callers outside this class must use this method (#127).
+     */
+    public function refresh_process_lock()
+    {
+        $start_time = isset($this->start_time) ? $this->start_time : null;
+        $this->lock_process(false);
+        if (null !== $start_time) {
+            $this->start_time = $start_time;
+        }
+    }
+
+    /**
      * Public method to directly trigger background processing
      * Used as fallback when dispatch fails
+     *
+     * @return false|void False when no worker ran; handle() never returns.
      */
     public function trigger_processing()
     {
         One_Click_Migration::write_to_log(' SYSLOG: *** DIRECT PROCESSING TRIGGERED ***');
-        
+
         // Check if process is already running using direct transient check
         if ( get_site_transient( $this->identifier . '_process_lock' ) ) {
             One_Click_Migration::write_to_log(' SYSLOG: Background process already running');
-            return;
+            return false;
         }
 
         if ( $this->is_queue_empty() ) {
             One_Click_Migration::write_to_log(' SYSLOG: Queue is empty - nothing to process');
-            return;
+            return false;
         }
 
         One_Click_Migration::write_to_log(' SYSLOG: Starting direct background processing');

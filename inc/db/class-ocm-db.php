@@ -31,6 +31,40 @@ class OCM_DB {
 	private $url_found = null;
 
 	/**
+	 * Whether the current search_replace_db() call matches case exactly.
+	 * Restores leave it off: hosts and URLs are case-insensitive.
+	 * @var bool
+	 */
+	private $match_case = false;
+
+	/**
+	 * Where the current search_replace_db() call sends its log lines, or null
+	 * for the migration log.
+	 * @var callable|null
+	 */
+	private $log_sink = null;
+
+	/**
+	 * Whether the current search_replace_db() call may create the objects it
+	 * finds in serialized values. Restores do, to rewrite addresses inside
+	 * them. The Search & Replace tool does not: it runs on a live site, where
+	 * a visitor can store text that looks like an object (a comment, a form
+	 * entry), and creating it would run that class's code.
+	 * @var bool
+	 */
+	private $allow_objects = true;
+
+	/**
+	 * Set while one cell is rewritten with $allow_objects off: the cell holds
+	 * a match inside a stored object, which was left as it is.
+	 * @var bool
+	 */
+	private $cell_object_match = false;
+
+	/** Longest before/after snippet a dry run keeps per side. */
+	const SAMPLE_CONTEXT = 60;
+
+	/**
 	 * Initializes the class and its properties.
 	 * @access public
 	 */
@@ -55,6 +89,21 @@ class OCM_DB {
 	 */
 	public function collected_urls() {
 		return is_array( $this->url_found ) ? $this->url_found : array();
+	}
+
+	/**
+	 * One log line: to the caller's sink when search_replace_db() was given
+	 * one, otherwise to the migration log (which the progress bar and the
+	 * server-side monitor read).
+	 *
+	 * @param string $message
+	 */
+	private function log_line( $message ) {
+		if ( null !== $this->log_sink ) {
+			call_user_func( $this->log_sink, (string) $message );
+			return;
+		}
+		One_Click_Migration::write_to_log( $message );
 	}
 
 	/**
@@ -252,7 +301,7 @@ class OCM_DB {
 		$page_size = max( 1, min( self::KEYSET_BATCH_ROWS_MAX, $page_size ) );
 
 		if ( $budget <= 1024 * 1024 ) {
-			One_Click_Migration::write_to_log(
+			$this->log_line(
 				' SYSLOG: Low memory - Page Size reduced to: ' . $page_size
 			);
 		}
@@ -606,14 +655,51 @@ class OCM_DB {
 	 * A yielded report has 'yielded' => true and 'cursor' => array('table',
 	 * 'last_key'): the table to continue with and its keyset position.
 	 *
+	 * The Search & Replace tool also passes (restores leave them out, and
+	 * behave as before):
+	 * - match_case: true matches the search text case for case. Default false.
+	 * - needles: the plain search strings. A cell, or a table without a
+	 *   primary key, that contains none of them is skipped unread. Without it
+	 *   the host of a URL-shaped search is used, as for restores.
+	 * - skip_columns: column names never changed (for example guid).
+	 * - skip_row: callable(table, row) returning true for a row to leave as it is.
+	 * - dry_run: true finds and counts what would change but writes nothing.
+	 * - sample_limit: how many before/after snippets a dry run keeps.
+	 * - log: callable taking one line, instead of the migration log.
+	 * - start_line: the first line written, instead of "Starting to update
+	 *   URLs in database"; '' writes none.
+	 * - allow_objects: false reads objects in serialized values as data and
+	 *   never creates them, so no class code runs. Text inside them is left
+	 *   unchanged, and the report counts those cells in 'objects_skipped'.
+	 *   Default true.
+	 * The report also has 'tables' => array(table => array('rows', 'cells',
+	 * 'columns' => array(column => cells))) for rows written (or, in a dry
+	 * run, that would be), and 'samples' in a dry run.
+	 *
 	 * @access public
 	 * @param  array $tables Tables to run the replacement on.
 	 * @param  array $args   Replacement args; optional page_size for tests.
 	 * @return array
 	 */
 	public function search_replace_db( $tables, $args ) {
+		$this->match_case = ! empty( $args['match_case'] );
+		$this->log_sink   = isset( $args['log'] ) && is_callable( $args['log'] ) ? $args['log'] : null;
+		$this->allow_objects = ! isset( $args['allow_objects'] ) || (bool) $args['allow_objects'];
+		$dry_run          = ! empty( $args['dry_run'] );
+		$sample_limit     = isset( $args['sample_limit'] ) ? max( 0, (int) $args['sample_limit'] ) : 0;
+		$skip_row         = isset( $args['skip_row'] ) && is_callable( $args['skip_row'] ) ? $args['skip_row'] : null;
+		$skip_columns     = array();
+		if ( isset( $args['skip_columns'] ) && is_array( $args['skip_columns'] ) ) {
+			foreach ( $args['skip_columns'] as $skip_column ) {
+				$skip_columns[ strtolower( (string) $skip_column ) ] = true;
+			}
+		}
+
 		if ( empty( $args['continuing'] ) ) {
-			One_Click_Migration::write_to_log('Starting to update URLs in database');
+			$start_line = array_key_exists( 'start_line', $args ) ? (string) $args['start_line'] : 'Starting to update URLs in database';
+			if ( '' !== $start_line ) {
+				$this->log_line( $start_line );
+			}
 		}
 		$should_yield = isset( $args['should_yield'] ) && is_callable( $args['should_yield'] )
 			? $args['should_yield']
@@ -624,7 +710,17 @@ class OCM_DB {
 		$tables = is_array( $tables ) ? array_values( $tables ) : array();
 
 		$pairs = $this->replacement_pairs_from_args( $args );
-		$host_needles = $this->host_needles_from_pairs( $pairs );
+		// Plain needles: the tool's own search text. Host needles: the host
+		// inside a URL-shaped restore pair. Both only decide what to skip unread.
+		$plain_needles = array();
+		if ( isset( $args['needles'] ) && is_array( $args['needles'] ) ) {
+			foreach ( $args['needles'] as $needle ) {
+				if ( is_string( $needle ) && '' !== $needle ) {
+					$plain_needles[] = $needle;
+				}
+			}
+		}
+		$host_needles = $plain_needles ? $plain_needles : $this->host_needles_from_pairs( $pairs );
 		// Tests may force a fixed batch via $args['page_size']. Otherwise each
 		// keyset table sizes its own batch from a byte budget / row estimate.
 		$forced_page_size = null;
@@ -648,6 +744,9 @@ class OCM_DB {
 			'paging_stuck_table' => null,
 			'yielded' => false,
 			'cursor' => null,
+			'tables' => array(),
+			'samples' => array(),
+			'objects_skipped' => 0,
 		);
 
 		foreach ($tables as $table_index => $table) {
@@ -674,8 +773,11 @@ class OCM_DB {
 
 			$path = 'keyset';
 			if ( ! $key_columns ) {
-				if ( ! $this->table_contains_host_needles( $table, $text_columns, $host_needles ) ) {
-					One_Click_Migration::write_to_log( sprintf(
+				$has_match = $plain_needles
+					? $this->table_contains_plain_needles( $table, $text_columns, $plain_needles )
+					: $this->table_contains_host_needles( $table, $text_columns, $host_needles );
+				if ( ! $has_match ) {
+					$this->log_line( sprintf(
 						'SYSLOG: URL update: table "%s" path=no-match',
 						$table
 					) );
@@ -685,13 +787,13 @@ class OCM_DB {
 				// Uncertain size (null) ⇒ treat as large ⇒ dedicated keyless stop.
 				if ( null !== $estimated && $this->keyless_table_fits_whole_pass( $estimated ) ) {
 					$path = 'whole';
-					One_Click_Migration::write_to_log( sprintf(
+					$this->log_line( sprintf(
 						'SYSLOG: URL update: table "%s" path=whole',
 						$table
 					) );
 				} else {
 					$table_report['unpageable_table'] = $table;
-					One_Click_Migration::write_to_log( sprintf(
+					$this->log_line( sprintf(
 						self::LOG_URL_TABLE_UNPAGEABLE,
 						$table
 					) );
@@ -707,7 +809,7 @@ class OCM_DB {
 			// the batch_rows=1 minimum for a row that cannot fit.
 			if ( $this->table_has_oversized_row( $table, $text_columns, $cached_row_bytes ) ) {
 				$table_report['oversized_table'] = $table;
-				One_Click_Migration::write_to_log( sprintf(
+				$this->log_line( sprintf(
 					self::LOG_URL_TABLE_ROW_TOO_LARGE,
 					$table
 				) );
@@ -718,7 +820,7 @@ class OCM_DB {
 				if ( null === $forced_page_size ) {
 					$this->page_size = $this->keyset_batch_rows( $table, $text_columns, $cached_row_bytes );
 				}
-				One_Click_Migration::write_to_log( sprintf(
+				$this->log_line( sprintf(
 					'SYSLOG: URL update: table "%s" path=keyset batch_rows=%d budget=%d',
 					$table,
 					(int) $this->page_size,
@@ -806,13 +908,25 @@ class OCM_DB {
 					$where_sql 	= array();
 					$upd 		= false;
 					$row_matched_pairs = array();
+					$row_changed_columns = array();
+					$skip_this_row = $skip_row && call_user_func( $skip_row, (string) $table, $row );
 
 					foreach ( $columns as $column ) {
+						if ( $skip_this_row ) {
+							break;
+						}
 
 						$data_to_fix = $row[ $column ];
 
 						if ( $key_columns && isset( $key_set[ $column ] ) ) {
 							$where_sql[] = $this->sql_where_equals( $column, $data_to_fix );
+							continue;
+						}
+
+						if ( $skip_columns && isset( $skip_columns[ strtolower( (string) $column ) ] ) ) {
+							if ( ! $key_columns ) {
+								$where_sql[] = $this->sql_where_equals( $column, $data_to_fix );
+							}
 							continue;
 						}
 
@@ -832,13 +946,21 @@ class OCM_DB {
 
 						// One-pass longest-match replace (no sequential double replace).
 						$cell_matches = array();
+						$this->cell_object_match = false;
 						$edited_data = $this->apply_replacement_pairs( $data_to_fix, $pairs, $cell_matches );
+						if ( $this->cell_object_match ) {
+							$table_report['objects_skipped']++;
+						}
 
 						// Something was changed
 						if ( $edited_data != $data_to_fix ) {
 							$update_sql[] = $column . ' = "' . $this->mysql_escape_mimic( $edited_data ) . '"';
 							$upd = true;
 							$table_report['change']++;
+							$row_changed_columns[] = (string) $column;
+							if ( $dry_run && count( $table_report['samples'] ) < $sample_limit ) {
+								$table_report['samples'][] = $this->change_sample( $table, $column, $data_to_fix, $edited_data );
+							}
 							foreach ( $cell_matches as $match_key => $match_pair ) {
 								if ( ! isset( $row_matched_pairs[ $match_key ] ) ) {
 									$row_matched_pairs[ $match_key ] = array(
@@ -878,7 +1000,10 @@ class OCM_DB {
 						}
 					}
 
-				 if ( $upd && ! empty( $where_sql ) ) {
+				 if ( $upd && $dry_run ) {
+						$table_report['updates']++;
+						$this->count_row_change( $table_report, $table, $row_changed_columns );
+					} elseif ( $upd && ! empty( $where_sql ) ) {
 						// Prefer the raw mysqli path so $wpdb->strip_invalid_text cannot
 						// reject otherwise-valid UPDATEs (field cases aa8fe3a4 / 0afb3661).
 						$sql 	= 'UPDATE ' . $table . ' SET ' . implode( ', ', $update_sql ) . ' WHERE ' . implode( ' AND ', array_filter( $where_sql ) );
@@ -917,6 +1042,7 @@ class OCM_DB {
 							}
 						} else {
 							$table_report['updates']++;
+							$this->count_row_change( $table_report, $table, $row_changed_columns );
 						}
 
 					}
@@ -952,7 +1078,7 @@ class OCM_DB {
 				$this->wpdb->flush();
 
 				// Per-batch peak so OOM investigations see growth across pages.
-				One_Click_Migration::write_to_log( sprintf(
+				$this->log_line( sprintf(
 					'SYSLOG: URL update: table "%s" batch_rows=%d peak_bytes=%d',
 					$table,
 					(int) count( $data ),
@@ -967,7 +1093,7 @@ class OCM_DB {
 						|| ( null !== $batch_start_key && $last_key === $batch_start_key );
 					if ( $key_stuck ) {
 						$table_report['paging_stuck_table'] = $table;
-						One_Click_Migration::write_to_log( sprintf(
+						$this->log_line( sprintf(
 							self::LOG_URL_TABLE_PAGING_STUCK,
 							$table
 						) );
@@ -1000,7 +1126,7 @@ class OCM_DB {
 			&& empty( $table_report['paging_stuck_table'] )
 			&& ( ! isset( $args['log_summary'] ) || $args['log_summary'] )
 		) {
-			One_Click_Migration::write_to_log( sprintf(
+			$this->log_line( sprintf(
 				'SYSLOG: URL update: peak_bytes=%d memory_limit=%s',
 				(int) memory_get_peak_usage( true ),
 				(string) ini_get( 'memory_limit' )
@@ -1032,7 +1158,7 @@ class OCM_DB {
 		try {
 
 
-			if ( is_string( $data ) && ! is_serialized_string( $data ) && ( $unserialized = $this->unserialize( $data ) ) !== false ) {
+			if ( is_string( $data ) && ! is_serialized_string( $data ) && ( $unserialized = $this->unserialize( $data, $this->allow_objects ) ) !== false ) {
 				$data = $this->recursive_unserialize_replace( $from, $to, $unserialized, true, $url_boundary );
 
 			}
@@ -1067,7 +1193,7 @@ class OCM_DB {
 
 			elseif ( is_serialized_string( $data ) ) {
 
-				$data = $this->unserialize( $data );
+				$data = $this->unserialize( $data, $this->allow_objects );
 				if ( $data !== false ) {
 
 					$data = $this->recursive_unserialize_replace( $from, $to, $data, false, $url_boundary );
@@ -1118,11 +1244,13 @@ class OCM_DB {
 	 * Return unserialized object or array
 	 *
 	 * @param string $serialized_string Serialized string.
-	 * @param string $method            The name of the caller method.
+	 * @param bool   $allow_objects     False reads objects as data
+	 *                                  (__PHP_Incomplete_Class) and never
+	 *                                  creates them, so no class code runs.
 	 *
 	 * @return mixed, false on failure
 	 */
-	public static function unserialize( $serialized_string ) {
+	public static function unserialize( $serialized_string, $allow_objects = true ) {
 
 		if ( ! is_serialized( $serialized_string ) ) {
 
@@ -1131,6 +1259,9 @@ class OCM_DB {
 
 
 		$serialized_string   = trim( $serialized_string );
+		if ( ! $allow_objects ) {
+			return @unserialize( $serialized_string, array( 'allowed_classes' => false ) );
+		}
 		$unserialized_string = @unserialize( $serialized_string );
 
 		return $unserialized_string;
@@ -1149,14 +1280,14 @@ class OCM_DB {
 		if ( $url_boundary ) {
 			// Match the end of the authority/path component, never a longer host,
 			// another port, userinfo, or a longer temporary username.
-			$pattern = '~' . preg_quote( $from, '~' ) . '(?=$|[/?#\s"\'<>\\\\])~i';
+			$pattern = '~' . preg_quote( $from, '~' ) . '(?=$|[/?#\s"\'<>\\\\])~' . ( $this->match_case ? '' : 'i' );
 			return preg_replace_callback( $pattern, function () use ( $to ) {
 				return $to;
 			}, $data );
 		}
 
 
-			$data = str_ireplace( $from, $to, $data );
+			$data = $this->match_case ? str_replace( $from, $to, $data ) : str_ireplace( $from, $to, $data );
 
 		return $data;
 	}
@@ -1201,6 +1332,102 @@ class OCM_DB {
 			}
 		);
 		return $pairs;
+	}
+
+	/**
+	 * Count one written (or, in a dry run, found) row per table and column.
+	 *
+	 * @param array  $report
+	 * @param string $table
+	 * @param array  $columns Columns changed in this row.
+	 */
+	private function count_row_change( &$report, $table, $columns ) {
+		$table = (string) $table;
+		if ( ! isset( $report['tables'][ $table ] ) ) {
+			$report['tables'][ $table ] = array( 'rows' => 0, 'cells' => 0, 'columns' => array() );
+		}
+		$report['tables'][ $table ]['rows']++;
+		foreach ( $columns as $column ) {
+			$report['tables'][ $table ]['cells']++;
+			if ( ! isset( $report['tables'][ $table ]['columns'][ $column ] ) ) {
+				$report['tables'][ $table ]['columns'][ $column ] = 0;
+			}
+			$report['tables'][ $table ]['columns'][ $column ]++;
+		}
+	}
+
+	/**
+	 * A short before/after pair around the first change in one cell.
+	 *
+	 * @param string $table
+	 * @param string $column
+	 * @param mixed  $before
+	 * @param mixed  $after
+	 * @return array{table: string, column: string, before: string, after: string}
+	 */
+	private function change_sample( $table, $column, $before, $after ) {
+		$before = (string) $before;
+		$after  = (string) $after;
+		$max    = min( strlen( $before ), strlen( $after ) );
+		$start  = 0;
+		while ( $start < $max && $before[ $start ] === $after[ $start ] ) {
+			$start++;
+		}
+		$end_before = strlen( $before );
+		$end_after  = strlen( $after );
+		while ( $end_before > $start && $end_after > $start && $before[ $end_before - 1 ] === $after[ $end_after - 1 ] ) {
+			$end_before--;
+			$end_after--;
+		}
+		$from = max( 0, $start - self::SAMPLE_CONTEXT );
+		return array(
+			'table'  => (string) $table,
+			'column' => (string) $column,
+			'before' => $this->sample_slice( $before, $from, $end_before + self::SAMPLE_CONTEXT ),
+			'after'  => $this->sample_slice( $after, $from, $end_after + self::SAMPLE_CONTEXT ),
+		);
+	}
+
+	/**
+	 * Bytes $from..$to of $text as valid UTF-8, with an ellipsis where cut.
+	 * Very long changed spans keep their start only.
+	 */
+	private function sample_slice( $text, $from, $to ) {
+		$to    = min( strlen( $text ), $to, $from + 4 * self::SAMPLE_CONTEXT );
+		$slice = substr( $text, $from, $to - $from );
+		if ( function_exists( 'mb_convert_encoding' ) ) {
+			$slice = mb_convert_encoding( $slice, 'UTF-8', 'UTF-8' );
+		}
+		return ( $from > 0 ? '…' : '' ) . $slice . ( $to < strlen( $text ) ? '…' : '' );
+	}
+
+	/**
+	 * Whether a table without a usable key holds any of the search strings,
+	 * so a table that can't contain a match is never read row by row.
+	 *
+	 * @param string             $table
+	 * @param array<int, string> $text_columns
+	 * @param array<int, string> $needles Plain search strings.
+	 * @return bool
+	 */
+	private function table_contains_plain_needles( $table, $text_columns, $needles ) {
+		if ( ! $text_columns || ! $needles ) {
+			return false;
+		}
+		$likes = array();
+		foreach ( $text_columns as $column ) {
+			// One case-insensitive collation for every column type (blob,
+			// binary or _bin text included): finding more than an exact-case
+			// search would change is fine here, missing a match is not.
+			$col_sql = 'CONVERT(' . $this->quote_identifier( $column ) . ' USING utf8mb4) COLLATE utf8mb4_general_ci';
+			foreach ( $needles as $needle ) {
+				$pattern = '%' . addcslashes( (string) $needle, '\\%_' ) . '%';
+				$likes[] = $col_sql . ' LIKE "' . $this->mysql_escape_mimic( $pattern ) . '"';
+			}
+		}
+		$sql = 'SELECT 1 FROM `' . esc_sql( $table ) . '` WHERE ' . implode( ' OR ', $likes ) . ' LIMIT 1';
+		$hit = $this->wpdb->get_var( $sql );
+		return null !== $hit && false !== $hit && '' !== $hit;
 	}
 
 	/**
@@ -1289,7 +1516,7 @@ class OCM_DB {
 	 */
 	private function recursive_unserialize_replace_pairs( $pairs, $data, $serialised = false, &$matched = null ) {
 		try {
-			if ( is_string( $data ) && ! is_serialized_string( $data ) && ( $unserialized = $this->unserialize( $data ) ) !== false ) {
+			if ( is_string( $data ) && ! is_serialized_string( $data ) && ( $unserialized = $this->unserialize( $data, $this->allow_objects ) ) !== false ) {
 				$data = $this->recursive_unserialize_replace_pairs( $pairs, $unserialized, true, $matched );
 			} elseif ( is_array( $data ) ) {
 				$_tmp = array();
@@ -1298,7 +1525,7 @@ class OCM_DB {
 				}
 				$data = $_tmp;
 				unset( $_tmp );
-			} elseif ( is_object( $data ) && ! is_a( $data, '__PHP_Incomplete_Class' ) ) {
+			} elseif ( is_object( $data ) && $this->allow_objects && ! is_a( $data, '__PHP_Incomplete_Class' ) ) {
 				$_tmp = $data;
 				$props = get_object_vars( $data );
 				foreach ( $props as $key => $value ) {
@@ -1308,8 +1535,14 @@ class OCM_DB {
 				}
 				$data = $_tmp;
 				unset( $_tmp );
+			} elseif ( is_object( $data ) ) {
+				// An object read as data: left exactly as it is. With objects
+				// off, remember that this cell kept a match inside one.
+				if ( ! $this->allow_objects && ! $this->cell_object_match && $this->value_holds_match( $pairs, $data ) ) {
+					$this->cell_object_match = true;
+				}
 			} elseif ( is_serialized_string( $data ) ) {
-				$data = $this->unserialize( $data );
+				$data = $this->unserialize( $data, $this->allow_objects );
 				if ( $data !== false ) {
 					$data = $this->recursive_unserialize_replace_pairs( $pairs, $data, false, $matched );
 					$data = serialize( $data );
@@ -1327,6 +1560,33 @@ class OCM_DB {
 		}
 
 		return $data;
+	}
+
+	/**
+	 * Whether a value that is left unchanged (an object read as data) holds
+	 * text the pairs would have replaced, in any of its values at any depth.
+	 *
+	 * @param array $pairs
+	 * @param mixed $value
+	 * @return bool
+	 */
+	private function value_holds_match( $pairs, $value ) {
+		if ( is_string( $value ) ) {
+			return $this->str_replace_pairs_one_pass( $pairs, $value ) !== $value;
+		}
+		if ( is_object( $value ) ) {
+			// The cast reads the properties without running any class code.
+			$value = (array) $value;
+			unset( $value['__PHP_Incomplete_Class_Name'] );
+		}
+		if ( is_array( $value ) ) {
+			foreach ( $value as $item ) {
+				if ( $this->value_holds_match( $pairs, $item ) ) {
+					return true;
+				}
+			}
+		}
+		return false;
 	}
 
 	/**
@@ -1361,7 +1621,7 @@ class OCM_DB {
 			return $data;
 		}
 
-		$pattern = '~' . implode( '|', $alts ) . '~i';
+		$pattern = '~' . implode( '|', $alts ) . ( $this->match_case ? '~' : '~i' );
 		return preg_replace_callback(
 			$pattern,
 			function ( $m ) use ( $map, &$matched ) {

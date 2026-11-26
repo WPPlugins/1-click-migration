@@ -1,0 +1,298 @@
+1-Click Migration changelog: versions before 3.3.0.
+Newer versions are in readme.txt and on https://wordpress.org/plugins/1-click-migration/#developers
+
+= 3.2.8 =
+* **Restores on a site that can't reach itself**: A restore moves from step to step by having the site call itself. Some new sites can't do that, for example when their domain isn't live yet. On those, the restore stopped after its first minute and left the site in maintenance mode, without saying why. The restore now checks this before it starts, and if the site can't reach itself, it asks you to keep the plugin page open, which keeps the restore going.
+
+= 3.2.7 =
+* **Large restores on hosts with a short request limit**: Some hosts end every request after a minute or two. On those, a large database part (over 1 GB) could never finish decrypting or unzipping, because each attempt started over, and the restore stopped with "database part could not be downloaded or unpacked". Decrypting and unzipping now save their progress and continue in the next step, as downloads already did.
+
+= 3.2.6 =
+* **After a restore**: The "Restore complete" window now asks whether everything came across. "Yes, looks good" leads to the review ask and says that a free WordPress.org account is needed. "Something's off" leads straight to the support forum instead.
+* **Restores that use the MySQL command line**: On some servers the database import reported success while WordPress couldn't see the imported tables, and the restore stopped with "the backup's main options table didn't pass the check". The restore now checks each imported table and, if WordPress can't see it, imports that table again through WordPress.
+
+= 3.2.5 =
+* **Out of disk space during a backup**: When the hosting account ran out of disk space while a backup was being prepared, the backup stopped with "encryption of the archive failed" and left its unfinished files behind. It now says the account is out of disk space, shows how to fix it, and deletes those files right away so the account isn't left full.
+
+= 3.2.4 =
+* **Linked database tables**: A restore could stop with "the database could not be imported" when a plugin on the old site keeps database tables that point to each other, such as a popup plugin's A/B test and visit log tables. These tables now restore and stay linked on the new site.
+
+= 3.2.3 =
+* **Stop & Reset**: Clicking Stop & Reset right after starting a backup could leave the backup running in the background, and it then reported "Backup failed". Stop & Reset now stops the backup straight away.
+
+= 3.2.2 =
+* **Interrupted restores**: When a restore picks up again after being interrupted just as a part of your backup finished downloading, it now keeps that download instead of fetching the same part again, so the restore finishes sooner.
+
+= 3.2.1 =
+* **Short service hiccups**: Starting a backup, uploading it, emailing the restore code and checking a restore code now try again on their own when the 1-Click Migration service is briefly busy or a connection drops, instead of stopping.
+* **Large uploads**: If uploading a large backup in parts runs into a problem, the backup now picks up the upload where it left off instead of trying to send the whole file again in one go, which could never work for files over 5 GB.
+* **Clearer restore message**: When the restore-code service is busy or can't be reached, the Restore tab now says so and that your backup is safe, instead of saying no backup was found for your code.
+
+= 3.2.0 =
+* **PHP 8.4 and 8.5**: The plugin no longer adds "Deprecated" notices to your error log, or to your pages when your site shows PHP errors. Its built-in libraries are updated to current versions, including security fixes in the library that encrypts your backups. Backups made with earlier versions still restore.
+
+= 3.1.35 =
+* **Slow connections**: A restore on a slow connection could sit on one download for up to 20 minutes until the host stopped it, or stop with "Restore failed while downloading" after a short pause in the connection. Downloads now pass the work on in short steps, a pause is simply tried again, and a slow download that keeps moving is no longer given up on after a set number of attempts.
+
+= 3.1.34 =
+* **Restores from a shared database**: If the old site's database also holds the tables of another WordPress site, such as a staging copy or a second install, the restore now brings over only your site's tables instead of stopping. If it can't tell which tables are yours, it stops before changing anything and says what to do.
+* **Very large folders**: When the host keeps stopping a backup while it packs a big folder, the backup now waits for the packing already under way instead of starting it over, which could fill the disk. If it still can't finish, it explains how to make the folder smaller. Folders larger than 80 GB can now be uploaded.
+
+= 3.1.33 =
+* **Clearer guidance**: Starting a backup while another one runs now says so instead of waiting silently. If you get logged out during a restore, the page tells you before it reloads, and the logout tip now appears at the step where it happens. The restore-code reminder stays on the page after you reload it. If restored files can't be put in place, the page explains that the site stays in maintenance mode on purpose and how to leave it. The downloaded log starts with a short note on sharing it safely.
+
+= 3.1.32 =
+* **Backups recover on their own too**: If an unexpected error stops a backup partway, it now picks up again from where it stopped, up to two times, even with the plugin page closed. A backup that crashed no longer blocks Start backup until you click Stop & Reset.
+* **Clearer messages**: The progress card explains problems in plain language instead of showing server errors, and a failed backup or restore still shows what happened and how to fix it after you reload the page. Hosts that need the page kept open now say so.
+* **Fix**: A backup or restore could stall after handing its work to a new background request and wait forever. It now continues, and a run that truly can't continue ends with a clear message. Each backup's log also no longer includes the previous backup's log.
+
+= 3.1.31 =
+* **Restores recover on their own**: If an unexpected error stops a restore partway, it now picks up again from where it stopped, up to two times, and the site stays in maintenance mode while it does. It can also recover with the plugin page closed, and a download that had already finished before the interruption no longer makes it fail. In 3.1.30, a PHP time-limit error could take the site out of maintenance mode while the restore was still running.
+
+= 3.1.30 =
+* Fix: restores no longer crash when another plugin (such as WooCommerce) bundles an older background-processing library; a crashed restore no longer leaves the site in maintenance mode.
+* Fix: a restore started right after one that crashed no longer waits forever with no progress. It clears what the crashed run left behind and starts, or tells you to click Stop & Reset if an earlier restore may still be running.
+
+= 3.1.29 =
+* **Minimum WordPress 5.3**: The plugin now lists WordPress 5.3 as its minimum. It's the first version that officially supports PHP 7.4, which the plugin already requires. Backup and restore work exactly as in 3.1.28.
+
+= 3.1.28 =
+* **Ready for translation**: The plugin page, its notices and the help shown with backup and restore progress can now be translated on translate.wordpress.org. Once a translation for your language is ready, WordPress installs it with the plugin. Progress steps come from the migration log and stay in English. The minimum WordPress version is now listed as 4.9, which the plugin already needed.
+
+= 3.1.27 =
+* **Listing update**: The description and FAQ now cover WooCommerce stores, more hosts and cloud servers, staging to live and domain name changes, and link to step-by-step guides on 1clickmigration.com. Backup and restore work exactly as in 3.1.26.
+
+= 3.1.26 =
+* **Listing update**: More hosts and a local-to-live question in the FAQ. Changelog entries before 3.1.20 moved to changelog.txt. Backup and restore work exactly as in 3.1.25.
+
+= 3.1.25 =
+* **Listing update**: New plugin title and short description on WordPress.org. Backup and restore work exactly as in 3.1.24.
+
+= 3.1.24 =
+* **Help links go to the support forum**: When a backup or restore fails, stops or stalls, the progress card now links to the WordPress.org support forum instead of the 1clickmigration.com contact form. It asks you to share your site's domain and never your restore code, because anyone who has the code can restore your backup. The help sections on the plugin page and the summary of an unfinished restore link there too.
+* **Updated plugin listing**: New title, short description and description on WordPress.org. Two corrections: a restore needs only the restore code, and the plugin page is under Tools → One Click Migration.
+
+= 3.1.23 =
+* **Clearer progress card**: The progress card no longer shows internal log lines (such as "SYSLOG: Dispatching backup worker") or full server paths for routine steps. It now shows plain step names such as "Starting the backup worker" or "Archiving themes". Error messages still include the path, so you can fix permissions or quota.
+* **No more false "taking longer than expected" notice**: Workers hand over to the next worker every 20 seconds. These planned hand-overs no longer show "Process is Restarting" or the "taking longer than expected" notice. The notice now appears only when a worker has actually stalled. It goes away once the run is moving again and is cleared when the run finishes. A new run no longer picks up the previous run's stall state.
+* **The progress bar no longer jumps backwards**: During a restore the bar could drop back to 1% ("Starting restore…") on log lines it didn't recognize. After the database import it went 84% → 40% → 83% → 62%. It now keeps the current step and moves forward in the order the restore actually runs.
+
+= 3.1.22 =
+* **Quieter restore log**: Restores no longer log a warning for each temporary copy of a database file that was already removed.
+* **No empty folders after backups**: A finished or failed backup now removes its empty work folder instead of leaving one behind for every run.
+
+= 3.1.21 =
+* **Restores survive strict server time limits**: Some hosts end a PHP request after 30 seconds, sooner than the plugin expected. Backup and restore workers now hand over to the next worker before that limit (20 seconds by default) without losing finished steps. If a worker is cut off during the database import anyway, the next one resumes the import where it stopped, instead of stopping with "the backup's main options table didn't pass the check".
+* **Restore files kept out of the web root**: The restore used to unpack the database dump and the other parts into `wp-content/ocm_restore`. Servers that ignore `.htaccess` (such as nginx) could serve those files to anyone during a restore and after a failed one. Restore and backup work files now go to the private folder outside the web root. Where that isn't possible, they go to a randomly named, access-protected folder. A leftover `wp-content/ocm_restore` from an older version is removed.
+* **Separate logs for sites in the same folder**: Sites installed side by side in one folder no longer share the migration log and the restore lock. Each site now has its own folder inside `.ocm-private`.
+* **Every stopped restore cleans up**: Each restore that stops with "No changes were made" now clears the success and review prompts, the restore queue and any temporary tables. This includes a database part that can't be downloaded.
+* **Restore right after a stopped one**: A restore started from the admin page soon after a failed or stopped run could stop at once with "the database could not be imported". The progress check no longer clears anything while a new restore starts.
+* **No leftover restore workers**: After a restore fails or stops, no worker from that run keeps downloading, decrypting or logging, and a new restore no longer overlaps a worker from the previous run.
+* **Source site's scheduled events stay behind**: A restore no longer copies the source site's scheduled 1 Click Migration events to the destination.
+* **Faster logging**: The migration log is now sent to storage at most every 10 seconds and immediately when a run ends, instead of after every line. This made backups and restores slower.
+
+= 3.1.20 =
+* **Site addresses updated before the swap**: The restore now updates site addresses on the imported copy of the database, before it replaces the live database and files. If that step can't finish safely (for example a table with no primary key, a row too large for the PHP memory limit, or the memory limit itself being reached), the restore stops with no changes made to the site, instead of leaving it half-restored.
+* **Restore never resumes the source's backup**: A backup's database is dumped while that backup is still running. After a restore, the destination could pick up the source site's unfinished backup and upload into the source's storage. The destination now keeps its own plugin state when the database is swapped in, and a backup can't run while a restore is in progress.
+* **One restore worker at a time**: Long downloads and decryption now report progress, so the restore is no longer mistaken for stalled and started twice. A process lock also keeps a second restore worker from running alongside the first. A missing temporary file is no longer reported as a disk-quota problem.
+* **Progress check after backup**: Checking progress the moment a backup finished could log a fatal `count()` error. It now exits quietly and never finishes the backup twice.
+* **Crashes are always logged**: A fatal PHP error during a backup or restore is now always logged, including parse and compile errors and a repeat of an earlier crash. A crashed run no longer looks like it is still in progress.
+* **Clearer storage and disk errors**: Running out of disk space while decrypting a part is reported at that step, not later as a corrupt archive. A failed upload of a large part no longer leaks the storage error into the progress screen, and an upload without a storage receipt is now logged.
+* **No address prompt after a stopped restore**: A restore that stops with no changes made no longer offers to update extra site addresses.
+* **Steadier progress bar**: Some internal log lines, such as low-memory notices and duplicate-worker exits, could send the progress bar back to 1% or show as the current step. They no longer do.
+
+= 3.1.19 =
+* **Binary database backup**: New backups hex-encode BINARY/BLOB columns (for example Wordfence file-hash tables) so those dumps restore cleanly. Older backups that still contain broken (non-hex) binary values need a fresh backup from a 3.1.19+ source; plain-text UTF-8 values stored in BLOB columns restore normally. BIT columns are no longer exported as quoted text, so their values restore exactly on hosts without mysqldump.
+* **Broken binary restore guard**: Restores that detect broken binary data stop before anything on the site is changed and ask for a fresh backup.
+* **Database part restore guard**: If the database was meant to be included but can't be downloaded or unpacked, the restore stops before any site files are replaced. A backup that intentionally left the database out (files-only) still restores its files without stopping.
+* **Empty uploads backup**: An empty uploads, themes, or plugins folder no longer fails the backup; the plugin writes a valid empty archive and restore accepts it. An empty database dump still fails as before.
+* **URL rewrite reliability**: Source addresses from `.local`/localhost and temp/cPanel domains expand scheme/www variants for the primary site path only (and checklist-approved domains). Other URLs such as CDN, embeds, and affiliate links stay unchanged.
+
+= 3.1.18 =
+* **Database archive failover**: If `ZipArchive::close()` fails while packing `db.zip`, backup no longer dead-ends when the host has no system `zip` binary. It now fails over to the existing in-process streaming zip, logs close diagnostics (libzip status, disk space), and only fails after ZipArchive, system zip, and in-process zip have all been tried (#69).
+
+= 3.1.17 =
+* **Review addresses before restore**: New backups collect an address inventory during database export. After checking the restore code, administrators can review old-to-new URL previews and select extra domains before restore starts. All choices start unchecked. Approved addresses are updated with the primary site URL in one serialized-safe pass. Older backups keep the post-restore address review.
+
+= 3.1.16 =
+* **Concurrent Backup Safety**: Added an atomic single-flight owner and per-run scratch directory so overlapping starts cannot share SQL dumps, archives, queue items, retry state, or bucket attribution.
+* **Backup Part Accuracy**: Successful uploads are committed before timeout handling and cannot later be marked skipped. Part manifests are bound to the run's registered bucket, and stale workers cannot update a newer run.
+* **ZIP Retry Accuracy**: A retry now accepts a valid archive left by a completed `ZipArchive::close()` before invoking monitored system-zip failover, avoiding false backup failures.
+
+= 3.1.15 =
+* **Restore Reliability**: Hardened options SQL import so large remapped `INSERT`s are no longer rejected as WordPress "invalid data" (`$wpdb->query()` `strip_invalid_text`, including the Turkish core string "Sorgu, içinde geçersiz veriler bulunduğundan işlenemedi"). Dump statements now prefer the raw mysqli handle when available; utf8/utf8mb3 connections are promoted to utf8mb4. Destination-prefix remap from 3.1.14 is unchanged.
+* **Backup Integrity**: S3 uploads now fail closed: failed or missing encrypted archives are recorded as missing, remain on disk for diagnosis/retry, never receive an `ok` manifest status, and cannot trigger a restore-code email. Streamed SQL exports retry short writes and abort the backup if any dump byte cannot be written.
+* **Safer Prefix Restore**: Prefix-remap temp files use checked full writes and atomic replacement, source-prefix detection requires exactly one canonical `*usermeta.sql` dump, and every SQL dump is validated/remapped before destination tables are dropped. Destination review-dismiss/count preferences survive the database replacement.
+* **Large Archive Reliability**: Normal sites continue to use `ZipArchive`. If `ZipArchive::close()` fails or a persisted marker shows that it hung/timed out on a huge tree, the retry switches to a slower monitored system-zip streaming failover with worker heartbeats.
+* **Log Security and Monitoring**: The migration log moved from the public plugin directory to a deny-protected private directory and is downloadable only by a nonce-verified administrator. Monitor classification now treats errors appended after a terminal marker as the current state while allowing a later terminal marker to resolve earlier transient errors.
+
+= 3.1.14 =
+* **Review Notice Accuracy**: The destination-site review notice is now armed only by restores that completed cleanly. Restores that finished with parts skipped after repeated failures (or parts missing from storage) no longer count as clean, so the notice cannot appear after a partial restore. Failed restores never counted. Same permanent dismiss flag as before.
+* **Restore Reliability**: Fixed a cross-prefix restore failure where the database import could run `CREATE TABLE` against the source prefix while the `INSERT`s targeted the destination prefix (e.g. `Table '….eol_options' doesn't exist` when restoring a `wp_` backup onto a site using a different prefix). The prefix swap is now verified and repaired at statement level before import, the importer remaps any `CREATE`/`INSERT`/`DROP`/`ALTER` statement still carrying the source prefix to the destination prefix at execution time, a failed prefix rewrite aborts the restore instead of importing wrong-prefix tables, and leftover temp files in the restore DB folder are no longer imported. The destination-prefix table (e.g. `eol_options`) is always created before rows are inserted into it. Same-prefix (`wp_` → `wp_`) restores behave exactly as before.
+
+= 3.1.13 =
+* **Review Notice**: After the first clean restore, the destination site's wp-admin now shows a persistent review notice with a Leave a review button and a permanent "Don't ask again" dismiss (same dismiss flag as the 3.1.11 restore-complete popup).
+* **Large-archive Reliability**: The native zip step and the encryption step now refresh the PHP time limit and the worker heartbeat while processing multi-GB archives, so they no longer die against the 300-second execution timeout. Encryption progress is logged every 512MB (offsets only).
+
+= 3.1.12 =
+* **Directory Listing Refresh**: Updated the WordPress.org listing title and short description (Free 1-Click WordPress Migration). Plugin behavior is identical to 3.1.11 — no code changes.
+
+= 3.1.11 =
+* **Log Sanitization**: The plugin log (`ocm_debug.log`) no longer records encrypted/binary payload data; I/O errors are logged as errno codes only, and every backup now ends with a terminal `Backup completed` or `Backup failed` line so log consumers can reliably detect the outcome.
+* **Restore Success UX**: The Leave a review button now appears on the first clean restore-complete dialog (previously 2nd+). It is still hidden on warned, missing-parts, partial, or failed restores, and remains permanently dismissible.
+
+= 3.1.10 =
+* **Large-database dumps**: SQL dumps now stream to disk in chunks instead of building the dump in PHP memory, with a preflight that logs DB size vs `memory_limit` and forces the streamed path when an in-memory dump would OOM. Low-memory warnings are written to the plugin log.
+* **Partial-backup honesty**: Skipping a part after the upload retry cap (e.g. `Skipping uploads Uploading`) now records that part as skipped in `BACKUP_PARTS` and finishes as completed-with-missing-parts — never `uploads=ok`.
+
+= 3.1.9 =
+* **Restore Reliability**: Restore now swaps the destination directory aside (`dest.ocm_bak`) and only deletes it after the new tree is in place, so a kill mid-replace leaves the old or new tree, never an empty folder. Restore logs the actual destination `$directory` path.
+
+= 3.1.8 =
+* **Restore Reliability**: Fixed a false siteurl/home failure during database restore when leftover foreign-prefix `*_options` tables (or custom table prefixes) were present on the destination. The gate now verifies `siteurl` and `home` only on the just-imported `{base_prefix}options` table, using the exact `{source_prefix}options.sql` dump — not other `*options.sql` files.
+
+= 3.1.7 =
+* **Restore Success UX**: When a restore finishes, you are taken back to the 1-Click Migration admin page and shown a clear restore-complete success dialog. A large Review button (WordPress.org reviews/#new-post, no rating filter, no incentive copy) appears only after a 2nd+ clean restore on that site — never on warned/missing-parts runs — and is permanently dismissible.
+
+= 3.1.6 =
+* **Partial Backup Honesty**: Backups that skip a part (e.g. uploads after repeated timeouts) now finish with a clear "completed with missing parts" status, an incomplete-backup warning banner, and a restore-code email that lists what's missing instead of reporting a normal completion.
+* **Restore Awareness**: Restores now read the backup's part manifest up front, warn which parts the backup does not contain, and fail clearly when a part that should exist is missing from storage.
+* **Background Worker Watchdog**: Backup and restore workers now write a heartbeat, and the progress poller automatically resumes a stalled worker — fixing silent hangs on hosts that block admin-ajax loopback requests (basic auth, WAF, firewalls).
+* **Loopback Handling**: When the pre-dispatch loopback check fails, the backup now runs in direct processing mode immediately instead of dispatching a background worker that never starts.
+* **Disk Space**: Restores delete encrypted and intermediate archives as soon as each step completes, check free space before every extraction, and use real uncompressed sizes from the backup for the up-front disk check. Backups likewise clean up each part's temp files right after upload, so peak disk usage is much lower on both sides.
+* **Clearer Failures**: Running out of disk space during a download or extraction now stops the restore immediately with an actionable message instead of retrying into a full disk.
+
+= 3.1.5 =
+* **Backup Reliability**: Added multipart uploads for large backup archives to reduce S3 timeout failures on slower hosts.
+* **Restore Reliability**: Added resumable downloads and stronger ZIP state validation so large restores can recover from interrupted transfers.
+* **Database Restore**: Hardened SQL import fallback for hosts without MySQL CLI access.
+* **Compatibility**: Removed pre-3.0 legacy backup endpoint handling.
+
+= 3.1.4 =
+* **Log Noise Reduction**: Suppressed unrelated theme/plugin PHP errors after migrations finish and deduplicated identical PHP errors across requests while migrations are active.
+
+= 3.1.3 =
+* **User Guidance**: Added contextual "How to fix" messages for quota, write permission, loopback, download/decrypt/extract, and database import failures.
+
+= 3.1.2 =
+* **Restore Reliability**: Restore now fails clearly when disk quota or write permissions prevent downloads, decryption, or ZIP extraction instead of reporting partial files as restored.
+* **Restore Diagnostics**: Added a restore workspace write probe and hardened DB failure-context logging for malformed SQL payloads.
+
+= 3.1.1 =
+* **Backup Diagnostics**: Added admin-ajax loopback and worker dispatch logging to help identify hosts that block background backup workers.
+
+= 3.1 =
+* **Restore Reliability**: Fixed PHP fallback database imports on hosts where `proc_open` is disabled so comment-prefixed SQL table definitions are imported correctly.
+* **Restore Safety**: Database import errors now stop the restore and surface a clear failure instead of logging `Restore completed.`
+* **Restore Validation**: Restore now verifies the imported `siteurl` option before running URL replacement.
+
+= 3.0 =
+* **Redesigned Admin UI**: New tabbed Backup / Restore interface with clearer steps, inline help, progress card, and a yellow notice banner that surfaces the email/restore-code reminder after a backup completes.
+* **Simpler Restore Access**: Backup now uses your email and sends an 8-character restore code when the backup completes. Restore takes only that code — no separate email field needed.
+* **Pre-Flight Disk Space Check**: Backup and restore exit early with a clear message if there's not enough free disk space, instead of failing midway.
+* **Backup Security**: Files continue to be encrypted (AES-256) before upload, with improved key handling behind the scenes.
+* **Retention**: Backup availability is now consistently 48 hours.
+* **Backup Reliability**: Improved backup stability on sites with plugins that interfere with long-running background tasks.
+* **Restore Reliability**: Improved restore stability when plugin code, locked folders, or stubborn file permissions would previously interrupt a migration.
+* **Security**: Removed the old legacy access path and tightened the restore flow.
+* **Compatibility**: Existing backups from the previous version remain restorable during the short upgrade window only.
+
+= 2.6.1 =
+* **Critical Fix**: Fixed fatal `Call to undefined function OCM\ini_set()` crash on shared hosts that disable `ini_set`/`ini_get` via `disable_functions` — this was a 100% restore blocker on affected cPanel hosts
+* **Critical Fix**: Fixed "OS: Windows" log message being written 250+ times per backup on Windows/XAMPP hosts — now logs only once per session
+* **Bug Fix**: Fixed fatal crash when Stop & Reset is clicked mid-backup — background process now re-creates the temporary directory if it was deleted
+
+= 2.6.0 =
+* **Critical Fix**: Fixed DivisionByZeroError crash during database backup when tables report 0 MB in information_schema (affected Gravity Forms and other small tables)
+* **Bug Fix**: Changed error catch from `Exception` to `Throwable` so PHP 8 DivisionByZeroError is properly caught by the fallback handler
+* **Log Noise Reduction**: Added error deduplication to suppress identical PHP errors from being logged 30+ times per session (e.g. theme/plugin bugs)
+* **Log Noise Reduction**: Suppressed per-table "Table being backed up" log messages that generated 50-80+ lines per backup on large sites
+* **Log Fix**: Fixed misleading "Bucket created" log message that appeared after AWS 502 errors — now correctly says "Retrying bucket creation"
+
+= 2.5.9 =
+* **Maintenance Mode**: Automatically enables maintenance mode during restore to prevent visitors from seeing broken pages, white screens, or database errors
+* **Admin & API Bypass**: Admin users and REST API requests (e.g. progress polling) bypass maintenance mode so the dashboard stays functional
+* **Progress Indicator**: The admin progress endpoint now reports maintenance mode status so the dashboard indicator works
+* **Auto Cleanup**: Maintenance mode is automatically disabled when the restore completes or is cancelled via Stop & Reset
+
+= 2.5.8 =
+* **Timeout Fix**: Reset PHP time limit before each major operation (archive, encrypt, upload, download, decrypt, extract) to prevent timeouts on large sites
+* **Upload Fix**: Upload timeout now uses the full execution budget instead of the exhausted background process remaining time
+* **Download Fix**: Restore file downloads now use the full timeout budget instead of remaining background process time
+* **Bug Fix**: Fixed `Undefined array key "tables"` crash when mysqldump fails and falls back to PHP-based export
+* **Bug Fix**: Fixed `error_reporting` never being restored on success paths in zip creation and folder backup
+* **Resilience**: Error handler no longer kills the process for fatal errors from external themes/plugins (e.g. WooCommerce dependency in child themes)
+* **Reliability**: Added pre-flight disk space check before DB and folder backups to fail early with a clear message
+* **Cleanup**: Removed dead `retry` parameter from `wp_remote_post` calls
+
+= 2.5.7 =
+* **Bug Fix**: Fixed fatal error during restore where `$presigned_urls` (stdClass) was passed to `sprintf` instead of the directory path string
+* **Bug Fix**: Made `mkdir` recursive when creating `tmp/db/` directory so it succeeds even if the parent `tmp/` directory was cleaned up
+* **Restore Fix**: Clear stale background process queues after DB import to prevent source site's backup tasks from firing on the destination
+
+= 2.5.6 =
+* **Concurrency Fix**: Added MySQL advisory locks to prevent concurrent background handlers from processing the same batch simultaneously
+* **Reliability**: Fixed race condition where multiple handlers could duplicate compress, encrypt, and upload operations
+* **Upload Fallback**: Improved upload step to construct expected encrypted file path when step metadata is missing, preventing silent upload skips
+
+= 2.3.7 =
+* **Progress Bar Fix**: Resolved progress bar jumping back to 1% during database backup operations
+* **Memory Management**: Implemented dynamic memory management with automatic page sizing based on available system resources
+* **Error Handling**: Added robust validation and error handling for S3 file uploads with proper file path checking
+* **Logging Improvements**: Enhanced logging system with better filtering to prevent progress bar interference from verbose messages
+* **Debug Tools**: Added conditional debug logging (WP_DEBUG only) to help identify unmapped progress messages
+* **Database Optimization**: Improved database export operations with dynamic row increment sizing and better memory monitoring
+
+= 2.3.6 =
+* **Reliability Fix**: Disabled async dispatch in favor of direct processing for guaranteed execution on all hosting environments
+* **Compatibility**: Resolved backup hanging issues on AWS and other servers where async HTTP requests may fail silently
+* **Stability**: Reverted to proven direct processing approach for maximum reliability across all hosting providers
+
+= 2.3.5 =
+* **UX Improvement**: Disable Backup/Restore buttons when all components are excluded to prevent empty backups
+* **UX Improvement**: Fixed progress bar jump from 1% to 0% at the start of backup/restore operations
+* **Bug Fix**: Added validation to prevent silent failures when attempting to backup with all components excluded
+
+= 2.3.3 =
+* **Bug Fix**: Fixed `is_processing()` method compatibility issue with different WP Background Processing library versions
+* **Compatibility**: Replaced method call with direct transient check for maximum compatibility
+
+= 2.3.2 =
+* **Security Fix**: Added nonce verification and capability checks to prevent unauthorized access (CVE-2025-3455)
+* **Reliability**: Simplified background processing for maximum compatibility across all hosting environments
+* **UX Improvement**: Fixed progress bar freeze after restore completion and login
+* **Performance**: Removed async complexity that caused race conditions on various hosts
+* **Compatibility**: Enhanced stop & reset functionality to prevent stuck states
+
+= 2.3.1 =
+* Fixed white screen on deactivation  
+* Improved retry logic for presigned URLs  
+* Enhanced cleanup & error handling  
+
+= 2.3 =
+* Stability improvements  
+
+= 2.2 =
+* CSRF fix & updates  
+
+= 2.1 =
+* Bug fixes  
+
+= 2.0 =
+* Full redesign for easier use  
+* Multiple bug fixes  
+
+= 1.6 =
+* Manual & automated retries  
+* Improved hosting compatibility  
+
+= 1.4 =
+* Selective backup/restore added  
+* Stop & Reset button implemented  
+
+= 1.3 =
+* Support for serialized DB entries  
+* PayPal integration  
+
+= 1.0 – 1.2 =
+* Initial release & dependency updates
