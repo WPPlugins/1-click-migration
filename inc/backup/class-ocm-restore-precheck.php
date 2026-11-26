@@ -45,8 +45,10 @@ class OCM_Restore_Precheck {
     /**
      * Did the service answer that this backup exists but has not been paid for
      * yet (HTTP 402, error payment_required)? Returns what the admin sees: the
-     * price ('' when the service named none) and the pay link ('' unless it
-     * points at our own site). Null for every other answer.
+     * price ('' when the service named none), the pay link ('' unless it
+     * points at our own site), the backed-up site's host and when the backup
+     * was made (UTC "Y-m-d H:i:s"); each '' when missing or not in that exact
+     * shape (older servers send neither). Null for every other answer.
      *
      * @param mixed $redeem What OCM_S3::redeem_restore_code() returned.
      * @return array|null
@@ -55,10 +57,29 @@ class OCM_Restore_Precheck {
         if (!is_object($redeem) || 402 !== (int) ($redeem->_status ?? 0) || 'payment_required' !== ($redeem->error ?? '')) {
             return null;
         }
+        $site = $redeem->site ?? '';
+        $created = $redeem->created ?? '';
         return array(
             'price'   => self::price_label($redeem->amount ?? '', $redeem->currency ?? ''),
             'pay_url' => self::pay_url($redeem->pay_url ?? ''),
+            'site'    => is_string($site) && preg_match('/^[a-z0-9.-]{1,253}$/D', $site) ? $site : '',
+            'created' => is_string($created) && preg_match('/^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}$/D', $created) ? $created : '',
         );
+    }
+
+    /**
+     * The pay page for one of this site's own backups, as shown on the
+     * backup-finished notice ("&s=b" tells the funnel where the click came
+     * from). '' unless the bucket id is exactly 32 hex characters.
+     *
+     * @param mixed $bucket_id
+     * @return string
+     */
+    public static function backup_pay_url($bucket_id) {
+        if (!is_string($bucket_id) || !preg_match('/^[a-f0-9]{32}$/D', $bucket_id)) {
+            return '';
+        }
+        return self::pay_url(self::PAY_URL_PREFIX . 'api/pay.php?b=' . $bucket_id . '&s=b');
     }
 
     /**
@@ -80,16 +101,35 @@ class OCM_Restore_Precheck {
             && preg_match('/^[A-Za-z0-9:\/?&=._~%-]+$/D', $url) ? $url : '';
     }
 
-    /** @return string For the admin when the backup has to be paid for before it can be restored. */
-    public static function payment_required_message($price = '') {
+    /**
+     * For the admin when the backup has to be paid for before it can be
+     * restored. With a pay link the admin page pays inside the restore and
+     * this is only the summary; without one (the redirect after a refused
+     * restore start, the log), the restore-code email is the way to pay.
+     *
+     * @param string $price    Price label, '' when unknown.
+     * @param bool   $has_link Whether the admin page can offer the pay step.
+     * @return string
+     */
+    public static function payment_required_message($price = '', $has_link = false) {
+        if ($has_link) {
+            if ('' !== $price) {
+                return sprintf(
+                    /* translators: %s: price of the migration, e.g. $9.99 */
+                    __('This backup is ready. Restoring it costs %s, one time. Pay here and the restore starts by itself as soon as the payment goes through. If the migration doesn\'t work, we\'ll fix it or refund you in full.', '1-click-migration'),
+                    $price
+                );
+            }
+            return __('This backup is ready. Pay here and the restore starts by itself as soon as the payment goes through. If the migration doesn\'t work, we\'ll fix it or refund you in full.', '1-click-migration');
+        }
         if ('' !== $price) {
             return sprintf(
                 /* translators: %s: price of the migration, e.g. $9.99 */
-                __('This backup hasn\'t been paid for yet. Restoring it costs %s, one time. Pay from the link in your restore-code email, then click Check backup & restore again. If the migration doesn\'t work, reply to that email and we\'ll fix it or refund you in full.', '1-click-migration'),
+                __('This backup hasn\'t been paid for yet. Restoring it costs %s, one time. Pay from the link in your restore-code email, then click Check backup & restore again. If the migration doesn\'t work, we\'ll fix it or refund you in full.', '1-click-migration'),
                 $price
             );
         }
-        return __('This backup hasn\'t been paid for yet. Pay from the link in your restore-code email, then click Check backup & restore again. If the migration doesn\'t work, reply to that email and we\'ll fix it or refund you in full.', '1-click-migration');
+        return __('This backup hasn\'t been paid for yet. Pay from the link in your restore-code email, then click Check backup & restore again. If the migration doesn\'t work, we\'ll fix it or refund you in full.', '1-click-migration');
     }
 
     public static function prepare() {
@@ -119,8 +159,11 @@ class OCM_Restore_Precheck {
             if (null !== $payment) {
                 wp_send_json_error(array(
                     'code'    => 'payment_required',
-                    'message' => self::payment_required_message($payment['price']),
+                    'message' => self::payment_required_message($payment['price'], '' !== $payment['pay_url']),
                     'pay_url' => $payment['pay_url'],
+                    'price'   => $payment['price'],
+                    'site'    => $payment['site'],
+                    'created' => $payment['created'],
                 ), 400);
             }
             if (self::lookup_unavailable($redeem->_status ?? 0, $redeem->error ?? '')) {

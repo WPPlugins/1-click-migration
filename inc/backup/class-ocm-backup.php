@@ -11,6 +11,8 @@ use WP_Error;
 use wpdb;
 use ZipArchive;
 
+require_once __DIR__ . '/../handler/class-ocm-ca-bundle.php';
+
 class OCM_Backup
 {
     /** @var bool A selected archive backend ran and failed; do not retry via another huge-tree backend. */
@@ -489,7 +491,8 @@ class OCM_Backup
         // background-process transient is only created after dispatch and its
         // real identifier includes the wp_ prefix, so it cannot close the
         // start/dispatch race by itself.
-        if (get_option('ocm_action_start_backup')
+        if ((class_exists(__NAMESPACE__ . '\\OCM_Local_Backup') && OCM_Local_Backup::is_running())
+            || get_option('ocm_action_start_backup')
             || get_option('ocm_action_start_restore')
             || get_site_transient('wp_ocm_background_backup_process_lock')
         ) {
@@ -612,6 +615,8 @@ class OCM_Backup
             One_Click_Migration::write_to_log(
                 ' SYSLOG: BACKUP_UNCOMPRESSED_SIZES bucket=' . $bucket_id . ' ' . implode(' ', $size_pairs)
             );
+            // The same sizes for a person reading the log. Nothing parses it.
+            One_Click_Migration::write_to_log(' SYSLOG: BACKUP_SIZES ' . self::readable_backup_sizes($disk['sizes']));
         }
 
         // The DB part holds every table in the database, other installs' too.
@@ -751,7 +756,7 @@ class OCM_Backup
      * @param string $what "backup" or "restore", for the log.
      * @return bool
      */
-    private static function admin_ajax_loopback_check_passed($what = 'backup')
+    public static function admin_ajax_loopback_check_passed($what = 'backup')
     {
         $url = add_query_arg(
             array(
@@ -848,7 +853,10 @@ class OCM_Backup
             wp_die(esc_html__('You do not have sufficient permissions to perform this action.', '1-click-migration'));
         }
 
-        if (get_option('ocm_action_start_backup') || get_option('ocm_action_start_restore')) {
+        if (get_option('ocm_action_start_backup')
+            || get_option('ocm_action_start_restore')
+            || (class_exists(__NAMESPACE__ . '\\OCM_Local_Backup') && OCM_Local_Backup::is_running())
+        ) {
             wp_send_json_error(array('message' => __('Another operation started. Wait for it to finish or stop it first.', '1-click-migration')), 409);
             return;
         }
@@ -2664,7 +2672,7 @@ class OCM_Backup
         ));
     }
 
-    private static function replaceDirectoryFromExtract($extract_path, $directory, $key)
+    public static function replaceDirectoryFromExtract($extract_path, $directory, $key)
     {
         if (!is_dir($extract_path)) {
             return false;
@@ -2727,7 +2735,7 @@ class OCM_Backup
         return true;
     }
 
-    private static function deleteDirectoryBestEffort($dir, $keep_root = false)
+    public static function deleteDirectoryBestEffort($dir, $keep_root = false)
     {
         if (!file_exists($dir)) {
             return true;
@@ -2784,7 +2792,7 @@ class OCM_Backup
      * @param string $attempted Set to the directory that could not be cleared or created.
      * @return string The workspace, or '' on failure.
      */
-    private static function prepare_restore_workspace(&$attempted = '')
+    public static function prepare_restore_workspace(&$attempted = '')
     {
         foreach (self::existing_restore_work_paths() as $old) {
             if (!self::deleteDirectoryBestEffort($old)) {
@@ -2860,7 +2868,57 @@ class OCM_Backup
         return true;
     }
 
-    private static function create_native_zip_from_directory($folder_path, $filename)
+    public static function create_local_zip_archive($source_dir, $target_zip, $is_db = false, $worker = null)
+    {
+        self::$archive_backend_failed = false;
+        self::$archive_interrupted = false;
+
+        if (self::create_native_zip_from_directory($source_dir, $target_zip, $worker)) {
+            return self::is_valid_zip_archive($target_zip);
+        }
+
+        if (!$is_db && self::$archive_backend_failed) {
+            return false;
+        }
+
+        if (!is_dir($source_dir) || !self::directory_contains_files($source_dir)) {
+            if (!$is_db && self::archive_allows_empty($target_zip)) {
+                return self::write_empty_zip_archive($target_zip);
+            }
+            return false;
+        }
+
+        $old_error_reporting = error_reporting();
+        error_reporting($old_error_reporting & ~E_DEPRECATED & ~E_NOTICE);
+        @unlink($target_zip);
+        $zip = new ZipFile();
+        try {
+            foreach (self::folder_archive_files($source_dir) as $relativePath => $filePath) {
+                if (!is_readable($filePath)) {
+                    continue;
+                }
+                $zip->addFile($filePath, $relativePath, ZipCompressionMethod::STORED);
+            }
+            $zip->saveAsFile($target_zip);
+            $zip->close();
+            delete_option('ocm_zip_close_in_progress_' . md5($target_zip));
+        } catch (\Throwable $e) {
+            @unlink($target_zip);
+            One_Click_Migration::write_to_log(sprintf(
+                'Error: In-process zip failover could not save "%s": %s (free: %d bytes)',
+                basename($target_zip),
+                $e->getMessage(),
+                (int) self::get_free_disk_space(dirname($target_zip))
+            ));
+            error_reporting($old_error_reporting);
+            return false;
+        }
+        error_reporting($old_error_reporting);
+
+        return self::is_valid_zip_archive($target_zip);
+    }
+
+    public static function create_native_zip_from_directory($folder_path, $filename, $worker = null)
     {
         self::$archive_backend_failed = false;
         self::$archive_interrupted = false;
@@ -2905,7 +2963,7 @@ class OCM_Backup
                 'Notice: Previous ZipArchive::close() did not finish for "%s"; switching to slower monitored zip failover.',
                 basename($filename)
             ));
-            return self::run_zip_close_failover($folder_path, $filename, $close_marker);
+            return self::run_zip_close_failover($folder_path, $filename, $close_marker, $worker);
         }
 
         if (!class_exists('ZipArchive')) {
@@ -2991,7 +3049,9 @@ class OCM_Backup
         // heartbeat and lock fresh so the watchdog doesn't take it for a dead
         // one, and log how far it got in case the host stops it.
         if (method_exists($zip, 'registerProgressCallback')) {
-            $worker = isset(One_Click_Migration::$process_backup_single) ? One_Click_Migration::$process_backup_single : null;
+            if (null === $worker) {
+                $worker = self::default_backup_worker();
+            }
             $last_report = time();
             $zip->registerProgressCallback(0.001, function ($rate) use ($worker, $filename, &$last_report) {
                 self::zip_heartbeat($worker);
@@ -3036,7 +3096,7 @@ class OCM_Backup
             is_file($filename) ? (int) @filesize($filename) : 0,
             (int) self::get_free_disk_space(dirname($filename))
         ));
-        return self::run_zip_close_failover($folder_path, $filename, $close_marker);
+        return self::run_zip_close_failover($folder_path, $filename, $close_marker, $worker);
     }
 
     /**
@@ -3047,7 +3107,7 @@ class OCM_Backup
      * instead of dead-ending. A system zip that ran and failed sets
      * $archive_backend_failed.
      */
-    private static function run_zip_close_failover($folder_path, $filename, $close_marker)
+    private static function run_zip_close_failover($folder_path, $filename, $close_marker, $worker = null)
     {
         // Never let a half-written primary archive be mistaken for a result,
         // unless it is the finished output of an earlier worker's system zip.
@@ -3055,7 +3115,7 @@ class OCM_Backup
         if (!is_array($job) || !isset($job['filename']) || $job['filename'] !== $filename) {
             @unlink($filename);
         }
-        $failover_result = self::create_cli_zip_from_directory($folder_path, $filename);
+        $failover_result = self::create_cli_zip_from_directory($folder_path, $filename, $worker);
         if ($failover_result === true) {
             delete_option($close_marker);
             return true;
@@ -3079,7 +3139,7 @@ class OCM_Backup
         return false;
     }
 
-    private static function is_valid_zip_archive($filename)
+    public static function is_valid_zip_archive($filename)
     {
         if (!class_exists('ZipArchive') || !is_file($filename) || !is_readable($filename)) {
             return false;
@@ -3100,7 +3160,7 @@ class OCM_Backup
      * marker proves it hung/timed out. It streams outside PHP and keeps worker
      * heartbeats moving instead of entering another uninterruptible close().
      */
-    private static function create_cli_zip_from_directory($folder_path, $filename)
+    private static function create_cli_zip_from_directory($folder_path, $filename, $worker = null)
     {
         if (!is_dir($folder_path)) {
             return null;
@@ -3142,7 +3202,7 @@ class OCM_Backup
                     (int) $job['pid'],
                     time() - (int) $job['started']
                 ));
-                return self::wait_for_zip_failover_job($job, null);
+                return self::wait_for_zip_failover_job($job, null, $worker);
             }
             if (is_file((string) $job['exit_file'])) {
                 // It finished while no worker was watching.
@@ -3189,7 +3249,7 @@ class OCM_Backup
         $job['pid'] = isset($status['pid']) ? (int) $status['pid'] : 0;
         update_option(self::ZIP_FAILOVER_JOB_OPTION, $job, false);
 
-        return self::wait_for_zip_failover_job($job, $process);
+        return self::wait_for_zip_failover_job($job, $process, $worker);
     }
 
     /** Heartbeat plus process-lock refresh (throttled) from inside a long zip step. */
@@ -3208,17 +3268,52 @@ class OCM_Backup
     const ZIP_FAILOVER_MAX_AGE = 21600;
 
     /**
+     * Whether the plugin's log channel is currently routed to the local backup log.
+     *
+     * Guarded with method_exists() so unit-test stubs for One_Click_Migration
+     * that omit local helpers do not fatal during archive operations.
+     *
+     * @return bool
+     */
+    private static function is_local_log_channel()
+    {
+        return class_exists(__NAMESPACE__ . '\\One_Click_Migration')
+            && method_exists(One_Click_Migration::class, 'get_log_channel')
+            && One_Click_Migration::get_log_channel() === 'local';
+    }
+
+    /**
+     * Resolve the active single-part backup worker for the current log channel.
+     *
+     * @return object|null
+     */
+    private static function default_backup_worker()
+    {
+        if (self::is_local_log_channel()) {
+            return isset(One_Click_Migration::$process_local_backup)
+                ? One_Click_Migration::$process_local_backup
+                : null;
+        }
+        return isset(One_Click_Migration::$process_backup_single)
+            ? One_Click_Migration::$process_backup_single
+            : null;
+    }
+
+    /**
      * Wait for the monitored zip, keeping the worker's heartbeat and lock
      * fresh. $process is this worker's own child; null for one adopted from
      * an earlier worker, which is watched through its pid instead.
      *
      * @param array         $job
      * @param resource|null $process
+     * @param object|null   $worker
      * @return bool
      */
-    private static function wait_for_zip_failover_job(array $job, $process)
+    private static function wait_for_zip_failover_job(array $job, $process, $worker = null)
     {
-        $worker = isset(One_Click_Migration::$process_backup_single) ? One_Click_Migration::$process_backup_single : null;
+        if (null === $worker) {
+            $worker = self::default_backup_worker();
+        }
         $last_progress = 0;
         while (true) {
             if (is_resource($process)) {
@@ -3241,7 +3336,9 @@ class OCM_Backup
                     $job['bytes'] = $bytes;
                     update_option(self::ZIP_FAILOVER_JOB_OPTION, $job, false);
                     $folder_name = basename((string) $job['filename'], '.zip');
-                    if (in_array($folder_name, array('themes', 'plugins', 'uploads'), true)) {
+                    if (!self::is_local_log_channel()
+                        && in_array($folder_name, array('themes', 'plugins', 'uploads'), true)
+                    ) {
                         update_option('ocm_backup_compress_retry_' . $folder_name, 1, true);
                     }
                 }
@@ -3396,7 +3493,7 @@ class OCM_Backup
         One_Click_Migration::write_to_log(sprintf(' SYSLOG: Stopped monitored system zip for "%s" (pid %d).', basename((string) $job['filename']), $pid));
     }
 
-    private static function directory_contains_files($folder_path)
+    public static function directory_contains_files($folder_path)
     {
         if (!is_dir($folder_path)) {
             return false;
@@ -3431,7 +3528,7 @@ class OCM_Backup
      * @param string[] $ancestors real paths (with a trailing "/") of the directories being walked
      * @return \Generator
      */
-    private static function folder_archive_files($dir, $prefix = '', array $ancestors = array())
+    public static function folder_archive_files($dir, $prefix = '', array $ancestors = array())
     {
         try {
             $entries = new \FilesystemIterator($dir, \FilesystemIterator::SKIP_DOTS);
@@ -3882,13 +3979,19 @@ class OCM_Backup
      *                    array('index' => <entry>, 'offset' => <bytes>) when the
      *                    worker ran out of time.
      */
-    private static function extract_zip_resumable($zip, $zip_path, $extract_path, $index = 0, $offset = 0)
+    public static function extract_zip_resumable($zip, $zip_path, $extract_path, $index = 0, $offset = 0, $worker = null)
     {
         // extractTo() creates the folder even for an empty archive (an empty
         // uploads part), and the caller checks for it.
         if (!is_dir($extract_path) && !@mkdir($extract_path, 0777, true) && !is_dir($extract_path)) {
             return false;
         }
+        $active_worker = null !== $worker
+            ? $worker
+            : (isset(One_Click_Migration::$process_restore_single) ? One_Click_Migration::$process_restore_single : null);
+        $is_local_worker = null !== $worker
+            && isset(One_Click_Migration::$process_local_restore)
+            && $worker === One_Click_Migration::$process_local_restore;
         $count = (int) $zip->numFiles;
         for (; $index < $count; $index++, $offset = 0) {
             $stat = $zip->statIndex($index);
@@ -3900,7 +4003,7 @@ class OCM_Backup
             $target = $size >= self::EXTRACT_SLICED_MIN_BYTES ? self::zip_entry_target($extract_path, $name) : null;
             $span = null !== $target ? self::zip_stored_entry_span($zip_path, $index, $name) : null;
             if (null !== $span && $span[1] === $size) {
-                $offset = self::extract_stored_entry_slice($zip_path, $span[0], $size, $target, $offset);
+                $offset = self::extract_stored_entry_slice($zip_path, $span[0], $size, $target, $offset, $worker);
                 if (false === $offset) {
                     return false;
                 }
@@ -3914,11 +4017,17 @@ class OCM_Backup
             } elseif (!$zip->extractTo($extract_path, array($name))) {
                 return false;
             }
-            One_Click_Migration::transfer_heartbeat(One_Click_Migration::$process_restore_single);
-            if (self::restore_run_ended_throttled()) {
+            One_Click_Migration::transfer_heartbeat($active_worker);
+            $ended = $is_local_worker
+                ? (class_exists(__NAMESPACE__ . '\\OCM_Local_Backup') && OCM_Local_Backup::restore_run_ended_throttled())
+                : self::restore_run_ended_throttled();
+            if ($ended) {
                 return false;
             }
-            if ($index + 1 < $count && self::restore_worker_should_hand_over()) {
+            $hand_over = null !== $worker
+                ? (is_object($worker) && method_exists($worker, 'has_batch_clock') && $worker->has_batch_clock() && method_exists($worker, 'time_exceeded') && $worker->time_exceeded())
+                : self::restore_worker_should_hand_over();
+            if ($index + 1 < $count && $hand_over) {
                 return array('index' => $index + 1, 'offset' => 0);
             }
         }
@@ -4037,7 +4146,7 @@ class OCM_Backup
      *
      * @return int|false Bytes of the entry now written.
      */
-    private static function extract_stored_entry_slice($zip_path, $start, $size, $target, $offset)
+    private static function extract_stored_entry_slice($zip_path, $start, $size, $target, $offset, $worker = null)
     {
         $dir = dirname($target);
         if (!is_dir($dir) && !@mkdir($dir, 0777, true) && !is_dir($dir)) {
@@ -4060,6 +4169,12 @@ class OCM_Backup
             fseek($out, $offset);
         }
         fseek($in, $start + $offset);
+        $active_worker = null !== $worker
+            ? $worker
+            : (isset(One_Click_Migration::$process_restore_single) ? One_Click_Migration::$process_restore_single : null);
+        $is_local_worker = null !== $worker
+            && isset(One_Click_Migration::$process_local_restore)
+            && $worker === One_Click_Migration::$process_local_restore;
         $ok = true;
         while ($offset < $size) {
             $buf = fread($in, (int) min(2097152, $size - $offset));
@@ -4069,12 +4184,18 @@ class OCM_Backup
                 break;
             }
             $offset += $written;
-            One_Click_Migration::transfer_heartbeat(One_Click_Migration::$process_restore_single);
-            if (self::restore_run_ended_throttled()) {
+            One_Click_Migration::transfer_heartbeat($active_worker);
+            $ended = $is_local_worker
+                ? (class_exists(__NAMESPACE__ . '\\OCM_Local_Backup') && OCM_Local_Backup::restore_run_ended_throttled())
+                : self::restore_run_ended_throttled();
+            if ($ended) {
                 $ok = false;
                 break;
             }
-            if ($offset < $size && self::restore_worker_should_hand_over()) {
+            $hand_over = null !== $worker
+                ? (is_object($worker) && method_exists($worker, 'has_batch_clock') && $worker->has_batch_clock() && method_exists($worker, 'time_exceeded') && $worker->time_exceeded())
+                : self::restore_worker_should_hand_over();
+            if ($offset < $size && $hand_over) {
                 break;
             }
         }
@@ -4428,6 +4549,10 @@ class OCM_Backup
                     $progress_item_text['text'] .= '</br></br>' . self::support_forum_html($recovery_hint !== ''
                         ? __('Still stuck?', '1-click-migration')
                         : __('Need help?', '1-click-migration'));
+                    // The words on the card, not the raw log line: the card already
+                    // leaves out paths, IPs and status codes, and the forum is public.
+                    $shown = preg_split('/<\s*\/?\s*br\s*\/?\s*>/i', (string) $progress_item_text['text']);
+                    $progress_item_text['text'] .= '</br></br>' . self::forum_details_button_html(html_entity_decode((string) $shown[0], ENT_QUOTES, 'UTF-8'));
                     // The admin page keeps showing a failed run's outcome after a reload.
                     $progress_item_text['failed'] = true;
                 }
@@ -4458,6 +4583,49 @@ class OCM_Backup
     }
 
     /**
+     * What a forum post about a failed run needs, as plain text: the site's
+     * domain, the plugin, WordPress and PHP versions, and what the progress
+     * card says happened. The labels are English on purpose (the forum is). Never the restore code or
+     * an email address. Lines are joined with " || "; the admin script turns
+     * that into line breaks when it copies.
+     *
+     * @param string $line What the progress card says the run stopped on.
+     * @return string
+     */
+    public static function forum_details_text($line)
+    {
+        $host = (string) wp_parse_url(home_url(), PHP_URL_HOST);
+        $line = trim((string) preg_replace('/\s+/', ' ', wp_strip_all_tags((string) $line)));
+        $line = (string) preg_replace('/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i', '[email]', $line);
+        if (strlen($line) > 400) {
+            $line = rtrim(substr($line, 0, 397)) . '...';
+        }
+        $parts = array(
+            'Site: ' . ('' !== $host ? $host : '(your site\'s domain)'),
+            'Plugin: 1 Click Migration ' . One_Click_Migration::get_version(),
+            'WordPress ' . get_bloginfo('version') . ', PHP ' . PHP_VERSION,
+        );
+        if ('' !== $line) {
+            $parts[] = 'What happened: ' . $line;
+        }
+        return implode(' || ', $parts);
+    }
+
+    /**
+     * "Copy details for the forum" button for a failed run's progress card, so
+     * a forum post starts with what we need to answer it.
+     *
+     * @param string $line What the progress card says the run stopped on.
+     * @return string HTML
+     */
+    private static function forum_details_button_html($line)
+    {
+        return '<button type="button" class="ocm-btn ocm-btn-ghost ocm-copy-forum" data-ocm-copy="' . esc_attr(self::forum_details_text($line))
+            . '" data-ocm-copied="' . esc_attr__('Copied. Paste it into your forum post.', '1-click-migration') . '">'
+            . esc_html__('Copy details for the forum', '1-click-migration') . '</button>';
+    }
+
+    /**
      * Translated progress-card text, safe to send as HTML: only the inline
      * tags in UI_HTML survive. Apostrophes stay as they are.
      *
@@ -4471,8 +4639,9 @@ class OCM_Backup
 
     /**
      * @return string For the backup-completed banner when restoring this backup
-     *                has to be paid for: the price, where to pay, and the
-     *                guarantee. '' for a free backup.
+     *                has to be paid for: the price, where to pay, the guarantee
+     *                and a "Pay $9.99 now" button to this backup's pay page.
+     *                '' for a backup with no price.
      */
     private static function backup_price_banner_line()
     {
@@ -4482,9 +4651,31 @@ class OCM_Backup
         }
         return '<br>' . sprintf(
             /* translators: %s: price of the migration, e.g. $9.99 */
-            self::ui_html(__('Restoring this backup costs %s, one time. The email has the payment link. If the migration doesn\'t work, reply to that email and we\'ll fix it or refund you in full.', '1-click-migration')),
+            self::ui_html(__('Restoring this backup costs %s, one time. Pay now, or later from the link in your email. If the migration doesn\'t work, we\'ll fix it or refund you in full.', '1-click-migration')),
             '<strong>' . esc_html($price) . '</strong>'
-        );
+        ) . self::backup_pay_button_html($price, (string) get_option('ocm_bucket_id', ''));
+    }
+
+    /**
+     * "Pay $9.99 now" for the backup-completed banner: a plain link to this
+     * backup's pay page that works on its own (new tab); admin-script.js
+     * turns the click into the small PayPal window and waits for the payment.
+     * Built here rather than through ui_html(), which keeps translated text
+     * to inline tags only. '' without a price or a valid backup id.
+     *
+     * @param string $price     Price label, e.g. "$9.99".
+     * @param string $bucket_id This site's last backup (ocm_bucket_id).
+     * @return string HTML
+     */
+    public static function backup_pay_button_html($price, $bucket_id)
+    {
+        $url = OCM_Restore_Precheck::backup_pay_url($bucket_id);
+        if ('' === $url || '' === (string) $price) {
+            return '';
+        }
+        return '<br><a class="ocm-btn ocm-btn-primary ocm-banner-pay" data-ocm-pay="1" href="' . esc_url($url) . '" target="_blank" rel="noopener noreferrer">'
+            /* translators: %s: price of the migration, e.g. $9.99 */
+            . esc_html(sprintf(__('Pay %s now', '1-click-migration'), $price)) . '</a>';
     }
 
     /** @return string "<br>Backup ID: …" for the backup-completed banner, or ''. */
@@ -4678,7 +4869,7 @@ class OCM_Backup
     }
 
     /** Bytes a folder part packs (same walk as the archive, so link loops end). */
-    private static function folderSize($dir)
+    public static function folderSize($dir)
     {
         $size = 0;
         if (!is_dir($dir)) {
@@ -4702,7 +4893,58 @@ class OCM_Backup
         return sprintf("%.{$decimals}f", $size / (1024 ** $factor)) . @$sizes[$factor];
     }
 
-    private static function DBSize () {
+    /**
+     * Byte count for a person: binary units (1 MB = 1024 * 1024 bytes), about
+     * three significant digits. 973 -> "973 B", 972800 -> "950 KB",
+     * 66689433 -> "63.6 MB", 1147824760 -> "1.07 GB". ASCII only.
+     *
+     * @param int|float $bytes
+     * @return string
+     */
+    public static function readable_bytes($bytes)
+    {
+        $value = max(0, (float) $bytes);
+        $units = array('B', 'KB', 'MB', 'GB', 'TB');
+        $unit = 0;
+        while ($unit < count($units) - 1 && $value >= 1024) {
+            $value /= 1024;
+            $unit++;
+        }
+        if (0 === $unit) {
+            return (int) $value . ' B';
+        }
+        $decimals = $value >= 100 ? 0 : ($value >= 10 ? 1 : 2);
+        $text = number_format($value, $decimals, '.', '');
+        // 1023.7 KB rounds up to "1024 KB": say "1.00 MB" instead.
+        if ((float) $text >= 1024 && $unit < count($units) - 1) {
+            return '1.00 ' . $units[$unit + 1];
+        }
+        return $text . ' ' . $units[$unit];
+    }
+
+    /**
+     * The backup's uncompressed part sizes as one readable line, in the order
+     * given, "db" called "database", then the total:
+     * "database 63.6 MB, plugins 87.0 MB, themes 20.8 MB, uploads 1.07 GB, total 1.24 GB".
+     *
+     * @param array $sizes part => bytes, as check_backup_disk_space() returns them.
+     * @return string
+     */
+    public static function readable_backup_sizes(array $sizes)
+    {
+        $parts = array();
+        $total = 0;
+        foreach ($sizes as $part => $bytes) {
+            $bytes = max(0, (int) $bytes);
+            $total += $bytes;
+            $name = 'db' === $part ? 'database' : preg_replace('/[^a-z0-9_-]/', '', strtolower((string) $part));
+            $parts[] = $name . ' ' . self::readable_bytes($bytes);
+        }
+        $parts[] = 'total ' . self::readable_bytes($total);
+        return implode(', ', $parts);
+    }
+
+    public static function DBSize () {
         global $wpdb;
         $db_size_obj = $wpdb->get_results ('
         SELECT ROUND(SUM(data_length + index_length) / 1024 / 1024, 1) "db_size"
@@ -4857,7 +5099,7 @@ class OCM_Backup
         return $sizes;
     }
 
-    private static function get_free_disk_space($preferred_path)
+    public static function get_free_disk_space($preferred_path)
     {
         $paths = array($preferred_path, WP_CONTENT_DIR, ABSPATH, '.');
 
@@ -5219,7 +5461,7 @@ class OCM_Backup
      * @return bool True when $path is ABSPATH, WP_CONTENT_DIR or the document
      *              root, or inside one of them.
      */
-    private static function is_inside_web_root($path)
+    public static function is_inside_web_root($path)
     {
         $roots = array(ABSPATH, WP_CONTENT_DIR);
         if (isset($_SERVER['DOCUMENT_ROOT']) && is_string($_SERVER['DOCUMENT_ROOT']) && '' !== $_SERVER['DOCUMENT_ROOT']) {
@@ -5368,7 +5610,7 @@ class OCM_Backup
      *
      * @return string[]
      */
-    private static function existing_restore_work_paths()
+    public static function existing_restore_work_paths()
     {
         $paths = array();
         $private = self::get_private_work_dir();
@@ -5565,6 +5807,7 @@ class OCM_Backup
 
         $content_range = '';
         $ch = curl_init($url);
+        OCM_CA_Bundle::curl($ch);
         curl_setopt($ch, CURLOPT_RANGE, '0-0');
         curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
         curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true);
@@ -5678,6 +5921,7 @@ class OCM_Backup
 
         $before = $offset;
         $ch = curl_init($url);
+        OCM_CA_Bundle::curl($ch);
         curl_setopt($ch, CURLOPT_FILE, $handle);
         curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true);
         curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 15);
@@ -5840,7 +6084,7 @@ class OCM_Backup
         return $target_path;
     }
 
-    private static function probe_restore_workspace_write()
+    public static function probe_restore_workspace_write()
     {
         if (!is_dir(WP_CONTENT_DIR) || !is_writable(WP_CONTENT_DIR)) {
             return false;
@@ -8277,7 +8521,7 @@ class OCM_Backup
      * @param string $source_prefix
      * @return bool
      */
-    private static function prepare_dump_for_staging_once($filepath, $dest_prefix, $staging_prefix, $source_prefix)
+    public static function prepare_dump_for_staging_once($filepath, $dest_prefix, $staging_prefix, $source_prefix)
     {
         $pristine = $filepath . self::PRISTINE_DUMP_SUFFIX;
         self::unlink_if_present($pristine . '.tmp');
@@ -8335,7 +8579,7 @@ class OCM_Backup
      * @param string $staging_prefix
      * @return string
      */
-    private static function staged_table_for_dump($filepath, $source_prefix, $dest_prefix, $staging_prefix)
+    public static function staged_table_for_dump($filepath, $source_prefix, $dest_prefix, $staging_prefix)
     {
         $table = preg_replace('/\.sql$/i', '', basename((string) $filepath));
         foreach (array($source_prefix, $dest_prefix) as $prefix) {
@@ -8351,7 +8595,7 @@ class OCM_Backup
      * @param string $prefix
      * @return bool
      */
-    private static function staging_tables_exist(wpdb $wpdb, $prefix)
+    public static function staging_tables_exist(wpdb $wpdb, $prefix)
     {
         $tables = $wpdb->get_col('SHOW TABLES');
         foreach (is_array($tables) ? $tables : array() as $table) {
@@ -8369,7 +8613,12 @@ class OCM_Backup
      *
      * @return bool False when the gate refuses.
      */
-    private static function verify_staged_main_options(wpdb $wpdb, $source_prefix, $staging_prefix, $current_url)
+    public static function get_restore_site_url()
+    {
+        return self::$restore_site_url;
+    }
+
+    public static function verify_staged_main_options(wpdb $wpdb, $source_prefix, $staging_prefix, $current_url)
     {
         $table_name = OCM_SQL_Utils::resolve_main_options_table($wpdb, $source_prefix, $staging_prefix);
         if ($table_name === false) {
@@ -8392,7 +8641,7 @@ class OCM_Backup
         return true;
     }
 
-    private static function point_staged_options_at_destination(wpdb $wpdb, $table_name, $current_url)
+    public static function point_staged_options_at_destination(wpdb $wpdb, $table_name, $current_url)
     {
         if ($current_url === self::$restore_site_url) {
             return;
@@ -8717,7 +8966,7 @@ class OCM_Backup
         self::clear_db_import_state();
     }
 
-    private static function snapshot_destination_review_options(wpdb $wpdb)
+    public static function snapshot_destination_review_options(wpdb $wpdb)
     {
         $table = $wpdb->base_prefix . 'options';
         $rows = $wpdb->get_results(
@@ -8731,7 +8980,7 @@ class OCM_Backup
         return is_array($rows) ? $rows : array();
     }
 
-    private static function restore_destination_review_options(wpdb $wpdb, $rows)
+    public static function restore_destination_review_options(wpdb $wpdb, $rows)
     {
         if (!is_array($rows)) {
             return;
@@ -8764,9 +9013,19 @@ class OCM_Backup
         // index.php aren't treated as plugin directories.
         $plugins = glob(WP_CONTENT_DIR . '/plugins/*', GLOB_ONLYDIR) ?: array();
 
-        // Loop through the list and delete every plugin directory except 1-click-migration
+        // The folder this plugin runs from, whatever it is called (a zip from
+        // GitHub installs as "1-click-migration-master"), plus the standard one.
+        $own_folders = array('1-click-migration');
+        if (defined('OCM_MAIN_FILE')) {
+            $own_folder = dirname(plugin_basename(OCM_MAIN_FILE));
+            if ($own_folder !== '' && $own_folder !== '.' && !in_array($own_folder, $own_folders, true)) {
+                $own_folders[] = $own_folder;
+            }
+        }
+
+        // Loop through the list and delete every plugin directory except this plugin's
         foreach ($plugins as $plugin) {
-            if ($plugin === WP_CONTENT_DIR . '/plugins/1-click-migration') {
+            if (in_array(basename($plugin), $own_folders, true)) {
                 continue;
             }
 
@@ -8783,7 +9042,7 @@ class OCM_Backup
         $restore_plugins_dir = self::get_restore_work_path() . '/plugins';
         $restore_plugins = glob($restore_plugins_dir . '/*', GLOB_ONLYDIR) ?: array();
         foreach ($restore_plugins as $plugin) {
-            if ($plugin === $restore_plugins_dir . '/1-click-migration') {
+            if (in_array(basename($plugin), $own_folders, true)) {
                 continue;
             }
 
